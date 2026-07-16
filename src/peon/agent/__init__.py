@@ -2,7 +2,13 @@
 
 from .errors import AgentError
 from .loop import run_task
-from .models import AgentContext, AgentMessage, ModelResponse
+from .models import (
+	AgentContext,
+	AgentMessage,
+	ModelResponse,
+	ToolCall,
+	ToolDefinition,
+)
 from .provider import ModelProvider
 
 __all__ = [
@@ -11,5 +17,7 @@ __all__ = [
 	"AgentMessage",
 	"ModelProvider",
 	"ModelResponse",
+	"ToolCall",
+	"ToolDefinition",
 	"run_task",
 ]

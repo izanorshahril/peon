@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from io import StringIO
 from typing import Sequence
 
-from peon.agent import AgentMessage, ModelResponse
+from peon.agent import AgentMessage, ModelResponse, ToolDefinition
 from peon.app import ProviderConfig, main
 
 
@@ -15,6 +15,7 @@ class FakeProvider:
         self,
         *,
         messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
     ) -> ModelResponse:
         self.received_messages = tuple(messages)
@@ -64,3 +65,23 @@ def test_command_reports_missing_provider_without_traceback() -> None:
 
     assert result == 1
     assert "provider is not configured" in error.getvalue()
+
+
+def test_command_reports_provider_configuration_failure_without_traceback() -> None:
+    error = StringIO()
+
+    result = main(
+        [
+            "Do work.",
+            "--provider",
+            "openai-compatible",
+            "--base-url",
+            "https://example.test",
+            "--api-key",
+            "",
+        ],
+        error=error,
+    )
+
+    assert result == 1
+    assert "API key is required" in error.getvalue()

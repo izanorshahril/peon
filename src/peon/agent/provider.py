@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from typing import Protocol
 
-from .models import AgentMessage, ModelResponse
+from .models import AgentMessage, ModelResponse, ToolDefinition
 
 
 class ModelProvider(Protocol):
@@ -11,6 +11,7 @@ class ModelProvider(Protocol):
         self,
         *,
         messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
         model: str | None = None,
     ) -> ModelResponse:
         """Return one normalized model response for the current context."""
