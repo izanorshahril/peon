@@ -1,0 +1,1 @@
+"""Minimal report-generation harness."""
