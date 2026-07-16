@@ -4,10 +4,10 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** implemented
 
-- [ ] The project can be installed and invoked through the chosen `uv` workflow in a fresh user-space environment.
-- [ ] The command boundary accepts a task and provider configuration without domain-specific workflow arguments.
-- [ ] The agent loop can receive a provider dependency and compact initial context without provider-specific branching in the core.
-- [ ] Invalid command input produces a clear operator-facing error instead of a traceback-only failure.
-- [ ] A fake provider can complete a task through the public command and orchestration seams.
+- [x] The project can be installed and invoked through the chosen `uv` workflow in a fresh user-space environment.
+- [x] The command boundary accepts a task and provider configuration without domain-specific workflow arguments.
+- [x] The agent loop can receive a provider dependency and compact initial context without provider-specific branching in the core.
+- [x] Invalid command input produces a clear operator-facing error instead of a traceback-only failure.
+- [x] A fake provider can complete a task through the public command and orchestration seams.

@@ -8,6 +8,7 @@ dependencies = [
 ]
 
 [project.scripts]
+peon = "peon.app:main"
 report-harness = "report_harness.cli:main"
 
 [dependency-groups]

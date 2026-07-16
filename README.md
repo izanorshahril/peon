@@ -79,4 +79,4 @@ uv run pytest
 uv run mypy src/peon src/report_harness
 ```
 
-The current `report-harness` command still belongs to the legacy prototype. The Peon CLI belongs under `src/peon/app` and should be added when the first agent-loop slice is implemented.
+The current `report-harness` command still belongs to the legacy prototype. The `peon` command now lives under `src/peon/app` and accepts a task plus an injected provider configuration; concrete provider adapters will follow in the AI layer.
