@@ -1,0 +1,18 @@
+minimal code agent:
+https://github.com/earendil-works/pi/tree/main/packages/coding-agent (modular)
+https://github.com/huggingface/tau (teach agent)
+https://github.com/Sentdex/minion (minimal context)
+
+personal agent:
+https://github.com/NousResearch/hermes-agent (self-improve)
+https://github.com/openclaw/openclaw (communication channel)
+https://github.com/odysseus-dev/odysseus (model compare, office assistant)
+
+general agent:
+https://github.com/unslothai/unsloth (finetuning, dataset creation, heal toolcall, inference setting, RAG)
+https://github.com/aaif-goose/goose (data analysis, autovisualizer)
+https://github.com/open-webui/open-webui (image generation, comfyUI)
+
+full-fledge code agent:
+https://github.com/zed-industries/zed (ide)
+https://github.com/anomalyco/opencode/ (terminal)
