@@ -5,4 +5,22 @@ dist/
 __pycache__/
 *.py[cod]
 .agents/
-# .scratch/
+.scratch/
+peon_output/
+tau_output/
+pi_output/
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+*.secret
+*.secrets
+*.token
+*.tokens
+*.key
+*.pem
+*.credential
+*.credentials
+provider.json
+provider-*.json

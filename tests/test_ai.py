@@ -14,8 +14,9 @@ from peon.ai import (
 
 
 class StubTransport:
-    def __init__(self, response: object) -> None:
+    def __init__(self, response: object, get_response: object | None = None) -> None:
         self.response = response
+        self.get_response = get_response
         self.url: str | None = None
         self.headers: Mapping[str, str] | None = None
         self.payload: Mapping[str, object] | None = None
@@ -32,6 +33,17 @@ class StubTransport:
         if isinstance(self.response, Exception):
             raise self.response
         return cast(Mapping[str, object], self.response)
+
+    def get(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+    ) -> Mapping[str, object]:
+        self.url = url
+        self.headers = headers
+        if isinstance(self.get_response, Exception):
+            raise self.get_response
+        return cast(Mapping[str, object], self.get_response)
 
 
 def test_openai_compatible_provider_normalizes_request_and_text_response() -> None:
@@ -79,6 +91,47 @@ def test_openai_compatible_provider_normalizes_request_and_text_response() -> No
             },
         }
     ]
+
+
+def test_openai_compatible_provider_allows_optional_api_key() -> None:
+    transport = StubTransport(
+        {"choices": [{"message": {"content": "Local response."}}]}
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="http://localhost:11434/v1",
+        api_key=None,
+        model="local-model",
+        transport=transport,
+    )
+
+    response = provider.complete(messages=[])
+
+    assert response == ModelResponse(content="Local response.")
+    assert transport.headers == {"Content-Type": "application/json"}
+
+
+def test_openai_compatible_provider_discovers_available_models() -> None:
+    transport = StubTransport(
+        {},
+        get_response={
+            "data": [
+                {"id": "local-small"},
+                {"id": "local-large"},
+            ]
+        },
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="http://localhost:11434/v1/",
+        api_key=None,
+        model=None,
+        transport=transport,
+    )
+
+    models = provider.list_models()
+
+    assert models == ("local-small", "local-large")
+    assert transport.url == "http://localhost:11434/v1/models"
+    assert transport.headers == {}
 
 
 def test_openai_compatible_provider_normalizes_tool_call_response() -> None:
@@ -201,15 +254,6 @@ def test_github_copilot_provider_keeps_login_token_inside_adapter(
                 base_url="", api_key="key", model="model", transport=transport
             ),
             "base URL is required",
-        ),
-        (
-            lambda transport: OpenAICompatibleProvider(
-                base_url="https://example.test",
-                api_key="",
-                model="model",
-                transport=transport,
-            ),
-            "API key is required",
         ),
     ],
 )

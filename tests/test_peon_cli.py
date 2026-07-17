@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from io import StringIO
 from typing import Sequence
 
+import pytest
+
 from peon.agent import AgentMessage, ModelResponse, ToolDefinition
 from peon.app import ProviderConfig, main
 
@@ -75,6 +77,64 @@ def test_command_supports_explicit_tui_flag() -> None:
     assert len(calls) == 1
 
 
+def test_command_passes_tui_transcript_layout_options() -> None:
+    calls: list[dict[str, object]] = []
+
+    def tui_runner(**kwargs) -> int:
+        calls.append(kwargs)
+        return 0
+
+    result = main(
+        [
+            "--tui",
+            "--user-top-blank-lines",
+            "2",
+            "--user-bottom-blank-lines",
+            "3",
+            "--message-left-padding",
+            "4",
+        ],
+        tui_runner=tui_runner,
+    )
+
+    assert result == 0
+    assert calls[0]["user_top_blank_lines"] == 2
+    assert calls[0]["user_bottom_blank_lines"] == 3
+    assert calls[0]["message_left_padding"] == 4
+
+
+def test_command_supports_explicit_interactive_modes() -> None:
+    calls: list[dict[str, object]] = []
+
+    def tui_runner(**kwargs) -> int:
+        calls.append(kwargs)
+        return 0
+
+    result = main(["--mode", "minimal"], tui_runner=tui_runner)
+
+    assert result == 0
+    assert len(calls) == 1
+
+
+def test_command_requires_task_for_non_interactive_mode() -> None:
+    error = StringIO()
+
+    result = main(["--mode", "non-interactive"], error=error)
+
+    assert result == 1
+    assert "task is required" in error.getvalue()
+
+
+@pytest.mark.parametrize("mode", ["fullscreen", "webapp"])
+def test_command_reports_reserved_modes_as_unavailable(mode: str) -> None:
+    error = StringIO()
+
+    result = main(["--mode", mode], error=error)
+
+    assert result == 1
+    assert f"{mode} mode is not available yet" in error.getvalue()
+
+
 def test_command_rejects_task_with_tui_flag() -> None:
     error = StringIO()
 
@@ -101,13 +161,9 @@ def test_command_reports_provider_configuration_failure_without_traceback() -> N
             "Do work.",
             "--provider",
             "openai-compatible",
-            "--base-url",
-            "https://example.test",
-            "--api-key",
-            "",
         ],
         error=error,
     )
 
     assert result == 1
-    assert "API key is required" in error.getvalue()
+    assert "requires --base-url" in error.getvalue()

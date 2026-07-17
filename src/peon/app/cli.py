@@ -4,7 +4,7 @@ import argparse
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TextIO
+from typing import Literal, TextIO
 
 from peon.agent import AgentError, ModelProvider, ToolCall, run_task
 from peon.ai import (
@@ -21,9 +21,11 @@ class ProviderConfig:
     base_url: str | None = None
     api_key: str | None = None
     copilot_token: str | None = None
+    models: tuple[str, ...] = ()
 
 
 ProviderFactory = Callable[[ProviderConfig], ModelProvider]
+InteractionMode = Literal["non-interactive", "minimal", "fullscreen", "webapp"]
 
 
 class CommandError(Exception):
@@ -46,6 +48,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Start an interactive session with in-session provider setup",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("non-interactive", "minimal", "fullscreen", "webapp"),
+        help="Interaction level; defaults to non-interactive with a task, minimal without one",
+    )
+    parser.add_argument(
+        "--user-top-blank-lines",
+        type=int,
+        default=1,
+        help="Blank rows above each user message in the TUI",
+    )
+    parser.add_argument(
+        "--user-bottom-blank-lines",
+        type=int,
+        default=1,
+        help="Blank rows below each user message in the TUI",
+    )
+    parser.add_argument(
+        "--message-left-padding",
+        type=int,
+        default=1,
+        help="Visual left padding for user and assistant messages in the TUI",
+    )
     return parser
 
 
@@ -63,16 +88,27 @@ def main(
     try:
         args = parser.parse_args(argv)
         task = " ".join(args.task).strip()
-        if args.tui or not task:
-            if args.tui and task:
-                raise CommandError("--tui does not accept a task argument")
+        mode: InteractionMode = args.mode or (
+            "minimal" if args.tui or not task else "non-interactive"
+        )
+        if mode == "non-interactive":
+            if not task:
+                raise CommandError("task is required")
+        elif mode == "minimal":
+            if task:
+                raise CommandError("minimal mode does not accept a task argument")
             from .tui import run_tui
 
             return (tui_runner or run_tui)(
                 provider_factory=provider_factory,
                 output=output,
                 error=error,
+                user_top_blank_lines=args.user_top_blank_lines,
+                user_bottom_blank_lines=args.user_bottom_blank_lines,
+                message_left_padding=args.message_left_padding,
             )
+        else:
+            raise CommandError(f"{mode} mode is not available yet")
         if not args.provider:
             raise CommandError("provider is not configured")
 
@@ -101,14 +137,12 @@ def main(
 def create_provider(config: ProviderConfig) -> ModelProvider:
     """Create a provider adapter from generic command configuration."""
     if config.name == "openai-compatible":
-        if config.base_url is None or config.api_key is None:
-            raise CommandError(
-                "openai-compatible provider requires --base-url and --api-key"
-            )
+        if config.base_url is None:
+            raise CommandError("openai-compatible provider requires --base-url")
         return OpenAICompatibleProvider(
             base_url=config.base_url,
             api_key=config.api_key,
-            model=config.model or "gpt-4o",
+            model=config.model,
         )
     if config.name == "github-copilot":
         return GitHubCopilotProvider(

@@ -23,6 +23,13 @@ class JsonTransport(Protocol):
     ) -> JsonObject:
         """Send one JSON request and return a JSON object response."""
 
+    def get(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+    ) -> JsonObject:
+        """Send one JSON GET request and return a JSON object response."""
+
 
 class UrllibJsonTransport:
     """Standard-library JSON POST transport for provider adapters."""
@@ -48,6 +55,21 @@ class UrllibJsonTransport:
             raise ProviderError("provider response must be a JSON object")
         return result
 
+    def get(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+    ) -> JsonObject:
+        try:
+            request = Request(url, headers=dict(headers), method="GET")
+            with urlopen(request, timeout=60) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, OSError, ValueError) as error:
+            raise ProviderError(f"provider request failed: {url}") from error
+        if not isinstance(result, Mapping):
+            raise ProviderError("provider response must be a JSON object")
+        return result
+
 
 class OpenAICompatibleProvider:
     """Use an OpenAI-compatible chat-completions endpoint."""
@@ -56,20 +78,22 @@ class OpenAICompatibleProvider:
         self,
         *,
         base_url: str,
-        api_key: str,
-        model: str = "gpt-4o",
+        api_key: str | None = None,
+        model: str | None = "gpt-4o",
         transport: JsonTransport | None = None,
     ) -> None:
         if not base_url.strip():
             raise ProviderError("provider base URL is required")
-        if not api_key.strip():
-            raise ProviderError("provider API key is required")
         self._client = _ChatCompletionsClient(
             base_url=base_url,
             token=api_key,
             model=model,
             transport=transport or UrllibJsonTransport(),
         )
+
+    def list_models(self) -> tuple[str, ...]:
+        """Return model IDs exposed by the OpenAI-compatible endpoint."""
+        return self._client.list_models()
 
     def complete(
         self,
@@ -129,16 +153,39 @@ class _ChatCompletionsClient:
         self,
         *,
         base_url: str,
-        token: str,
-        model: str,
+        token: str | None,
+        model: str | None,
         transport: JsonTransport,
     ) -> None:
-        if not model.strip():
+        if model is not None and not model.strip():
             raise ProviderError("provider model is required")
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._model = model
         self._transport = transport
+
+    def list_models(self) -> tuple[str, ...]:
+        try:
+            result = self._transport.get(
+                f"{self._base_url}/models",
+                self._headers(content_type=False),
+            )
+        except ProviderError:
+            raise
+        except Exception as error:
+            raise ProviderError("provider model discovery failed") from error
+        raw_models = result.get("data")
+        if not isinstance(raw_models, list):
+            raise ProviderError("provider model response did not contain data")
+        models: list[str] = []
+        for raw_model in raw_models:
+            if not isinstance(raw_model, Mapping):
+                raise ProviderError("provider model response contained an invalid model")
+            model_id = raw_model.get("id")
+            if not isinstance(model_id, str) or not model_id.strip():
+                raise ProviderError("provider model response contained an invalid model ID")
+            models.append(model_id)
+        return tuple(models)
 
     def complete(
         self,
@@ -147,8 +194,11 @@ class _ChatCompletionsClient:
         tools: Sequence[ToolDefinition],
         model: str | None,
     ) -> ModelResponse:
+        selected_model = model or self._model
+        if not selected_model or not selected_model.strip():
+            raise ProviderError("provider model is required")
         payload: dict[str, object] = {
-            "model": model or self._model,
+            "model": selected_model,
             "messages": [_serialize_message(message) for message in messages],
         }
         if tools:
@@ -167,10 +217,7 @@ class _ChatCompletionsClient:
         try:
             result = self._transport.post(
                 f"{self._base_url}/chat/completions",
-                {
-                    "Authorization": f"Bearer {self._token}",
-                    "Content-Type": "application/json",
-                },
+                self._headers(),
                 payload,
             )
         except ProviderError:
@@ -180,6 +227,14 @@ class _ChatCompletionsClient:
         if not isinstance(result, Mapping):
             raise ProviderError("provider response must be a JSON object")
         return _parse_response(result)
+
+    def _headers(self, *, content_type: bool = True) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if content_type:
+            headers["Content-Type"] = "application/json"
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        return headers
 
 
 def _serialize_message(message: AgentMessage) -> dict[str, object]:

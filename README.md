@@ -145,7 +145,22 @@ uv run mypy src/peon src/report_harness
 
 The current `report-harness` command still belongs to the legacy prototype. The `peon` command now lives under `src/peon/app` and accepts a task plus an injected provider configuration; concrete provider adapters will follow in the AI layer.
 
-## Interactive mode
+## Interaction levels
+
+Peon exposes four interaction levels through `--mode`:
+
+| Level | Mode | Availability | Behavior |
+| --- | --- | --- | --- |
+| 1 | `non-interactive` | Available | Run one task for scripts and automation. |
+| 2 | `minimal` | Available | Run a small interactive terminal session. |
+| 3 | `fullscreen` | Reserved | Not implemented yet. |
+| 4 | `webapp` | Reserved | Not implemented yet. |
+
+The default is level 1 when a task is supplied and level 2 when no task is
+supplied. `--tui` remains an alias for `--mode minimal`. Levels 3 and 4
+currently report that the requested mode is unavailable.
+
+## Minimal interactive mode
 
 Run `peon` without a task, or pass `--tui`, to configure a provider inside an
 interactive terminal session:
@@ -154,15 +169,71 @@ interactive terminal session:
 uv run peon
 ```
 
-The session supports OpenAI-compatible endpoints and GitHub Copilot. API keys
-and tokens are requested without echoing them. Multiple prompts share one
-compact conversation context, and the application-owned sample tool is
-available to the agent.
+The session presents providers as a numbered selection. It then discovers
+OpenAI-compatible models through `GET /models`; one detected model is selected
+automatically, while multiple models are shown as a numbered list and require
+one default selection. The complete detected model list is saved for later
+switching. API keys and tokens are requested without echoing them.
+OpenAI-compatible API keys are optional, so local unauthenticated endpoints are
+supported. Multiple prompts share one compact in-memory conversation context,
+and the application-owned sample tool is available to the agent.
+
+After a provider is configured successfully, Peon saves the provider, endpoint,
+model, and credential in a user-local JSON profile and reuses it on the next
+run. Use `/provider` to configure a replacement; the new profile is saved after
+successful setup. Set `PEON_CONFIG_FILE` to choose a different profile path.
+Treat this file as sensitive because it can contain an API key or Copilot token.
+
+Level 2 uses a minimal Textual terminal renderer shaped like the vanilla
+Pi-agent interaction. Startup guidance is plain text, the conversation is the
+main scrollable surface, and the composer stays at the bottom without a
+fullscreen header or footer chrome. Conversation text is selectable for
+copying with either the normal selection shortcut or right-click. Selection is
+line-based and can span multiple requests and responses. New output is
+anchored immediately above the composer and the transcript scrolls upward as
+it grows. User messages use a gray block background without a left symbol or
+italic styling; thinking and system text is muted and italic, while assistant
+responses have no additional prefix and are rendered as Markdown. The header
+title is light blue. While a request is running, an animated spinner shows
+`Work...work!`; the status text is configurable. User blocks support
+configurable blank lines above and below user requests and assistant responses
+plus configurable visual left padding for user and assistant text; the
+defaults match Pi-like spacing. Assistant spacer bars use the current black
+theme background.
+The TUI flags `--user-top-blank-lines`, `--user-bottom-blank-lines`, and
+`--message-left-padding` adjust those values. If focus is anywhere outside the composer, typing automatically
+returns focus to it and preserves the first character typed. Successful
+session commands such as `/clear` leave a light-blue checkmark confirmation
+in the transcript. Slash-command suggestions appear above the composer as
+soon as a command prefix is typed; the first matching command is highlighted
+as the candidate that will run. Press `Esc` while a provider, model, or logout
+picker is open to cancel the selection and return to the composer.
+
+`Ctrl+C` asks for confirmation before exiting, so an accidental keypress does
+not interrupt an active chat or discard a draft prompt. `Ctrl+D` and `/quit`
+remain direct exit commands. Switching models updates the compact status line
+without adding provider or model trace text to the conversation.
+
+Peon can retain more than one provider profile. When multiple profiles are
+saved, startup presents a provider picker. `/provider` adds or replaces a
+profile, `/model` switches among the models detected for the active profile,
+and `/logout` presents a picker that removes only the selected provider. If the
+active provider is removed, Peon switches to another saved profile or starts
+provider setup when none remain.
+
+The footer currently shows the working directory, provider, model, context
+message count, and `n/a` for effort and token usage. The provider-neutral
+`ModelResponse` contract does not expose usage metadata yet. Session context is
+discarded when Peon exits. A filesystem/read tool and persistent session
+history are not included yet.
 
 Interactive commands:
 
 ```text
 /provider  configure or replace the active provider
+/models    list detected models
+/model     switch the active model
+/logout    remove one saved provider
 /tools     list registered tools
 /clear     clear the conversation context
 /help      show commands
@@ -177,4 +248,13 @@ uv run peon "Summarize the repository." `
   --base-url "https://api.openai.com/v1" `
   --api-key $env:OPENAI_API_KEY `
   --model "gpt-4o-mini"
+```
+
+For a local OpenAI-compatible endpoint, omit `--api-key`:
+
+```powershell
+uv run peon "Summarize the repository." `
+  --provider openai-compatible `
+  --base-url "http://localhost:11434/v1" `
+  --model "local-model"
 ```
