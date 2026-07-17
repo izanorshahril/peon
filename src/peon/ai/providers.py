@@ -149,10 +149,7 @@ class _ChatCompletionsClient:
     ) -> ModelResponse:
         payload: dict[str, object] = {
             "model": model or self._model,
-            "messages": [
-                {"role": message.role, "content": message.content}
-                for message in messages
-            ],
+            "messages": [_serialize_message(message) for message in messages],
         }
         if tools:
             payload["tools"] = [
@@ -183,6 +180,34 @@ class _ChatCompletionsClient:
         if not isinstance(result, Mapping):
             raise ProviderError("provider response must be a JSON object")
         return _parse_response(result)
+
+
+def _serialize_message(message: AgentMessage) -> dict[str, object]:
+    raw_tool_call = getattr(message, "tool_call", None)
+    if raw_tool_call is not None:
+        serialized_tool_call: dict[str, object] = {
+            "type": "function",
+            "function": {
+                "name": raw_tool_call.name,
+                "arguments": json.dumps(dict(raw_tool_call.arguments)),
+            },
+        }
+        if raw_tool_call.call_id is not None:
+            serialized_tool_call["id"] = raw_tool_call.call_id
+        return {
+            "role": message.role,
+            "content": message.content or None,
+            "tool_calls": [serialized_tool_call],
+        }
+
+    serialized: dict[str, object] = {
+        "role": message.role,
+        "content": message.content,
+    }
+    tool_call_id = getattr(message, "tool_call_id", None)
+    if tool_call_id is not None:
+        serialized["tool_call_id"] = tool_call_id
+    return serialized
 
 
 def _parse_response(result: JsonObject) -> ModelResponse:

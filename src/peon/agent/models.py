@@ -1,5 +1,7 @@
 """Provider-neutral values used by the agent runtime."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from collections.abc import Mapping
 from typing import Literal
@@ -11,6 +13,8 @@ MessageRole = Literal["system", "user", "assistant", "tool"]
 class AgentMessage:
     role: MessageRole
     content: str
+    tool_call: ToolCall | None = None
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

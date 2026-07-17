@@ -4,7 +4,7 @@ from typing import cast
 
 import pytest
 
-from peon.agent import AgentMessage, ModelResponse, ToolDefinition
+from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
 from peon.ai import (
     GitHubCopilotProvider,
     OpenAICompatibleProvider,
@@ -116,6 +116,62 @@ def test_openai_compatible_provider_normalizes_tool_call_response() -> None:
     assert response.tool_call.name == "lookup"
     assert response.tool_call.arguments == {"key": "owner"}
     assert response.tool_call.call_id == "call-1"
+
+
+def test_openai_compatible_provider_serializes_tool_continuation_messages() -> None:
+    transport = StubTransport(
+        {"choices": [{"message": {"content": "The owner is Peon."}}]}
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://example.test",
+        api_key="key",
+        model="model",
+        transport=transport,
+    )
+
+    provider.complete(
+        messages=[
+            AgentMessage(role="user", content="Who owns the project?"),
+            AgentMessage(
+                role="assistant",
+                content="",
+                tool_call=ToolCall(
+                    name="lookup",
+                    arguments={"key": "owner"},
+                    call_id="call-1",
+                ),
+            ),
+            AgentMessage(
+                role="tool",
+                content="owner:owner",
+                tool_call_id="call-1",
+            ),
+        ]
+    )
+
+    assert transport.payload is not None
+    assert transport.payload["messages"] == [
+        {"role": "user", "content": "Who owns the project?"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": '{"key": "owner"}',
+                    },
+                    "id": "call-1",
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": "owner:owner",
+            "tool_call_id": "call-1",
+        },
+    ]
 
 
 def test_github_copilot_provider_keeps_login_token_inside_adapter(

@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Sequence
 
+import pytest
+
 from peon.agent import (
     AgentContext,
     AgentMessage,
@@ -9,6 +11,7 @@ from peon.agent import (
     ToolDefinition,
     run_task,
 )
+from peon.extensions import ExtensionRegistry
 from peon.agent import AgentError
 
 
@@ -43,6 +46,35 @@ class FailingProvider:
         model: str | None = None,
     ) -> ModelResponse:
         raise RuntimeError("connection refused")
+
+
+@dataclass
+class ScriptedProvider:
+    responses: list[ModelResponse]
+    received_messages: list[tuple[AgentMessage, ...]]
+    received_tools: list[tuple[ToolDefinition, ...]]
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+    ) -> ModelResponse:
+        self.received_messages.append(tuple(messages))
+        self.received_tools.append(tuple(tools))
+        return self.responses.pop(0)
+
+
+def build_lookup_registry() -> ExtensionRegistry:
+    registry = ExtensionRegistry()
+    registry.register_tool(
+        name="lookup",
+        description="Look up a value.",
+        parameters={"type": "object"},
+        handler=lambda arguments: f"owner:{arguments['key']}",
+    )
+    return registry
 
 
 def test_run_task_forwards_compact_context_and_returns_final_response() -> None:
@@ -104,3 +136,152 @@ def test_run_task_exposes_provider_failure_as_agent_error() -> None:
         assert str(error) == "provider request failed: connection refused"
     else:
         raise AssertionError("run_task should report provider failures")
+
+
+def test_run_task_executes_tool_and_continues_until_final_response() -> None:
+    provider = ScriptedProvider(
+        responses=[
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="lookup",
+                    arguments={"key": "owner"},
+                    call_id="call-1",
+                )
+            ),
+            ModelResponse(content="The owner is Peon."),
+        ],
+        received_messages=[],
+        received_tools=[],
+    )
+    registry = build_lookup_registry()
+    context = AgentContext()
+
+    result = run_task(
+        "Who owns the project?",
+        provider,
+        context=context,
+        executor=registry,
+    )
+
+    assert result == "The owner is Peon."
+    assert provider.received_tools == [registry.tools, registry.tools]
+    assert provider.received_messages[1] == (
+        AgentMessage(role="user", content="Who owns the project?"),
+        AgentMessage(
+            role="assistant",
+            content="",
+            tool_call=ToolCall(
+                name="lookup",
+                arguments={"key": "owner"},
+                call_id="call-1",
+            ),
+        ),
+        AgentMessage(
+            role="tool",
+            content="owner:owner",
+            tool_call_id="call-1",
+        ),
+    )
+    assert context.messages == list(provider.received_messages[1]) + [
+        AgentMessage(role="assistant", content="The owner is Peon."),
+    ]
+
+
+def test_run_task_forwards_executor_tools_to_provider() -> None:
+    provider = ScriptedProvider(
+        responses=[ModelResponse(content="Done.")],
+        received_messages=[],
+        received_tools=[],
+    )
+    registry = build_lookup_registry()
+
+    run_task("Look up the owner.", provider, executor=registry)
+
+    assert provider.received_tools == [registry.tools]
+
+
+def test_run_task_reports_unknown_tool_failures() -> None:
+    provider = ScriptedProvider(
+        responses=[
+            ModelResponse(
+                tool_call=ToolCall(name="missing", arguments={})
+            )
+        ],
+        received_messages=[],
+        received_tools=[],
+    )
+
+    with pytest.raises(AgentError, match="tool 'missing'.*not registered"):
+        run_task("Use the missing tool.", provider, executor=build_lookup_registry())
+
+
+def test_run_task_rejects_invalid_tool_arguments() -> None:
+    provider = ScriptedProvider(
+        responses=[
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="lookup",
+                    arguments=[],  # type: ignore[arg-type]
+                )
+            )
+        ],
+        received_messages=[],
+        received_tools=[],
+    )
+
+    with pytest.raises(AgentError, match="arguments must be an object"):
+        run_task("Look up the owner.", provider, executor=build_lookup_registry())
+
+
+def test_run_task_reports_continuation_provider_failures() -> None:
+    class ContinuationFailureProvider(ScriptedProvider):
+        def complete(
+            self,
+            *,
+            messages: Sequence[AgentMessage],
+            tools: Sequence[ToolDefinition] = (),
+            model: str | None = None,
+        ) -> ModelResponse:
+            self.received_messages.append(tuple(messages))
+            if len(self.received_messages) == 1:
+                return ModelResponse(
+                    tool_call=ToolCall(name="lookup", arguments={"key": "owner"})
+                )
+            raise RuntimeError("continuation unavailable")
+
+    provider = ContinuationFailureProvider(
+        responses=[], received_messages=[], received_tools=[]
+    )
+
+    with pytest.raises(
+        AgentError,
+        match="provider request failed: continuation unavailable",
+    ):
+        run_task("Look up the owner.", provider, executor=build_lookup_registry())
+
+
+def test_run_task_reports_exhausted_tool_call_limit() -> None:
+    provider = ScriptedProvider(
+        responses=[
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="lookup", arguments={"key": "owner"}
+                )
+            ),
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="lookup", arguments={"key": "owner"}
+                )
+            ),
+        ],
+        received_messages=[],
+        received_tools=[],
+    )
+
+    with pytest.raises(AgentError, match="maximum tool-call limit exceeded"):
+        run_task(
+            "Keep looking.",
+            provider,
+            executor=build_lookup_registry(),
+            max_tool_calls=1,
+        )
