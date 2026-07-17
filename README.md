@@ -49,6 +49,22 @@ app -> ai --------> agent
 
 `agent` stays portable and imports neither `app` nor `extensions`. `ai` contains concrete provider adapters and implements the provider interface consumed by `agent`; `extensions` composes agent tools and hooks without putting domain behavior into the runtime. Keep `core` as a conceptual term, not a top-level package name: `agent` says what the module does and matches Tau's `tau_agent` and Pi's `agent` packages.
 
+Extensions currently use an in-process registry:
+
+```python
+from peon.extensions import ExtensionRegistry
+
+registry = ExtensionRegistry()
+registry.register_tool(
+  name="lookup",
+  description="Look up a value.",
+  parameters={"type": "object"},
+  handler=lambda arguments: "value",
+)
+```
+
+Skills can register related tools through `register_skill`, and integrations can subscribe to named lifecycle events with `on`. Discovery, packaging, and persistence are deliberately deferred; an external application owns how it constructs and supplies the registry.
+
 ## Project Structure
 
 ```text
