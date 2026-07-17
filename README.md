@@ -65,6 +65,54 @@ registry.register_tool(
 
 Skills can register related tools through `register_skill`, and integrations can subscribe to named lifecycle events with `on`. Discovery, packaging, and persistence are deliberately deferred; an external application owns how it constructs and supplies the registry.
 
+### External integration
+
+An application wraps its own capability by registering a provider-neutral handler
+on an application-owned registry, then passes that registry to the agent loop:
+
+```python
+from peon.agent import run_task
+from peon.ai import OpenAICompatibleProvider
+from peon.extensions import ExtensionRegistry
+
+registry = ExtensionRegistry()
+registry.register_tool(
+  name="lookup_customer",
+  description="Look up a customer in the application's data store.",
+  parameters={
+    "type": "object",
+    "required": ["customer_id"],
+    "properties": {"customer_id": {"type": "string"}},
+  },
+  handler=lookup_customer,
+)
+
+response = run_task(
+  "Summarize customer C-42.",
+  provider,
+  executor=registry,
+)
+```
+
+The handler and its dependencies stay in the external application. A group of
+related handlers can be packaged as a skill with `register_skill`; a single
+capability can be registered directly as a tool. The registry supplies tool
+definitions to the provider and executes requested calls during continuation.
+
+The existing report-building application's Excel reader/writer is a future
+integration candidate. A separate application can wrap that capability as a
+tool or skill using the same contract, but Peon's core must not import the
+report application, workbook schemas, image-processing code, or its dependencies.
+
+For a runnable, domain-neutral example, register the built-in sample tool:
+
+```python
+from peon.extensions import ExtensionRegistry, register_sample_tools
+
+registry = ExtensionRegistry()
+register_sample_tools(registry)
+```
+
 ## Project Structure
 
 ```text

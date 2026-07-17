@@ -7,6 +7,7 @@ from .registry import (
 	SkillInstaller,
 	ToolHandler,
 )
+from .sample import register_sample_tools
 
 __all__ = [
 	"ExtensionError",
@@ -14,4 +15,5 @@ __all__ = [
 	"LifecycleHandler",
 	"SkillInstaller",
 	"ToolHandler",
+	"register_sample_tools",
 ]

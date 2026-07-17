@@ -1,7 +1,57 @@
 import pytest
+from collections.abc import Sequence
 
-from peon.agent import ToolDefinition
-from peon.extensions import ExtensionError, ExtensionRegistry
+from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition, run_task
+from peon.extensions import (
+    ExtensionError,
+    ExtensionRegistry,
+    register_sample_tools,
+)
+
+
+class ScriptedProvider:
+    def __init__(self, responses: list[ModelResponse]) -> None:
+        self.responses = responses
+        self.messages: list[tuple[AgentMessage, ...]] = []
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+    ) -> ModelResponse:
+        self.messages.append(tuple(messages))
+        return self.responses.pop(0)
+
+
+def test_sample_extension_runs_through_task_continuation_path() -> None:
+    registry = ExtensionRegistry()
+    register_sample_tools(registry)
+    provider = ScriptedProvider(
+        [
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="word_count",
+                    arguments={"text": "Peon stays small."},
+                    call_id="call-1",
+                )
+            ),
+            ModelResponse(content="The text contains 3 words."),
+        ]
+    )
+
+    result = run_task(
+        "How many words are in the sample?",
+        provider,
+        executor=registry,
+    )
+
+    assert result == "The text contains 3 words."
+    assert registry.invoke("word_count", {"text": "Peon stays small."}) == (
+        "word count: 3"
+    )
+    assert provider.messages[1][-1].content == "word count: 3"
 
 
 def test_registry_registers_and_invokes_a_tool_through_public_seam() -> None:
