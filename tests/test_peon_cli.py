@@ -50,12 +50,38 @@ def test_command_runs_task_through_injected_provider_factory() -> None:
 
 
 def test_command_reports_missing_task_without_traceback() -> None:
+    calls: list[dict[str, object]] = []
+
+    def tui_runner(**kwargs) -> int:
+        calls.append(kwargs)
+        return 0
+
+    result = main([], tui_runner=tui_runner)
+
+    assert result == 0
+    assert len(calls) == 1
+
+
+def test_command_supports_explicit_tui_flag() -> None:
+    calls: list[dict[str, object]] = []
+
+    def tui_runner(**kwargs) -> int:
+        calls.append(kwargs)
+        return 0
+
+    result = main(["--tui"], tui_runner=tui_runner)
+
+    assert result == 0
+    assert len(calls) == 1
+
+
+def test_command_rejects_task_with_tui_flag() -> None:
     error = StringIO()
 
-    result = main([], error=error)
+    result = main(["Do work.", "--tui"], error=error)
 
     assert result == 1
-    assert "task is required" in error.getvalue()
+    assert "does not accept a task" in error.getvalue()
 
 
 def test_command_reports_missing_provider_without_traceback() -> None:

@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", help="OpenAI-compatible provider base URL")
     parser.add_argument("--api-key", help="OpenAI-compatible provider API key")
     parser.add_argument("--copilot-token", help="GitHub Copilot login token")
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Start an interactive session with in-session provider setup",
+    )
     return parser
 
 
@@ -48,6 +53,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     provider_factory: ProviderFactory | None = None,
+    tui_runner: Callable[..., int] | None = None,
     output: TextIO | None = None,
     error: TextIO | None = None,
 ) -> int:
@@ -57,8 +63,16 @@ def main(
     try:
         args = parser.parse_args(argv)
         task = " ".join(args.task).strip()
-        if not task:
-            raise CommandError("task is required")
+        if args.tui or not task:
+            if args.tui and task:
+                raise CommandError("--tui does not accept a task argument")
+            from .tui import run_tui
+
+            return (tui_runner or run_tui)(
+                provider_factory=provider_factory,
+                output=output,
+                error=error,
+            )
         if not args.provider:
             raise CommandError("provider is not configured")
 

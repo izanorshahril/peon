@@ -144,3 +144,37 @@ uv run mypy src/peon src/report_harness
 ```
 
 The current `report-harness` command still belongs to the legacy prototype. The `peon` command now lives under `src/peon/app` and accepts a task plus an injected provider configuration; concrete provider adapters will follow in the AI layer.
+
+## Interactive mode
+
+Run `peon` without a task, or pass `--tui`, to configure a provider inside an
+interactive terminal session:
+
+```powershell
+uv run peon
+```
+
+The session supports OpenAI-compatible endpoints and GitHub Copilot. API keys
+and tokens are requested without echoing them. Multiple prompts share one
+compact conversation context, and the application-owned sample tool is
+available to the agent.
+
+Interactive commands:
+
+```text
+/provider  configure or replace the active provider
+/tools     list registered tools
+/clear     clear the conversation context
+/help      show commands
+/quit      exit Peon
+```
+
+One-shot requests remain available for scripts and automation:
+
+```powershell
+uv run peon "Summarize the repository." `
+  --provider openai-compatible `
+  --base-url "https://api.openai.com/v1" `
+  --api-key $env:OPENAI_API_KEY `
+  --model "gpt-4o-mini"
+```
