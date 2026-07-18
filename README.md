@@ -202,14 +202,19 @@ theme background.
 The TUI flags `--user-top-blank-lines`, `--user-bottom-blank-lines`, and
 `--message-left-padding` adjust those values. `/settings` also persists message
 spacing, left padding, application and chat backgrounds, user and assistant
-colors, and normal/bold/italic text formatting. Font family and font size remain
+colors, selected command text color, and normal/bold/italic text formatting.
+The selected command color defaults to black on the existing grey highlight.
+Font family and font size remain
 terminal-emulator settings because Textual cannot control them reliably. If focus is anywhere outside the composer, typing automatically
 returns focus to it and preserves the first character typed. Successful
 session commands such as `/new` leave a light-blue checkmark confirmation
 in the transcript. Slash-command suggestions appear above the composer as
-soon as a command prefix is typed; the first matching command is highlighted
-as the candidate that will run. Press `Esc` while a provider, model, or logout
-picker is open to cancel the selection and return to the composer.
+soon as a command prefix is typed; the selected row uses an arrow and the same
+highlight treatment as a picker. The palette shows the selected position and
+total result count, and its footer shows the available keyboard actions. Press
+`Esc` while a picker is open returns to the previous menu without changing the
+current selection. Hold `Esc` until key repeat begins to close the whole
+selection.
 
 `Ctrl+C` asks for confirmation before exiting, so an accidental keypress does
 not interrupt an active chat or discard a draft prompt. `Ctrl+D` and `/quit`
@@ -232,7 +237,17 @@ OpenAI names such as `reasoning_effort` and `max_completion_tokens` on the left
 and the configured corporate field name on the right. In Textual, Left/Right
 changes reasoning, booleans, token counts, temperature, spacing, and text
 format in place; Enter cycles choices or toggles booleans. Values that require
-typing return to the same list after they are saved.
+typing return to the same list after they are saved. Every Textual picker has a
+search line, unnumbered arrow-led rows, a current/total count, and a keyboard
+hint footer. Up/Down and Enter remain owned by the active picker even if focus
+has moved away from its search field, so navigation cannot accidentally edit a
+setting before Enter is pressed.
+
+Skill metadata discovered from `.agents/skills` and skills registered by
+extensions appear in the same command surface. `/skills` lists both kinds, and
+`/skill:<name>` appears in slash search for each one. Registered skills are
+owned by the extension registry; discovered workspace skills remain visible but
+are not automatically loaded or executed.
 
 The footer currently shows the working directory, provider, model, context
 message count, and `n/a` for effort and token usage. The provider-neutral
@@ -249,6 +264,7 @@ Interactive commands:
 /provider  configure another provider profile
 /settings  configure UI and saved provider profiles
 /tools     list registered tools
+/skills    list discovered and registered skills
 /logout    remove one saved provider
 /quit      exit Peon
 

@@ -6,6 +6,13 @@ __pycache__/
 *.py[cod]
 .agents/
 .scratch/
+!.scratch/
+.scratch/*
+!.scratch/peon-spec/
+.scratch/peon-spec/*
+!.scratch/peon-spec/*.md
+!.scratch/peon-spec/issues/
+!.scratch/peon-spec/issues/*.md
 peon_output/
 tau_output/
 pi_output/

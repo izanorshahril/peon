@@ -5,6 +5,7 @@ from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition, ru
 from peon.extensions import (
     ExtensionError,
     ExtensionRegistry,
+    discover_skill_names,
     register_sample_tools,
 )
 
@@ -98,6 +99,27 @@ def test_skill_can_register_multiple_related_tools() -> None:
         "added:remember this"
     )
     assert registry.invoke("list_notes", {}) == "notes:empty"
+
+
+def test_registry_exposes_registered_skill_names() -> None:
+    registry = ExtensionRegistry()
+
+    registry.register_skill("notes", lambda target: None)
+
+    assert registry.skills == ("notes",)
+
+    with pytest.raises(ExtensionError, match="skill 'notes' is already registered"):
+        registry.register_skill("notes", lambda target: None)
+
+
+def test_discover_skill_names_reads_metadata_without_loading_skills(tmp_path) -> None:
+    skill = tmp_path / ".agents" / "skills" / "notes"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# Notes\n", encoding="utf-8")
+    ignored = tmp_path / ".agents" / "skills" / "ignored"
+    ignored.mkdir()
+
+    assert discover_skill_names(tmp_path) == ("notes",)
 
 
 def test_registry_dispatches_lifecycle_hooks() -> None:

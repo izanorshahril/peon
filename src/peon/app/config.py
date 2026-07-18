@@ -4,9 +4,101 @@ from collections.abc import Mapping
 import json
 import os
 from pathlib import Path
+from dataclasses import asdict, dataclass, replace
 from typing import Protocol
 
 from .cli import ProviderConfig
+
+
+@dataclass(frozen=True, slots=True)
+class UiConfig:
+    user_top_blank_lines: int = 1
+    user_bottom_blank_lines: int = 1
+    message_left_padding: int = 1
+    background_color: str = "#121212"
+    chat_area_color: str = "#121212"
+    user_message_color: str = "#c4c4c4"
+    user_message_background: str = "#3a3a44"
+    assistant_message_color: str = "#e0e0e0"
+    command_selected_color: str = "#000000"
+    text_format: str = "normal"
+
+
+UI_SETTING_SPECS = (
+    ("user-top-spacing", "User top spacing", "user_top_blank_lines"),
+    ("user-bottom-spacing", "User bottom spacing", "user_bottom_blank_lines"),
+    ("message-left-padding", "Message left padding", "message_left_padding"),
+    ("background-color", "Background color", "background_color"),
+    ("chat-area-color", "Chat area color", "chat_area_color"),
+    ("user-message-color", "User message color", "user_message_color"),
+    (
+        "user-message-background",
+        "User message background",
+        "user_message_background",
+    ),
+    (
+        "assistant-message-color",
+        "Assistant message color",
+        "assistant_message_color",
+    ),
+    (
+        "command-selected-color",
+        "Command selected color",
+        "command_selected_color",
+    ),
+    ("text-format", "Text format", "text_format"),
+)
+
+
+def update_ui_setting(config: UiConfig, setting: str, value: str) -> UiConfig:
+    field_name = next(
+        (
+            field
+            for key, _label, field in UI_SETTING_SPECS
+            if key == setting
+        ),
+        None,
+    )
+    if field_name is None:
+        raise ValueError(f"unknown UI setting '{setting}'")
+    if field_name in {
+        "user_top_blank_lines",
+        "user_bottom_blank_lines",
+        "message_left_padding",
+    }:
+        try:
+            parsed_value = int(value)
+        except ValueError as error:
+            raise ValueError("spacing and padding must be integers") from error
+        if not 0 <= parsed_value <= 8:
+            raise ValueError("spacing and padding must be between 0 and 8")
+        if field_name == "user_top_blank_lines":
+            return replace(config, user_top_blank_lines=parsed_value)
+        if field_name == "user_bottom_blank_lines":
+            return replace(config, user_bottom_blank_lines=parsed_value)
+        return replace(config, message_left_padding=parsed_value)
+    if field_name == "text_format":
+        lowered_value = value.lower()
+        if lowered_value not in {"normal", "bold", "italic"}:
+            raise ValueError("text format must be normal, bold, or italic")
+        return replace(config, text_format=lowered_value)
+    if not value.startswith("#") or len(value) not in {4, 7}:
+        raise ValueError("colors must use #RGB or #RRGGBB")
+    try:
+        int(value[1:], 16)
+    except ValueError as error:
+        raise ValueError("colors must use hexadecimal digits") from error
+    if field_name == "background_color":
+        return replace(config, background_color=value)
+    if field_name == "chat_area_color":
+        return replace(config, chat_area_color=value)
+    if field_name == "user_message_color":
+        return replace(config, user_message_color=value)
+    if field_name == "user_message_background":
+        return replace(config, user_message_background=value)
+    if field_name == "assistant_message_color":
+        return replace(config, assistant_message_color=value)
+    return replace(config, command_selected_color=value)
 
 
 class ProviderConfigStore(Protocol):
@@ -21,6 +113,15 @@ class ProviderConfigStore(Protocol):
 
     def delete(self, config: ProviderConfig) -> None:
         """Remove one saved provider configuration, if it exists."""
+
+    def load_ui(self) -> UiConfig:
+        """Load persisted UI preferences."""
+
+    def save_ui(self, config: UiConfig) -> None:
+        """Persist UI preferences."""
+
+    def update(self, previous: ProviderConfig, config: ProviderConfig) -> None:
+        """Replace a provider profile, including identity fields."""
 
 
 class JsonProviderConfigStore:
@@ -77,6 +178,46 @@ class JsonProviderConfigStore:
             configs.append(config)
         self._write(configs, active=config_key)
 
+    def update(self, previous: ProviderConfig, config: ProviderConfig) -> None:
+        previous_key = provider_id(previous)
+        configs = list(self.load_all())
+        for index, existing in enumerate(configs):
+            if provider_id(existing) == previous_key:
+                configs[index] = config
+                break
+        else:
+            configs.append(config)
+        self._write(configs, active=provider_id(config))
+
+    def load_ui(self) -> UiConfig:
+        try:
+            raw_config = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return UiConfig()
+        if not isinstance(raw_config, Mapping):
+            return UiConfig()
+        raw_ui = raw_config.get("ui")
+        if not isinstance(raw_ui, Mapping):
+            return UiConfig()
+        defaults = UiConfig()
+        values: dict[str, object] = {}
+        for field_name in asdict(defaults):
+            value = raw_ui.get(field_name, getattr(defaults, field_name))
+            default = getattr(defaults, field_name)
+            if type(value) is not type(default):
+                return defaults
+            values[field_name] = value
+        return UiConfig(**values)  # type: ignore[arg-type]
+
+    def save_ui(self, config: UiConfig) -> None:
+        providers = list(self.load_all())
+        active = self.load()
+        self._write(
+            providers,
+            active=provider_id(active) if active is not None else "",
+            ui=config,
+        )
+
     def delete(self, config: ProviderConfig) -> None:
         active_config = self.load()
         configs = [
@@ -93,22 +234,28 @@ class JsonProviderConfigStore:
             )
             self._write(configs, active=active)
         else:
-            try:
-                self.path.unlink()
-            except FileNotFoundError:
-                pass
+            ui = self.load_ui()
+            if ui == UiConfig():
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                self._write([], active="", ui=ui)
 
     def _write(
         self,
         configs: list[ProviderConfig],
         *,
         active: str,
+        ui: UiConfig | None = None,
     ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = self.path.with_name(f".{self.path.name}.tmp")
         payload = {
             "active": active,
             "providers": [_serialize_provider_config(config) for config in configs],
+            "ui": asdict(ui or self.load_ui()),
         }
         try:
             temporary_path.write_text(
@@ -146,28 +293,157 @@ def _parse_provider_config(raw_config: object) -> ProviderConfig | None:
         models.append(model)
 
     optional_values: dict[str, str | None] = {}
-    for field_name in ("model", "base_url", "api_key", "copilot_token"):
+    for field_name in (
+        "provider_type",
+        "model",
+        "base_url",
+        "api_key",
+        "copilot_token",
+        "reasoning_effort_field",
+        "reasoning_effort",
+        "temperature_field",
+        "max_response_tokens_field",
+        "max_output_tokens_field",
+        "max_tokens_field",
+        "response_format_field",
+        "response_format",
+        "response_content_field",
+    ):
         value = raw_config.get(field_name)
         if value is not None and not isinstance(value, str):
             return None
         optional_values[field_name] = value
 
-    return ProviderConfig(name=name, models=tuple(models), **optional_values)
+    numeric_values: dict[str, int | float | None] = {}
+    for field_name in (
+        "temperature",
+        "max_response_tokens",
+        "max_output_tokens",
+        "max_tokens",
+    ):
+        value = raw_config.get(field_name)
+        if value is not None and (
+            not isinstance(value, (int, float)) or isinstance(value, bool)
+        ):
+            return None
+        numeric_values[field_name] = value
+
+    boolean_values: dict[str, bool] = {}
+    for field_name, default in (
+        ("supports_tools", False),
+        ("supports_stream", False),
+        ("supports_chat_completions", True),
+    ):
+        value = raw_config.get(field_name, default)
+        if not isinstance(value, bool):
+            return None
+        boolean_values[field_name] = value
+
+    reasoning_effort = optional_values.pop("reasoning_effort")
+    response_format = optional_values.pop("response_format")
+
+    return ProviderConfig(
+        name=name,
+        provider_type=optional_values.pop("provider_type"),
+        model=optional_values.pop("model"),
+        models=tuple(models),
+        base_url=optional_values.pop("base_url"),
+        api_key=optional_values.pop("api_key"),
+        copilot_token=optional_values.pop("copilot_token"),
+        reasoning_effort_field=optional_values.pop(
+            "reasoning_effort_field"
+        ) or "reasoningEffort",
+        reasoning_effort=(
+            reasoning_effort if "reasoning_effort" in raw_config else "low"
+        ),
+        temperature_field=optional_values.pop("temperature_field") or "temperature",
+        max_response_tokens_field=optional_values.pop(
+            "max_response_tokens_field"
+        ) or "maxResponseTokens",
+        max_output_tokens_field=optional_values.pop("max_output_tokens_field")
+        or "maxOutputTokens",
+        max_tokens_field=optional_values.pop("max_tokens_field") or "maxTokens",
+        response_format_field=optional_values.pop(
+            "response_format_field"
+        ) or "responseFormat",
+        temperature=numeric_values["temperature"]
+        if numeric_values["temperature"] is not None
+        else (None if "temperature" in raw_config else 1),
+        max_response_tokens=int(numeric_values["max_response_tokens"])
+        if numeric_values["max_response_tokens"] is not None
+        else (None if "max_response_tokens" in raw_config else 4096),
+        max_output_tokens=int(numeric_values["max_output_tokens"])
+        if numeric_values["max_output_tokens"] is not None
+        else None,
+        max_tokens=int(numeric_values["max_tokens"])
+        if numeric_values["max_tokens"] is not None
+        else None,
+        response_format=(
+            response_format if "response_format" in raw_config else "text"
+        ),
+        response_content_field=optional_values.pop("response_content_field")
+        or "completion",
+        supports_tools=boolean_values["supports_tools"],
+        supports_stream=boolean_values["supports_stream"],
+        supports_chat_completions=boolean_values["supports_chat_completions"],
+    )
 
 
 def _serialize_provider_config(config: ProviderConfig) -> dict[str, object]:
     return {
         "name": config.name,
+        "provider_type": config.provider_type,
         "model": config.model,
         "models": list(config.models),
         "base_url": config.base_url,
         "api_key": config.api_key,
         "copilot_token": config.copilot_token,
+        "reasoning_effort_field": config.reasoning_effort_field,
+        "reasoning_effort": config.reasoning_effort,
+        "temperature_field": config.temperature_field,
+        "temperature": config.temperature,
+        "max_response_tokens_field": config.max_response_tokens_field,
+        "max_response_tokens": config.max_response_tokens,
+        "max_output_tokens_field": config.max_output_tokens_field,
+        "max_output_tokens": config.max_output_tokens,
+        "max_tokens_field": config.max_tokens_field,
+        "max_tokens": config.max_tokens,
+        "response_format_field": config.response_format_field,
+        "response_format": config.response_format,
+        "response_content_field": config.response_content_field,
+        "supports_tools": config.supports_tools,
+        "supports_stream": config.supports_stream,
+        "supports_chat_completions": config.supports_chat_completions,
     }
 
 
 def provider_id(config: ProviderConfig) -> str:
     return f"{config.name}\x1f{config.base_url or ''}"
+
+
+def load_ui_config(store: ProviderConfigStore) -> UiConfig:
+    loader = getattr(store, "load_ui", None)
+    return loader() if callable(loader) else UiConfig()
+
+
+def save_ui_config(store: ProviderConfigStore, config: UiConfig) -> None:
+    saver = getattr(store, "save_ui", None)
+    if callable(saver):
+        saver(config)
+
+
+def update_saved_provider(
+    store: ProviderConfigStore,
+    previous: ProviderConfig,
+    config: ProviderConfig,
+) -> None:
+    updater = getattr(store, "update", None)
+    if callable(updater):
+        updater(previous, config)
+        return
+    if provider_id(previous) != provider_id(config):
+        store.delete(previous)
+    store.save(config)
 
 
 def default_provider_config_path() -> Path:

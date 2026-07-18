@@ -316,6 +316,12 @@ _COMMAND_DEFINITIONS.extend(
             search_terms=("functions", "capabilities", "tool list"),
         ),
         _command(
+            "skills",
+            "/skills",
+            "list registered skills",
+            search_terms=("skill list", "capabilities"),
+        ),
+        _command(
             "logout",
             "/logout",
             "remove one saved provider",
@@ -429,13 +435,6 @@ _COMMAND_DEFINITIONS.extend(
             "/tree",
             "navigate conversation branches",
             search_terms=("branches", "session tree"),
-            availability="reserved",
-        ),
-        _command(
-            "skills",
-            "/skills",
-            "inspect and manage skills",
-            search_terms=("skill list", "capabilities"),
             availability="reserved",
         ),
         _command(

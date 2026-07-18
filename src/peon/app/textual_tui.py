@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Literal, cast
 
 from rich.console import Console
@@ -18,12 +19,12 @@ from textual.document._document import Selection
 from textual.events import Key, MouseDown
 from textual.strip import Strip
 from textual.worker import Worker, WorkerState
-from textual.widgets import Input, Label, ListItem, ListView, Static, TextArea
+from textual.widgets import Input, Static, TextArea
 from textual.containers import VerticalScroll
 
 from peon.agent import AgentContext, ModelProvider, ToolCall, run_task
 from peon.ai import ProviderError
-from peon.extensions import ExtensionRegistry
+from peon.extensions import ExtensionRegistry, discover_skill_names
 
 from .cli import (
     CONFIG_SETTING_SPECS,
@@ -48,9 +49,15 @@ from .config import (
     update_saved_provider,
     update_ui_setting,
 )
-from .commands import DEFAULT_COMMAND_CATALOG, CommandMatch
+from .commands import (
+    DEFAULT_COMMAND_CATALOG,
+    CommandDefinition,
+    CommandMatch,
+)
 
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+_ESCAPE_REPEAT_DELAY = 0.3
+_ESCAPE_REPEAT_WINDOW = 0.75
 _MARKDOWN_CONSOLE = Console(width=4096)
 
 
@@ -122,6 +129,19 @@ SetupStep = Literal[
 ]
 
 
+@dataclass
+class _ChoiceState:
+    kind: SetupStep
+    title: str
+    all_values: list[object]
+    all_labels: list[str]
+    all_search_text: list[str]
+    values: list[object]
+    labels: list[str]
+    query: str
+    selected_index: int
+
+
 class PeonInput(Input):
     """Composer input with live slash-command hints and Escape clearing."""
 
@@ -131,6 +151,14 @@ class PeonInput(Input):
             event.stop()
             event.prevent_default()
             app.action_confirm_quit()
+        elif app.choice_kind is not None and event.key in {"up", "down"}:
+            app.move_choice_selection(1 if event.key == "down" else -1)
+            event.stop()
+            event.prevent_default()
+        elif app.choice_kind is not None and event.key in {"enter", "space"}:
+            app.select_current_choice()
+            event.stop()
+            event.prevent_default()
         elif event.key in {"up", "down"} and app.command_matches:
             app.move_command_selection(1 if event.key == "down" else -1)
             event.stop()
@@ -148,6 +176,25 @@ class PeonInput(Input):
 
     def action_confirm_quit(self) -> None:
         cast(TextualPeonApp, self.app).action_confirm_quit()
+
+
+class ChoiceSearchInput(Input):
+    """Search field for the focused picker; navigation stays app-owned."""
+
+    def on_key(self, event: Key) -> None:
+        app = cast(TextualPeonApp, self.app)
+        if event.key in {"up", "down"}:
+            app.move_choice_selection(1 if event.key == "down" else -1)
+            event.stop()
+            event.prevent_default()
+        elif event.key in {"enter", "space"}:
+            app.select_current_choice()
+            event.stop()
+            event.prevent_default()
+        elif event.character and event.character.isdigit():
+            app.select_choice_number(int(event.character))
+            event.stop()
+            event.prevent_default()
 
 
 class ChatMessage(TextArea):
@@ -396,6 +443,31 @@ class TextualPeonApp(App[int]):
         height: auto;
         max-height: 8;
         display: none;
+        padding: 0 1;
+        color: $text-muted;
+    }
+
+    #choice-search {
+        height: 1;
+        display: none;
+        border: none;
+        padding: 0 1;
+        background: $background;
+        color: $text;
+    }
+
+    #choice-count {
+        height: 1;
+        display: none;
+        padding: 0 1;
+        color: $text-muted;
+    }
+
+    #choice-hint {
+        height: 1;
+        display: none;
+        padding: 0 1;
+        color: $text-muted;
     }
 
     #composer {
@@ -453,6 +525,9 @@ class TextualPeonApp(App[int]):
         self.config: ProviderConfig | None = None
         self.context = AgentContext()
         self.registry = registry
+        self.skill_names = tuple(
+            dict.fromkeys((*registry.skills, *discover_skill_names()))
+        )
         self.setup_step: SetupStep | None = None
         self.pending_config: ProviderConfig | None = None
         self.pending_setting_spec: ProviderSettingSpec | None = None
@@ -461,7 +536,15 @@ class TextualPeonApp(App[int]):
         self.pending_models: tuple[str, ...] = ()
         self.choice_values: list[object] = []
         self.choice_kind: SetupStep | None = None
+        self.choice_all_values: list[object] = []
+        self.choice_all_labels: list[str] = []
+        self.choice_all_search_text: list[str] = []
+        self.choice_labels: list[str] = []
+        self.choice_query = ""
+        self.choice_selected_index = 0
         self.choice_generation = 0
+        self.choice_history: list[_ChoiceState] = []
+        self._last_escape_at: float | None = None
         self.command_matches: tuple[CommandMatch, ...] = ()
         self.command_selected_index = 0
         self.quit_confirmation_active = False
@@ -515,8 +598,11 @@ class TextualPeonApp(App[int]):
                 assistant_message_color=self.ui_config.assistant_message_color,
                 text_format=self.ui_config.text_format,
             )
+        yield ChoiceSearchInput(placeholder="> ", id="choice-search")
         yield Static("", id="setup-label")
-        yield ListView(id="choices")
+        yield Static("", id="choices")
+        yield Static("", id="choice-count")
+        yield Static("", id="choice-hint")
         yield ProcessingStatus(self.processing_status_text, id="processing")
         with Vertical(id="composer"):
             yield Static("", id="suggestions")
@@ -554,6 +640,16 @@ class TextualPeonApp(App[int]):
         if event.key == "ctrl+c":
             self._handle_ctrl_c(event)
             return
+        if self.choice_kind is not None and event.key in {"up", "down"}:
+            self.move_choice_selection(1 if event.key == "down" else -1)
+            event.stop()
+            event.prevent_default()
+            return
+        if self.choice_kind is not None and event.key in {"enter", "space"}:
+            self.select_current_choice()
+            event.stop()
+            event.prevent_default()
+            return
         if event.key in {"left", "right"} and self._adjust_selected_setting(
             1 if event.key == "right" else -1
         ):
@@ -586,15 +682,58 @@ class TextualPeonApp(App[int]):
             self.action_confirm_quit()
 
     def _is_non_input_focus(self) -> bool:
-        return self.focused is not None and not isinstance(self.focused, PeonInput)
+        return self.focused is not None and not isinstance(
+            self.focused,
+            (PeonInput, ChoiceSearchInput),
+        )
+
+    def select_choice_number(self, number: int) -> None:
+        index = number - 1
+        if self.choice_kind is not None and 0 <= index < len(self.choice_values):
+            self._select_choice(index)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "choice-search":
+            self.update_choice_search(event.value)
+
+    def update_choice_search(self, value: str) -> None:
+        if self.choice_kind is None:
+            return
+        selected_value = (
+            self.choice_values[self.choice_selected_index]
+            if 0 <= self.choice_selected_index < len(self.choice_values)
+            else None
+        )
+        self.choice_query = value
+        tokens = value.casefold().split()
+        visible_indices = [
+            index
+            for index, search_text in enumerate(self.choice_all_search_text)
+            if all(token in search_text for token in tokens)
+        ]
+        self.choice_values = [
+            self.choice_all_values[index] for index in visible_indices
+        ]
+        self.choice_labels = [
+            self.choice_all_labels[index] for index in visible_indices
+        ]
+        self.choice_selected_index = next(
+            (
+                index
+                for index, choice in enumerate(self.choice_values)
+                if choice == selected_value
+            ),
+            0,
+        )
+        self._render_choices()
 
     def update_command_suggestions(self, value: str) -> None:
         matches: tuple[CommandMatch, ...] = ()
         if value.startswith("/"):
-            matches = DEFAULT_COMMAND_CATALOG.search(value)
+            matches = self._command_matches(value)
             if not matches and any(character.isspace() for character in value):
                 command_head = value.split(maxsplit=1)[0]
-                matches = DEFAULT_COMMAND_CATALOG.search(command_head)
+                matches = self._command_matches(command_head)
         selected_id = (
             self.command_matches[self.command_selected_index].command.id
             if self.command_matches
@@ -614,13 +753,22 @@ class TextualPeonApp(App[int]):
 
     def _render_command_suggestions(self) -> None:
         rendered = Text()
-        for index, match in enumerate(self.command_matches):
-            if index:
+        start = self._visible_start(
+            self.command_selected_index,
+            len(self.command_matches),
+        )
+        visible_matches = self.command_matches[start : start + 6]
+        for offset, match in enumerate(visible_matches):
+            index = start + offset
+            if offset:
                 rendered.append("\n")
             selected = index == self.command_selected_index
             rendered.append("> " if selected else "  ", style="dim")
             command = match.command
-            rendered.append(command.name, style="bold reverse" if selected else "bold")
+            rendered.append(
+                command.name,
+                style=self._selected_command_style() if selected else "bold",
+            )
             rendered.append(f"  {command.description}", style="dim")
             if command.candidate_names:
                 rendered.append(
@@ -629,7 +777,24 @@ class TextualPeonApp(App[int]):
                 )
             if match.is_reserved:
                 rendered.append("  [reserved]", style="yellow")
+        if self.command_matches:
+            rendered.append("\n")
+            rendered.append(
+                f"({self.command_selected_index + 1}/{len(self.command_matches)})",
+                style="dim",
+            )
+            rendered.append("\n")
+            rendered.append(
+                "Up/Down navigate · Tab complete · Enter run · Esc close",
+                style="dim",
+            )
         self.query_one("#suggestions", Static).update(rendered)
+
+    @staticmethod
+    def _visible_start(selected: int, total: int, limit: int = 6) -> int:
+        if total <= limit:
+            return 0
+        return min(max(0, selected - limit // 2), total - limit)
 
     def move_command_selection(self, direction: int) -> None:
         if not self.command_matches:
@@ -655,16 +820,119 @@ class TextualPeonApp(App[int]):
         self.command_selected_index = 0
         self.query_one("#suggestions", Static).update("")
 
+    def move_choice_selection(self, direction: int) -> None:
+        if not self.choice_values:
+            return
+        self.choice_selected_index = (
+            self.choice_selected_index + direction
+        ) % len(self.choice_values)
+        self._render_choices()
+
+    def select_current_choice(self) -> None:
+        if self.choice_values:
+            self._select_choice(self.choice_selected_index)
+
+    @staticmethod
+    def _choice_label(label: str) -> str:
+        stripped = label.strip()
+        prefix, separator, remainder = stripped.partition(".")
+        if separator and prefix.isdigit():
+            return remainder.strip()
+        return stripped
+
+    @staticmethod
+    def _choice_search_text(value: object, label: str) -> str:
+        parts = [label, str(value)]
+        if isinstance(value, ProviderSettingSpec):
+            parts.extend((value.key, value.field_name, value.label))
+        elif isinstance(value, tuple) and value and isinstance(value[0], str):
+            parts.append(value[0])
+        return " ".join(parts).casefold()
+
+    def _render_choices(self) -> None:
+        rendered = Text()
+        start = self._visible_start(
+            self.choice_selected_index,
+            len(self.choice_values),
+        )
+        visible_labels = self.choice_labels[start : start + 6]
+        for offset, label in enumerate(visible_labels):
+            index = start + offset
+            if offset:
+                rendered.append("\n")
+            selected = index == self.choice_selected_index
+            rendered.append("> " if selected else "  ", style="dim")
+            rendered.append(
+                label,
+                style=self._selected_command_style() if selected else "bold",
+            )
+        self.query_one("#choices", Static).update(rendered)
+        count = (
+            f"({self.choice_selected_index + 1}/{len(self.choice_values)})"
+            if self.choice_values
+            else "(0/0)"
+        )
+        self.query_one("#choice-count", Static).update(count)
+        self.query_one("#choice-hint", Static).update(
+            "Type to search · Enter/Space to change · Esc back · hold Esc close"
+        )
+
+    def _selected_command_style(self) -> Style:
+        return Style(
+            color=self.ui_config.command_selected_color,
+            bgcolor="#808080",
+            bold=True,
+        )
+
+    def _command_matches(self, value: str) -> tuple[CommandMatch, ...]:
+        normalized = value.strip().lstrip("/").casefold()
+        matches = (
+            []
+            if normalized.startswith("skill:")
+            else list(DEFAULT_COMMAND_CATALOG.search(value))
+        )
+        if not normalized or normalized.startswith("skill:") or normalized == "skill":
+            skill_query = normalized.removeprefix("skill:").strip()
+            for index, skill in enumerate(self.skill_names):
+                if not skill_query or skill.casefold().startswith(skill_query):
+                    command = CommandDefinition(
+                        id=f"skill:{skill}",
+                        name=f"/skill:{skill}",
+                        description=(
+                            "run registered skill"
+                            if skill in self.registry.skills
+                            else "skill available but not loaded"
+                        ),
+                        order=1000 + index,
+                    )
+                    matches.append(
+                        CommandMatch(command, 2, "candidate-exact")
+                    )
+        return tuple(matches)
+
     def action_clear_prompt(self) -> None:
         if self.quit_confirmation_active:
             self._finish_quit_confirmation("")
             return
         if self.command_matches:
             self.dismiss_command_palette()
+            self._last_escape_at = None
             return
         if self.choice_kind is not None or self.setup_step is not None:
-            self._cancel_selection()
+            now = time.monotonic()
+            repeated_escape = (
+                self._last_escape_at is not None
+                and _ESCAPE_REPEAT_DELAY
+                <= now - self._last_escape_at
+                < _ESCAPE_REPEAT_WINDOW
+            )
+            self._last_escape_at = now
+            if repeated_escape:
+                self._cancel_selection()
+            elif not self._restore_previous_choice():
+                return
             return
+        self._last_escape_at = None
         self.query_one("#prompt", PeonInput).action_clear()
 
     def action_confirm_quit(self) -> None:
@@ -750,29 +1018,93 @@ class TextualPeonApp(App[int]):
         title: str,
         choices: list[tuple[object, str]],
     ) -> None:
+        if self.choice_history:
+            latest = self.choice_history[-1]
+            if latest.kind == kind and latest.title == title:
+                self.choice_history.pop()
         self.setup_step = kind
         self.choice_kind = kind
         self.choice_values = [value for value, _label in choices]
+        self.choice_all_values = list(self.choice_values)
+        self.choice_all_labels = [
+            self._choice_label(label) for _value, label in choices
+        ]
+        self.choice_all_search_text = [
+            self._choice_search_text(value, label)
+            for (value, label) in choices
+        ]
+        self.choice_labels = list(self.choice_all_labels)
+        self.choice_query = ""
+        self.choice_selected_index = 0
         self.choice_generation += 1
-        choice_prefix = f"choice-{self.choice_generation}"
         self.query_one("#setup-label", Static).update(title)
-        list_view = self.query_one("#choices", ListView)
-        list_view.clear()
-        list_view.mount(
-            *[
-                ListItem(Label(label), id=f"{choice_prefix}-{index}")
-                for index, (_value, label) in enumerate(choices)
-            ]
+        search = self.query_one("#choice-search", ChoiceSearchInput)
+        search.value = ""
+        search.display = True
+        self.query_one("#choices", Static).display = True
+        self.query_one("#choice-count", Static).display = True
+        self.query_one("#choice-hint", Static).display = True
+        self._render_choices()
+        search.focus()
+
+    def _choice_state(self) -> _ChoiceState | None:
+        if self.choice_kind is None:
+            return None
+        return _ChoiceState(
+            kind=self.choice_kind,
+            title=str(self.query_one("#setup-label", Static).renderable),
+            all_values=list(self.choice_all_values),
+            all_labels=list(self.choice_all_labels),
+            all_search_text=list(self.choice_all_search_text),
+            values=list(self.choice_values),
+            labels=list(self.choice_labels),
+            query=self.choice_query,
+            selected_index=self.choice_selected_index,
         )
-        if choices:
-            list_view.index = 0
-        list_view.display = True
-        list_view.focus()
+
+    def _remember_choice(self) -> None:
+        state = self._choice_state()
+        if state is not None:
+            self.choice_history.append(state)
+
+    def _restore_previous_choice(self) -> bool:
+        if not self.choice_history:
+            return False
+        state = self.choice_history.pop()
+        self.setup_step = state.kind
+        self.choice_kind = state.kind
+        self.choice_all_values = list(state.all_values)
+        self.choice_all_labels = list(state.all_labels)
+        self.choice_all_search_text = list(state.all_search_text)
+        self.choice_values = list(state.values)
+        self.choice_labels = list(state.labels)
+        self.choice_query = state.query
+        self.choice_selected_index = state.selected_index
+        self.choice_generation += 1
+        self.query_one("#setup-label", Static).update(state.title)
+        search = self.query_one("#choice-search", ChoiceSearchInput)
+        search.value = state.query
+        search.display = True
+        self.query_one("#choices", Static).display = True
+        self.query_one("#choice-count", Static).display = True
+        self.query_one("#choice-hint", Static).display = True
+        self._render_choices()
+        search.focus()
+        return True
 
     def _hide_choices(self) -> None:
-        self.query_one("#choices", ListView).display = False
+        self.query_one("#choice-search", ChoiceSearchInput).display = False
+        self.query_one("#choices", Static).display = False
+        self.query_one("#choice-count", Static).display = False
+        self.query_one("#choice-hint", Static).display = False
         self.query_one("#setup-label", Static).update("")
         self.choice_values = []
+        self.choice_all_values = []
+        self.choice_all_labels = []
+        self.choice_all_search_text = []
+        self.choice_labels = []
+        self.choice_query = ""
+        self.choice_selected_index = 0
         self.choice_kind = None
         self.query_one("#prompt", PeonInput).focus()
 
@@ -806,15 +1138,25 @@ class TextualPeonApp(App[int]):
             ],
         )
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        if event.item.id is None or not event.item.id.startswith("choice-"):
-            return
-        index = int(event.item.id.rsplit("-", maxsplit=1)[1])
-        self._select_choice(index)
-
     def _select_choice(self, index: int) -> None:
         value = self.choice_values[index]
         kind = self.choice_kind
+        should_remember = kind in {
+            "provider",
+            "settings-root",
+            "settings-provider-type",
+            "settings-provider",
+            "settings-profile",
+        }
+        if kind in {"settings-config", "settings-request", "settings-response"}:
+            should_remember = cast(ProviderSettingSpec, value).value_kind not in {
+                "toggle",
+                "choice",
+            }
+        elif kind == "settings-ui":
+            should_remember = cast(tuple[str, str, str], value)[2] != "text_format"
+        if should_remember:
+            self._remember_choice()
         self._hide_choices()
         if kind == "provider":
             self._start_provider_inputs(str(value))
@@ -962,7 +1304,8 @@ class TextualPeonApp(App[int]):
                 (index for index, spec in enumerate(specs) if spec.key == focus_key),
                 0,
             )
-            self.query_one("#choices", ListView).index = focused_index
+            self.choice_selected_index = focused_index
+            self._render_choices()
 
     def _select_provider_setting(
         self,
@@ -1016,7 +1359,8 @@ class TextualPeonApp(App[int]):
                 (index for index, spec in enumerate(UI_SETTING_SPECS) if spec[0] == focus_key),
                 0,
             )
-            self.query_one("#choices", ListView).index = focused_index
+            self.choice_selected_index = focused_index
+            self._render_choices()
 
     def _select_ui_setting(self, spec: tuple[str, str, str]) -> None:
         key, label, field_name = spec
@@ -1092,8 +1436,8 @@ class TextualPeonApp(App[int]):
             "settings-ui",
         }:
             return False
-        index = self.query_one("#choices", ListView).index
-        if index is None or not 0 <= index < len(self.choice_values):
+        index = self.choice_selected_index
+        if not 0 <= index < len(self.choice_values):
             return False
         if kind == "settings-ui":
             key, _label, field_name = cast(tuple[str, str, str], self.choice_values[index])
@@ -1361,6 +1705,8 @@ class TextualPeonApp(App[int]):
         self.pending_ui_setting = None
         self.settings_return_kind = None
         self.pending_models = ()
+        self.choice_history = []
+        self._last_escape_at = None
         self.query_one("#setup-label", Static).update("")
         self.query_one("#prompt", PeonInput).password = False
         self.query_one("#prompt", PeonInput).focus()
@@ -1393,11 +1739,30 @@ class TextualPeonApp(App[int]):
 
     def _handle_command(self, command: str) -> None:
         name = command.split(maxsplit=1)[0]
+        normalized_name = name.casefold()
+        if normalized_name.startswith("/skill:") and normalized_name != "/skill:":
+            skill_name = name.split(":", maxsplit=1)[1]
+            if skill_name in self.registry.skills:
+                self._write(f"Skill '{skill_name}' is registered.")
+            elif skill_name in self.skill_names:
+                self._write(f"Skill '{skill_name}' is available but not loaded.")
+            else:
+                self._write(f"Unknown skill: {skill_name}")
+            return
         invocation = DEFAULT_COMMAND_CATALOG.resolve(command)
         if invocation is None:
             self._write(f"Unknown command: {name}")
             return
         definition = invocation.command
+        if definition.id.startswith("skill:"):
+            skill_name = definition.id.removeprefix("skill:")
+            if skill_name in self.registry.skills:
+                self._write(f"Skill '{skill_name}' is registered.")
+            elif skill_name in self.skill_names:
+                self._write(f"Skill '{skill_name}' is available but not loaded.")
+            else:
+                self._write(f"Unknown skill: {skill_name}")
+            return
         if definition.setting_key is not None:
             self._handle_provider_setting_command(
                 definition.setting_key,
@@ -1427,6 +1792,9 @@ class TextualPeonApp(App[int]):
             self._set_status()
         elif definition.id == "tools":
             self._write("Tools: " + ", ".join(tool.name for tool in self.registry.tools))
+        elif definition.id == "skills":
+            skills = self.skill_names
+            self._write("Skills: " + ", ".join(skills) if skills else "Skills: none")
 
     def _handle_provider_setting_command(self, setting: str, value: str) -> None:
         if self.config is None:

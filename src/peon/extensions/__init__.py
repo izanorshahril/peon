@@ -6,6 +6,7 @@ from .registry import (
 	LifecycleHandler,
 	SkillInstaller,
 	ToolHandler,
+	discover_skill_names,
 )
 from .sample import register_sample_tools
 
@@ -15,5 +16,6 @@ __all__ = [
 	"LifecycleHandler",
 	"SkillInstaller",
 	"ToolHandler",
+	"discover_skill_names",
 	"register_sample_tools",
 ]

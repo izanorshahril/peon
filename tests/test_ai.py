@@ -6,6 +6,9 @@ import pytest
 
 from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
 from peon.ai import (
+    CustomProvider,
+    CustomRequestFields,
+    CustomResponseFields,
     GitHubCopilotProvider,
     OpenAICompatibleProvider,
     ProviderError,
@@ -91,6 +94,173 @@ def test_openai_compatible_provider_normalizes_request_and_text_response() -> No
             },
         }
     ]
+
+
+def test_custom_provider_matches_corporate_chat_payload(monkeypatch) -> None:
+    monkeypatch.setattr("peon.ai.providers.time.time", lambda: 1784295526)
+    transport = StubTransport({"service": "chat", "completion": "Corporate response."})
+    provider = CustomProvider(
+        base_url="https://proxy.test/api/client-apps",
+        api_key=None,
+        model="corporate-model",
+        transport=transport,
+    )
+
+    response = provider.complete(
+        messages=[AgentMessage(role="user", content="Hello")],
+        tools=[
+            ToolDefinition(
+                name="lookup",
+                description="Look up a value.",
+                parameters={"type": "object"},
+            )
+        ],
+    )
+
+    assert response == ModelResponse(content="Corporate response.")
+    assert transport.url == "https://proxy.test/api/client-apps"
+    assert transport.headers == {"Content-Type": "application/json"}
+    assert transport.payload == {
+        "version": 1,
+        "service": "chat",
+        "timestamp": 1784295526,
+        "model": "corporate-model",
+        "reasoningEffort": "low",
+        "temperature": 1,
+        "maxResponseTokens": 4096,
+        "responseFormat": "text",
+        "messages": [
+            {
+                "role": "developer",
+                "content": '{"tools": [{"name": "lookup", "description": "Look up a value.", "parameters": {"type": "object"}}]}',
+            },
+            {"role": "user", "content": "Hello"},
+        ],
+    }
+
+
+def test_custom_provider_supports_configured_request_field_and_embedding(monkeypatch) -> None:
+    monkeypatch.setattr("peon.ai.providers.time.time", lambda: 1784295526)
+    transport = StubTransport(
+        {"embedding": [[1, 2.5], [3.25, 4]]}
+    )
+    provider = CustomProvider(
+        base_url="http://localhost:8080",
+        model="embed-model",
+        request_fields=CustomRequestFields(reasoning_effort="reasoning_effort"),
+        transport=transport,
+    )
+
+    embeddings = provider.embed(["hello", "world"])
+
+    assert embeddings == ((1.0, 2.5), (3.25, 4.0))
+    assert transport.url == "http://localhost:8080"
+    assert transport.payload == {
+        "version": 1,
+        "service": "embedding",
+        "timestamp": 1784295526,
+        "model": "embed-model",
+        "contents": ["hello", "world"],
+    }
+
+
+def test_custom_provider_uses_configured_corporate_field_names() -> None:
+    transport = StubTransport({"completion": "Configured response."})
+    provider = CustomProvider(
+        base_url="http://localhost:8080",
+        model="chat-model",
+        request_fields=CustomRequestFields(
+            reasoning_effort="reasoning_effort",
+            temperature="temp",
+            max_response_tokens="max_tokens",
+            response_format="response_format",
+        ),
+        reasoning_effort="high",
+        temperature=0.2,
+        max_response_tokens=2048,
+        response_format="json_object",
+        transport=transport,
+    )
+
+    provider.complete(messages=[AgentMessage(role="user", content="Hello")])
+
+    assert transport.payload is not None
+    assert transport.payload["reasoning_effort"] == "high"
+    assert transport.payload["temp"] == 0.2
+    assert transport.payload["max_tokens"] == 2048
+    assert transport.payload["response_format"] == "json_object"
+
+
+def test_openai_provider_applies_config_and_wraps_tools_when_unsupported() -> None:
+    transport = StubTransport(
+        {"choices": [{"message": {"content": "Configured response."}}]}
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://example.test/v1/chat",
+        model="chat-model",
+        reasoning_effort="high",
+        temperature=0.4,
+        max_completion_tokens=1024,
+        max_output_tokens=2048,
+        max_tokens=4096,
+        response_format="json_object",
+        supports_tools=False,
+        supports_chat_completions=False,
+        transport=transport,
+    )
+
+    provider.complete(
+        messages=[AgentMessage(role="user", content="Hello")],
+        tools=[
+            ToolDefinition(
+                name="lookup",
+                description="Look up a value.",
+                parameters={"type": "object"},
+            )
+        ],
+    )
+
+    assert transport.url == "https://example.test/v1/chat"
+    assert transport.payload is not None
+    assert transport.payload["reasoning_effort"] == "high"
+    assert transport.payload["temperature"] == 0.4
+    assert transport.payload["max_completion_tokens"] == 1024
+    assert transport.payload["max_output_tokens"] == 2048
+    assert transport.payload["max_tokens"] == 4096
+    assert transport.payload["response_format"] == {"type": "json_object"}
+    assert "tools" not in transport.payload
+    assert transport.payload["messages"][0]["role"] == "developer"  # type: ignore[index]
+
+
+def test_custom_provider_uses_chat_suffix_and_configured_response_path() -> None:
+    transport = StubTransport({"result": {"message": "Mapped response."}})
+    provider = CustomProvider(
+        base_url="https://proxy.test/v1/",
+        model="chat-model",
+        response_fields=CustomResponseFields(content="result.message"),
+        supports_chat_completions=True,
+        transport=transport,
+    )
+
+    response = provider.complete(messages=[])
+
+    assert response == ModelResponse(content="Mapped response.")
+    assert transport.url == "https://proxy.test/v1/chat/completions"
+
+
+def test_custom_provider_discovers_models_and_prepares_streaming_surface() -> None:
+    transport = StubTransport(
+        {},
+        get_response={"data": [{"id": "chat-model"}, {"id": "embed-model"}]},
+    )
+    provider = CustomProvider(
+        base_url="https://proxy.test",
+        transport=transport,
+    )
+
+    assert provider.list_models() == ("chat-model", "embed-model")
+    with pytest.raises(ProviderError, match="streaming is not available"):
+        provider.complete_stream()
 
 
 def test_openai_compatible_provider_allows_optional_api_key() -> None:

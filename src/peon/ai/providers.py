@@ -1,8 +1,10 @@
 """OpenAI-compatible provider adapters for Peon."""
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 import json
 import os
+import time
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -80,6 +82,14 @@ class OpenAICompatibleProvider:
         base_url: str,
         api_key: str | None = None,
         model: str | None = "gpt-4o",
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+        max_completion_tokens: int | None = None,
+        max_output_tokens: int | None = None,
+        max_tokens: int | None = None,
+        response_format: str | None = None,
+        supports_tools: bool = True,
+        supports_chat_completions: bool = True,
         transport: JsonTransport | None = None,
     ) -> None:
         if not base_url.strip():
@@ -88,6 +98,14 @@ class OpenAICompatibleProvider:
             base_url=base_url,
             token=api_key,
             model=model,
+            reasoning_effort=reasoning_effort,
+            temperature=temperature,
+            max_completion_tokens=max_completion_tokens,
+            max_output_tokens=max_output_tokens,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            supports_tools=supports_tools,
+            supports_chat_completions=supports_chat_completions,
             transport=transport or UrllibJsonTransport(),
         )
 
@@ -103,6 +121,107 @@ class OpenAICompatibleProvider:
         model: str | None = None,
     ) -> ModelResponse:
         return self._client.complete(messages=messages, tools=tools, model=model)
+
+
+@dataclass(frozen=True, slots=True)
+class CustomRequestFields:
+    """Request field names used by the custom service proxy."""
+
+    reasoning_effort: str | None = "reasoningEffort"
+    temperature: str | None = "temperature"
+    max_response_tokens: str | None = "maxResponseTokens"
+    max_output_tokens: str | None = "maxOutputTokens"
+    max_tokens: str | None = "maxTokens"
+    response_format: str | None = "responseFormat"
+
+
+@dataclass(frozen=True, slots=True)
+class CustomResponseFields:
+    """Response paths used by the custom service proxy."""
+
+    content: str = "completion"
+
+
+class CustomProvider:
+    """Use a corporate-style service endpoint through a user-owned proxy."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str | None = None,
+        model: str | None = None,
+        request_fields: CustomRequestFields | None = None,
+        response_fields: CustomResponseFields | None = None,
+        reasoning_effort: str | None = "low",
+        temperature: float | None = 1,
+        max_response_tokens: int | None = 4096,
+        max_output_tokens: int | None = None,
+        max_tokens: int | None = None,
+        response_format: str | None = "text",
+        supports_tools: bool = False,
+        supports_chat_completions: bool = False,
+        transport: JsonTransport | None = None,
+    ) -> None:
+        if not base_url.strip():
+            raise ProviderError("provider base URL is required")
+        fields = request_fields or CustomRequestFields()
+        resolved_response_fields = response_fields or CustomResponseFields()
+        if not resolved_response_fields.content.strip():
+            raise ProviderError("custom response content field is invalid")
+        if fields.reasoning_effort is not None and not fields.reasoning_effort.strip():
+            raise ProviderError("custom reasoning effort field is invalid")
+        for field_name in (
+            fields.temperature,
+            fields.max_response_tokens,
+            fields.max_output_tokens,
+            fields.max_tokens,
+            fields.response_format,
+        ):
+            if field_name is not None and not field_name.strip():
+                raise ProviderError("custom request field is invalid")
+        self._client = _CustomServiceClient(
+            base_url=base_url,
+            token=api_key,
+            model=model,
+            fields=fields,
+            response_fields=resolved_response_fields,
+            reasoning_effort=reasoning_effort,
+            temperature=temperature,
+            max_response_tokens=max_response_tokens,
+            max_output_tokens=max_output_tokens,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            supports_tools=supports_tools,
+            supports_chat_completions=supports_chat_completions,
+            transport=transport or UrllibJsonTransport(),
+        )
+
+    def list_models(self) -> tuple[str, ...]:
+        """Return model IDs exposed by the custom proxy."""
+        return self._client.list_models()
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+    ) -> ModelResponse:
+        return self._client.complete(messages=messages, tools=tools, model=model)
+
+    def embed(
+        self,
+        contents: Sequence[str],
+        *,
+        model: str | None = None,
+    ) -> tuple[tuple[float, ...], ...]:
+        """Return one embedding vector for each supplied content string."""
+        return self._client.embed(contents=contents, model=model)
+
+    def complete_stream(self, **_kwargs: object) -> object:
+        """Reserve the streaming surface until the proxy exposes its contract."""
+        raise ProviderError("custom provider chat streaming is not available")
 
 
 class GitHubCopilotProvider:
@@ -156,12 +275,28 @@ class _ChatCompletionsClient:
         token: str | None,
         model: str | None,
         transport: JsonTransport,
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+        max_completion_tokens: int | None = None,
+        max_output_tokens: int | None = None,
+        max_tokens: int | None = None,
+        response_format: str | None = None,
+        supports_tools: bool = True,
+        supports_chat_completions: bool = True,
     ) -> None:
         if model is not None and not model.strip():
             raise ProviderError("provider model is required")
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._model = model
+        self._reasoning_effort = reasoning_effort
+        self._temperature = temperature
+        self._max_completion_tokens = max_completion_tokens
+        self._max_output_tokens = max_output_tokens
+        self._max_tokens = max_tokens
+        self._response_format = response_format
+        self._supports_tools = supports_tools
+        self._supports_chat_completions = supports_chat_completions
         self._transport = transport
 
     def list_models(self) -> tuple[str, ...]:
@@ -199,9 +334,13 @@ class _ChatCompletionsClient:
             raise ProviderError("provider model is required")
         payload: dict[str, object] = {
             "model": selected_model,
-            "messages": [_serialize_message(message) for message in messages],
+            "messages": (
+                [_serialize_message(message) for message in messages]
+                if self._supports_tools
+                else _serialize_custom_messages(messages, tools)
+            ),
         }
-        if tools:
+        if tools and self._supports_tools:
             payload["tools"] = [
                 {
                     "type": "function",
@@ -213,10 +352,22 @@ class _ChatCompletionsClient:
                 }
                 for tool in tools
             ]
+        if self._reasoning_effort is not None:
+            payload["reasoning_effort"] = self._reasoning_effort
+        if self._temperature is not None:
+            payload["temperature"] = self._temperature
+        if self._max_completion_tokens is not None:
+            payload["max_completion_tokens"] = self._max_completion_tokens
+        if self._max_output_tokens is not None:
+            payload["max_output_tokens"] = self._max_output_tokens
+        if self._max_tokens is not None:
+            payload["max_tokens"] = self._max_tokens
+        if self._response_format is not None:
+            payload["response_format"] = {"type": self._response_format}
 
         try:
             result = self._transport.post(
-                f"{self._base_url}/chat/completions",
+                _chat_url(self._base_url, self._supports_chat_completions),
                 self._headers(),
                 payload,
             )
@@ -227,6 +378,165 @@ class _ChatCompletionsClient:
         if not isinstance(result, Mapping):
             raise ProviderError("provider response must be a JSON object")
         return _parse_response(result)
+
+    def _headers(self, *, content_type: bool = True) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if content_type:
+            headers["Content-Type"] = "application/json"
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        return headers
+
+
+class _CustomServiceClient:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token: str | None,
+        model: str | None,
+        fields: CustomRequestFields,
+        response_fields: CustomResponseFields,
+        reasoning_effort: str | None,
+        temperature: float | None,
+        max_response_tokens: int | None,
+        max_output_tokens: int | None,
+        max_tokens: int | None,
+        response_format: str | None,
+        supports_tools: bool,
+        supports_chat_completions: bool,
+        transport: JsonTransport,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._token = token
+        self._model = model
+        self._fields = fields
+        self._response_fields = response_fields
+        self._reasoning_effort = reasoning_effort
+        self._temperature = temperature
+        self._max_response_tokens = max_response_tokens
+        self._max_output_tokens = max_output_tokens
+        self._max_tokens = max_tokens
+        self._response_format = response_format
+        self._supports_tools = supports_tools
+        self._supports_chat_completions = supports_chat_completions
+        self._transport = transport
+
+    def list_models(self) -> tuple[str, ...]:
+        try:
+            result = self._transport.get(
+                f"{self._base_url}/models",
+                self._headers(content_type=False),
+            )
+        except ProviderError:
+            raise
+        except Exception as error:
+            raise ProviderError("provider model discovery failed") from error
+        raw_models = result.get("data")
+        if not isinstance(raw_models, list):
+            raise ProviderError("provider model response did not contain data")
+        models: list[str] = []
+        for raw_model in raw_models:
+            if not isinstance(raw_model, Mapping):
+                raise ProviderError("provider model response contained an invalid model")
+            model_id = raw_model.get("id")
+            if not isinstance(model_id, str) or not model_id.strip():
+                raise ProviderError("provider model response contained an invalid model ID")
+            models.append(model_id)
+        return tuple(models)
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition],
+        model: str | None,
+    ) -> ModelResponse:
+        payload: dict[str, object] = {
+            "version": 1,
+            "service": "chat",
+            "timestamp": int(time.time()),
+            "messages": (
+                [_serialize_message(message) for message in messages]
+                if self._supports_tools
+                else _serialize_custom_messages(messages, tools)
+            ),
+        }
+        if tools and self._supports_tools:
+            payload["tools"] = [_serialize_tool_definition(tool) for tool in tools]
+        selected_model = model or self._model
+        if selected_model:
+            payload["model"] = selected_model
+        self._add_optional_chat_fields(payload)
+
+        result = self._post(payload, chat=True)
+        completion = _extract_response_field(result, self._response_fields.content)
+        if isinstance(completion, str) and completion.strip():
+            return ModelResponse(content=completion)
+        if "choices" in result:
+            return _parse_response(result)
+        raise ProviderError("provider response did not contain completion")
+
+    def embed(
+        self,
+        *,
+        contents: Sequence[str],
+        model: str | None,
+    ) -> tuple[tuple[float, ...], ...]:
+        payload: dict[str, object] = {
+            "version": 1,
+            "service": "embedding",
+            "timestamp": int(time.time()),
+            "contents": list(contents),
+        }
+        selected_model = model or self._model
+        if selected_model:
+            payload["model"] = selected_model
+
+        result = self._post(payload)
+        raw_embedding = result.get("embedding")
+        if not isinstance(raw_embedding, list):
+            raise ProviderError("provider response did not contain embedding")
+        embeddings: list[tuple[float, ...]] = []
+        for vector in raw_embedding:
+            if not isinstance(vector, list):
+                raise ProviderError("provider response contained an invalid embedding")
+            if not all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in vector
+            ):
+                raise ProviderError("provider response contained an invalid embedding value")
+            embeddings.append(tuple(float(value) for value in vector))
+        return tuple(embeddings)
+
+    def _add_optional_chat_fields(self, payload: dict[str, object]) -> None:
+        if self._fields.reasoning_effort and self._reasoning_effort is not None:
+            payload[self._fields.reasoning_effort] = self._reasoning_effort
+        if self._fields.temperature and self._temperature is not None:
+            payload[self._fields.temperature] = self._temperature
+        if self._fields.max_response_tokens and self._max_response_tokens is not None:
+            payload[self._fields.max_response_tokens] = self._max_response_tokens
+        if self._fields.max_output_tokens and self._max_output_tokens is not None:
+            payload[self._fields.max_output_tokens] = self._max_output_tokens
+        if self._fields.max_tokens and self._max_tokens is not None:
+            payload[self._fields.max_tokens] = self._max_tokens
+        if self._fields.response_format and self._response_format is not None:
+            payload[self._fields.response_format] = self._response_format
+
+    def _post(self, payload: JsonObject, *, chat: bool = False) -> JsonObject:
+        try:
+            result = self._transport.post(
+                _chat_url(self._base_url, chat and self._supports_chat_completions),
+                self._headers(),
+                payload,
+            )
+        except ProviderError:
+            raise
+        except Exception as error:
+            raise ProviderError("provider request failed") from error
+        if not isinstance(result, Mapping):
+            raise ProviderError("provider response must be a JSON object")
+        return result
 
     def _headers(self, *, content_type: bool = True) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -262,6 +572,81 @@ def _serialize_message(message: AgentMessage) -> dict[str, object]:
     tool_call_id = getattr(message, "tool_call_id", None)
     if tool_call_id is not None:
         serialized["tool_call_id"] = tool_call_id
+    return serialized
+
+
+def _serialize_tool_definition(tool: ToolDefinition) -> dict[str, object]:
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": dict(tool.parameters),
+        },
+    }
+
+
+def _chat_url(base_url: str, append_chat_completions: bool) -> str:
+    if not append_chat_completions or base_url.endswith("/chat/completions"):
+        return base_url
+    return f"{base_url}/chat/completions"
+
+
+def _extract_response_field(result: JsonObject, path: str) -> object:
+    current: object = result
+    for segment in path.split("."):
+        key, separator, remainder = segment.partition("[")
+        if key:
+            if not isinstance(current, Mapping):
+                return None
+            current = current.get(key)
+        while separator:
+            index_text, closing, tail = remainder.partition("]")
+            if not closing or not index_text.isdigit() or not isinstance(current, list):
+                return None
+            index = int(index_text)
+            if not 0 <= index < len(current):
+                return None
+            current = current[index]
+            if not tail:
+                break
+            if not tail.startswith("["):
+                return None
+            separator = "["
+            remainder = tail[1:]
+    return current
+
+
+def _serialize_custom_messages(
+    messages: Sequence[AgentMessage],
+    tools: Sequence[ToolDefinition],
+) -> list[dict[str, object]]:
+    serialized: list[dict[str, object]] = []
+    if tools:
+        serialized.append(
+            {
+                "role": "developer",
+                "content": json.dumps(
+                    {
+                        "tools": [
+                            {
+                                "name": tool.name,
+                                "description": tool.description,
+                                "parameters": dict(tool.parameters),
+                            }
+                            for tool in tools
+                        ]
+                    }
+                ),
+            }
+        )
+    for message in messages:
+        serialized.append(
+            {
+                "role": message.role,
+                "content": message.content,
+            }
+        )
     return serialized
 
 

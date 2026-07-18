@@ -67,3 +67,11 @@ def test_catalog_help_separates_available_and_reserved_commands() -> None:
     assert "/model     switch the active model" in help_text
     assert "/compact   compact conversation context" in help_text
     assert "(also: connect, login)" in help_text
+
+
+def test_skills_is_an_available_discoverable_command() -> None:
+    invocation = DEFAULT_COMMAND_CATALOG.resolve("/skills")
+
+    assert invocation is not None
+    assert invocation.command.availability == "available"
+    assert DEFAULT_COMMAND_CATALOG.search("skill list")[0].command.id == "skills"

@@ -27,6 +27,7 @@ notes below; it does not mark a Peon command implemented.
 | `/provider` | `/connect`, `/login`, add provider, account | Available | Add or connect provider profile | 18 |
 | `/settings` | `/config`, preferences, options, provider settings | Available | Edit UI and saved-provider settings | 18 |
 | `/tools` | functions, capabilities, tool list | Available | List registered tools | 18 |
+| `/skills` | skill list, capabilities | Available | List discovered and registered skills | 17 |
 | `/logout` | `/disconnect`, sign out, remove provider | Available | Remove saved provider credentials/profile | 18 |
 | `/quit` | `/exit`, `/close`, `/q` | Available | Exit Peon | 18 |
 
@@ -48,7 +49,6 @@ notes below; it does not mark a Peon command implemented.
 | `/redo` | restore message, redo turn | Reserved | Redo reverted conversation mutation | 19 |
 | `/fork` | branch session, fork conversation | Reserved | Fork current conversation | 19 |
 | `/tree` | branches, session tree | Reserved | Navigate conversation branches | 19 |
-| `/skills` | skill list, capabilities | Reserved | Inspect and manage skills | 19 |
 | `/extensions` | `/plugins`, extension list | Reserved | Inspect and manage extensions | 19 |
 | `/reload` | refresh skills, refresh extensions | Reserved | Reload dynamic capabilities | 19 |
 | `/init` | initialize project, instructions | Reserved | Create project-agent instructions | 19 |

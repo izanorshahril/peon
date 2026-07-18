@@ -94,6 +94,8 @@ def test_textual_mounts_stable_layout_and_command_suggestions() -> None:
             await pilot.pause()
             assert app.query_one("#choices").display
             await pilot.press("escape")
+            await pilot.pause(0.4)
+            await pilot.press("escape")
             prompt.value = "/mo"
             message.focus()
             await pilot.press("x")
@@ -123,7 +125,9 @@ def test_textual_command_palette_wraps_selection_and_preserves_draft_on_escape()
             prompt.value = "/"
             await pilot.pause()
             assert "(also: reset)" in str(app.query_one("#suggestions").renderable)
-            assert "[reserved]" in str(app.query_one("#suggestions").renderable)
+            assert f"(1/{len(app.command_matches)})" in str(
+                app.query_one("#suggestions").renderable
+            )
             assert app.command_selected_index == 0
 
             await pilot.press("up")
@@ -136,6 +140,83 @@ def test_textual_command_palette_wraps_selection_and_preserves_draft_on_escape()
             assert prompt.value == "/mo"
             assert not app.command_matches
             assert str(app.query_one("#suggestions").renderable) == ""
+
+    asyncio.run(exercise())
+
+
+def test_textual_picker_search_and_focus_loss_keep_selection_safe() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/settings"
+            await pilot.press("enter", "1")
+            await pilot.pause()
+
+            assert app.choice_kind == "settings-ui"
+            assert str(app.query_one("#choice-count").renderable) == "(1/10)"
+            assert "Type to search" in str(app.query_one("#choice-hint").renderable)
+            assert str(app.query_one("#choices").renderable).startswith("> User top spacing")
+
+            search = app.query_one("#choice-search", Input)
+            search.focus()
+            await pilot.press("a")
+            assert search.value == "a"
+            search.value = ""
+            search.value = "assistant"
+            await pilot.pause()
+            assert str(app.query_one("#choice-count").renderable) == "(1/1)"
+            assert "Assistant message color" in str(app.query_one("#choices").renderable)
+
+            prompt.focus()
+            await pilot.press("down")
+            assert app.choice_selected_index == 0
+            assert app.ui_config.assistant_message_color == "#e0e0e0"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.choice_kind is None
+
+    asyncio.run(exercise())
+
+
+def test_textual_skills_command_lists_registered_skills() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        registry = ExtensionRegistry()
+        registry.register_skill("notes", lambda target: None)
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=registry,
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/skill:n"
+            await pilot.pause()
+            assert "/skill:notes" in str(app.query_one("#suggestions").renderable)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert "Skill 'notes' is registered." in app.query_one("#transcript").text
+
+            prompt.value = "/skills"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert "Skills: notes" in str(app.query_one("#transcript").text)
 
     asyncio.run(exercise())
 
@@ -252,6 +333,8 @@ def test_textual_adjusts_ui_and_provider_config_without_closing_lists() -> None:
             assert app.ui_config.user_top_blank_lines == 2
             assert app.choice_kind == "settings-ui"
 
+            await pilot.press("escape")
+            await pilot.pause(0.4)
             await pilot.press("escape")
             prompt.value = "/settings"
             await pilot.press("enter", "2", "1", "1", "2")
@@ -711,6 +794,8 @@ def test_textual_escape_cancels_model_and_provider_selection() -> None:
             await pilot.pause()
             assert app.choice_kind == "model"
             await pilot.press("escape")
+            await pilot.pause(0.4)
+            await pilot.press("escape")
             assert app.choice_kind is None
             assert app.setup_step is None
             assert app.config == config
@@ -721,10 +806,54 @@ def test_textual_escape_cancels_model_and_provider_selection() -> None:
             await pilot.pause()
             assert app.choice_kind == "provider"
             await pilot.press("escape")
+            await pilot.pause(0.4)
+            await pilot.press("escape")
             assert app.choice_kind is None
             assert app.setup_step is None
             assert app.config == config
             assert app.focused is prompt
+
+    asyncio.run(exercise())
+
+
+def test_textual_escape_backtracks_nested_settings_and_long_escape_closes() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="Corporate",
+            provider_type="custom",
+            model="chat-model",
+            base_url="http://localhost:8080",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/settings"
+            await pilot.press("enter", "2", "1", "1", "2")
+            await pilot.pause()
+            assert app.choice_kind == "settings-config"
+
+            for expected in (
+                "settings-profile",
+                "settings-provider",
+                "settings-provider-type",
+                "settings-root",
+            ):
+                await pilot.press("escape")
+                await pilot.pause(0.8)
+                assert app.choice_kind == expected
+
+            await pilot.press("escape")
+            assert app.choice_kind == "settings-root"
+            await pilot.press("escape")
+            await pilot.pause(0.4)
+            await pilot.press("escape")
+            assert app.choice_kind is None
+            assert app.setup_step is None
 
     asyncio.run(exercise())
 

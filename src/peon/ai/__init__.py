@@ -2,6 +2,9 @@
 
 from .errors import ProviderError
 from .providers import (
+	CustomProvider,
+	CustomRequestFields,
+	CustomResponseFields,
 	GitHubCopilotProvider,
 	JsonTransport,
 	OpenAICompatibleProvider,
@@ -10,6 +13,9 @@ from .providers import (
 
 __all__ = [
 	"GitHubCopilotProvider",
+	"CustomProvider",
+	"CustomRequestFields",
+	"CustomResponseFields",
 	"JsonTransport",
 	"OpenAICompatibleProvider",
 	"ProviderError",

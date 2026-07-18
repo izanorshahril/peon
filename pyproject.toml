@@ -4,20 +4,17 @@ version = "0.1.0"
 description = "Minimal modular Python agent core"
 requires-python = ">=3.13"
 dependencies = [
-    "openpyxl>=3.1,<4",
     "prompt-toolkit>=3.0,<4",
     "textual>=0.70,<1",
 ]
 
 [project.scripts]
 peon = "peon.app:main"
-report-harness = "report_harness.cli:main"
 
 [dependency-groups]
 dev = [
     "mypy>=1.15,<2",
     "pytest>=8,<9",
-    "types-openpyxl>=3.1,<4",
 ]
 
 [build-system]
@@ -25,4 +22,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/peon", "src/report_harness"]
+packages = ["src/peon"]

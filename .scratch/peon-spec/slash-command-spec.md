@@ -18,12 +18,15 @@ already-completed behavior twice, or exposing placeholders as if they worked.
 Build one shared slash-command system consumed by both terminal shells. It will own canonical names, candidate names, aliases, short descriptions, search terms, availability, ordering, argument policy, and resolution. Renderers will own presentation and keyboard input only.
 
 Typing `/` opens a Pi-style command list. Each row shows canonical command plus
-short description. Candidate names appear as compact hint text and participate
-in matching. Search considers canonical name, candidate names, and description
-terms, with deterministic ranking. Up/Down changes selected match, Tab
-completes it, Enter accepts an incomplete selected completion before command
-execution, and Escape dismisses suggestions. This follows Tau's tested
-completion-first behavior while keeping the composer focused.
+short description without numeric bullets; the selected row uses an arrow and
+the same highlight treatment as a picker. Candidate names appear as compact
+hint text and participate in matching. Search considers canonical name,
+candidate names, and description terms, with deterministic ranking. The palette
+shows the selected position and total result count plus a footer with keyboard
+hints. Up/Down changes selected match, Tab completes it, Enter accepts an
+incomplete selected completion before command execution, and Escape dismisses
+suggestions. This follows Tau's tested completion-first behavior while keeping
+the composer focused.
 
 Keep top-level command surface task-oriented. Provider-field commands move into `/settings`; compatibility aliases may continue resolving without appearing as primary commands. Add useful implemented commands under canonical names. Add future commands as explicit reserved entries with honest unavailable feedback. Maintain living command inventory recording implementation status, candidate names, source-reference status, and owning issue.
 
@@ -78,7 +81,7 @@ implemented in Peon merely because it appears in the inventory.
 42. As an operator, I want `/editor` reserved for external-editor composition, so that long prompts can use editor workflow later.
 43. As an operator, I want `/undo` and `/redo` reserved for conversation edits, so that reversible transcript changes have stable names.
 44. As an operator, I want `/fork` and `/tree` reserved for session branching, so that future branch navigation is coherent.
-45. As an operator, I want `/skills` and `/extensions` reserved for capability inspection and management, so that extensibility remains visible.
+45. As an operator, I want `/skills` and `/extensions` available for capability inspection and management, so that extensibility remains visible.
 46. As an operator, I want `/reload` reserved for refreshing dynamic capabilities, so that extension reload has one future action.
 47. As an operator, I want `/init` reserved for project instruction setup, so that coding-agent onboarding has a stable future name.
 48. As a maintainer, I want one command catalog shared by all shells, so that names and matching cannot drift.
@@ -104,11 +107,14 @@ implemented in Peon merely because it appears in the inventory.
 - Up/Down cycle visible matches with wraparound. Tab inserts selected canonical name and keeps composer active. Enter accepts a selected incomplete completion first; a later Enter invokes the completed command. Escape hides palette and preserves composer text.
 - Prompt-toolkit uses same search results and descriptions through its completer. Native Up/Down completion navigation remains, but ordering and metadata come from shared catalog.
 - Keep inline slash completion prompt-local. A later broader command palette may contain non-slash actions, following OpenCode's keymap projection, but it must still dispatch stable command IDs.
-- Initial primary available commands are `/help`, `/new`, `/model`, `/provider`, `/settings`, `/tools`, `/logout`, and `/quit`.
+- Initial primary available commands are `/help`, `/new`, `/model`, `/provider`, `/settings`, `/tools`, `/skills`, `/logout`, and `/quit`.
 - `/clear` and `/reset` become compatibility vocabulary for `/new`. `/models` becomes compatibility vocabulary for `/model`. `/exit`, `/close`, and `/q` become compatibility vocabulary for `/quit`.
 - Provider-field commands leave primary surface: `/temperature`, `/reasoning`, token-limit commands, support toggles, `/base-url`, `/api-key`, `/response-format`, and `/provider-name`. Their settings remain available through `/settings`; temporary hidden aliases preserve migration compatibility.
-- Initial reserved commands are `/session`, `/compact`, `/export`, `/share`, `/copy`, `/status`, `/usage`, `/thinking`, `/theme`, `/editor`, `/undo`, `/redo`, `/fork`, `/tree`, `/skills`, `/extensions`, `/reload`, and `/init`.
+- Initial reserved commands are `/session`, `/compact`, `/export`, `/share`, `/copy`, `/status`, `/usage`, `/thinking`, `/theme`, `/editor`, `/undo`, `/redo`, `/fork`, `/tree`, `/extensions`, `/reload`, and `/init`.
 - Reserved inventory records researched future contracts, not proof of implementation or exact Pi/Tau/OpenCode parity. The source evidence and the product decision remain separate.
+- Registered extension skills appear as dynamic `/skill:<name>` completion entries. `/skills` lists their names; loading and execution remain owned by the extension registry rather than the application shell.
+- Picker rows use the same arrow/highlight presentation as slash commands. Pickers provide search, current/total counts, and keyboard hints, and app-owned navigation remains active after focus moves away from the search field.
+- Selected command foreground color is configurable through UI settings and defaults to black on the existing grey highlight.
 - Command execution uses stable IDs and typed invocation results. Shell-specific presentation effects remain renderer-owned; shared service owns resolution and availability checks.
 - Existing agent loop, provider adapters, context model, settings hierarchy, and provider persistence remain unchanged unless command naming requires routing updates.
 - Completed issue history remains in place. Active map will separate completed foundation from new command-system backlog.
