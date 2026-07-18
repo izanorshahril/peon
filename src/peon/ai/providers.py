@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 import os
 import time
-from typing import Protocol
+from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -14,6 +14,8 @@ from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
 from .errors import ProviderError
 
 JsonObject = Mapping[str, object]
+ToolPromptRole = Literal["system", "developer"]
+PEON_USER_AGENT = "peon"
 
 
 class JsonTransport(Protocol):
@@ -24,6 +26,7 @@ class JsonTransport(Protocol):
         payload: JsonObject,
     ) -> JsonObject:
         """Send one JSON request and return a JSON object response."""
+        ...
 
     def get(
         self,
@@ -31,6 +34,7 @@ class JsonTransport(Protocol):
         headers: Mapping[str, str],
     ) -> JsonObject:
         """Send one JSON GET request and return a JSON object response."""
+        ...
 
 
 class UrllibJsonTransport:
@@ -90,6 +94,7 @@ class OpenAICompatibleProvider:
         response_format: str | None = None,
         supports_tools: bool = True,
         supports_chat_completions: bool = True,
+        tool_prompt_role: str = "developer",
         transport: JsonTransport | None = None,
     ) -> None:
         if not base_url.strip():
@@ -106,6 +111,7 @@ class OpenAICompatibleProvider:
             response_format=response_format,
             supports_tools=supports_tools,
             supports_chat_completions=supports_chat_completions,
+            tool_prompt_role=_resolve_tool_prompt_role(tool_prompt_role),
             transport=transport or UrllibJsonTransport(),
         )
 
@@ -161,6 +167,7 @@ class CustomProvider:
         response_format: str | None = "text",
         supports_tools: bool = False,
         supports_chat_completions: bool = False,
+        tool_prompt_role: str = "developer",
         transport: JsonTransport | None = None,
     ) -> None:
         if not base_url.strip():
@@ -194,6 +201,7 @@ class CustomProvider:
             response_format=response_format,
             supports_tools=supports_tools,
             supports_chat_completions=supports_chat_completions,
+            tool_prompt_role=_resolve_tool_prompt_role(tool_prompt_role),
             transport=transport or UrllibJsonTransport(),
         )
 
@@ -283,6 +291,7 @@ class _ChatCompletionsClient:
         response_format: str | None = None,
         supports_tools: bool = True,
         supports_chat_completions: bool = True,
+        tool_prompt_role: str = "developer",
     ) -> None:
         if model is not None and not model.strip():
             raise ProviderError("provider model is required")
@@ -297,6 +306,9 @@ class _ChatCompletionsClient:
         self._response_format = response_format
         self._supports_tools = supports_tools
         self._supports_chat_completions = supports_chat_completions
+        self._tool_prompt_role: ToolPromptRole = _resolve_tool_prompt_role(
+            tool_prompt_role
+        )
         self._transport = transport
 
     def list_models(self) -> tuple[str, ...]:
@@ -337,7 +349,9 @@ class _ChatCompletionsClient:
             "messages": (
                 [_serialize_message(message) for message in messages]
                 if self._supports_tools
-                else _serialize_custom_messages(messages, tools)
+                else _serialize_custom_messages(
+                    messages, tools, role=self._tool_prompt_role
+                )
             ),
         }
         if tools and self._supports_tools:
@@ -381,6 +395,7 @@ class _ChatCompletionsClient:
 
     def _headers(self, *, content_type: bool = True) -> dict[str, str]:
         headers: dict[str, str] = {}
+        headers["User-Agent"] = PEON_USER_AGENT
         if content_type:
             headers["Content-Type"] = "application/json"
         if self._token:
@@ -405,6 +420,7 @@ class _CustomServiceClient:
         response_format: str | None,
         supports_tools: bool,
         supports_chat_completions: bool,
+        tool_prompt_role: ToolPromptRole,
         transport: JsonTransport,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -420,6 +436,9 @@ class _CustomServiceClient:
         self._response_format = response_format
         self._supports_tools = supports_tools
         self._supports_chat_completions = supports_chat_completions
+        self._tool_prompt_role: ToolPromptRole = _resolve_tool_prompt_role(
+            tool_prompt_role
+        )
         self._transport = transport
 
     def list_models(self) -> tuple[str, ...]:
@@ -459,7 +478,9 @@ class _CustomServiceClient:
             "messages": (
                 [_serialize_message(message) for message in messages]
                 if self._supports_tools
-                else _serialize_custom_messages(messages, tools)
+                else _serialize_custom_messages(
+                    messages, tools, role=self._tool_prompt_role
+                )
             ),
         }
         if tools and self._supports_tools:
@@ -472,6 +493,12 @@ class _CustomServiceClient:
         result = self._post(payload, chat=True)
         completion = _extract_response_field(result, self._response_fields.content)
         if isinstance(completion, str) and completion.strip():
+            tool_call = _parse_text_tool_call(completion)
+            if tool_call is not None:
+                return ModelResponse(tool_call=tool_call)
+            final = _parse_text_final(completion)
+            if final is not None:
+                return ModelResponse(content=final)
             return ModelResponse(content=completion)
         if "choices" in result:
             return _parse_response(result)
@@ -540,6 +567,7 @@ class _CustomServiceClient:
 
     def _headers(self, *, content_type: bool = True) -> dict[str, str]:
         headers: dict[str, str] = {}
+        headers["User-Agent"] = PEON_USER_AGENT
         if content_type:
             headers["Content-Type"] = "application/json"
         if self._token:
@@ -617,37 +645,66 @@ def _extract_response_field(result: JsonObject, path: str) -> object:
     return current
 
 
+def _resolve_tool_prompt_role(role: str) -> ToolPromptRole:
+    normalized = role.strip().lower()
+    if normalized not in {"system", "developer"}:
+        raise ProviderError("tool prompt role must be system or developer")
+    return cast(ToolPromptRole, normalized)
+
+
 def _serialize_custom_messages(
     messages: Sequence[AgentMessage],
     tools: Sequence[ToolDefinition],
+    *,
+    role: ToolPromptRole = "developer",
 ) -> list[dict[str, object]]:
     serialized: list[dict[str, object]] = []
+    for message in messages:
+        content = message.content
+        if message.tool_call is not None:
+            content = json.dumps(
+                {
+                    "tool_call": {
+                        "name": message.tool_call.name,
+                        "arguments": dict(message.tool_call.arguments),
+                        **(
+                            {"id": message.tool_call.call_id}
+                            if message.tool_call.call_id is not None
+                            else {}
+                        ),
+                    }
+                },
+                separators=(",", ":"),
+            )
+        serialized.append({"role": message.role, "content": content})
     if tools:
         serialized.append(
             {
-                "role": "developer",
-                "content": json.dumps(
-                    {
-                        "tools": [
-                            {
-                                "name": tool.name,
-                                "description": tool.description,
-                                "parameters": dict(tool.parameters),
-                            }
-                            for tool in tools
-                        ]
-                    }
-                ),
-            }
-        )
-    for message in messages:
-        serialized.append(
-            {
-                "role": message.role,
-                "content": message.content,
+                "role": role,
+                "content": _build_tool_prompt_content(tools),
             }
         )
     return serialized
+
+
+def _build_tool_prompt_content(tools: Sequence[ToolDefinition]) -> str:
+    tool_specs = [
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": dict(tool.parameters),
+        }
+        for tool in tools
+    ]
+    return (
+        "Peon provided callable tools through the tools field. "
+        "When the next step requires using a tool, respond with only compact JSON "
+        'in this exact shape: {"tool_call":{"name":"tool_name","arguments":{...}}}. '
+        "Use only listed tool names and arguments that match their schemas. "
+        "Use only one tool call per response. "
+        'When no tool is needed, respond with only: {"final":"answer text"}. '
+        "Available tools: " + json.dumps(tool_specs, ensure_ascii=False)
+    )
 
 
 def _parse_response(result: JsonObject) -> ModelResponse:
@@ -666,6 +723,12 @@ def _parse_response(result: JsonObject) -> ModelResponse:
     if tool_call is not None:
         return ModelResponse(content=content if isinstance(content, str) else "", tool_call=tool_call)
     if isinstance(content, str) and content.strip():
+        fallback_tool_call = _parse_text_tool_call(content)
+        if fallback_tool_call is not None:
+            return ModelResponse(tool_call=fallback_tool_call)
+        fallback_final = _parse_text_final(content)
+        if fallback_final is not None:
+            return ModelResponse(content=fallback_final)
         return ModelResponse(content=content)
     raise ProviderError("provider response did not contain text or a tool call")
 
@@ -700,3 +763,49 @@ def _parse_tool_call(value: object) -> ToolCall | None:
     if call_id is not None and not isinstance(call_id, str):
         raise ProviderError("provider tool call id must be a string")
     return ToolCall(name=name, arguments=arguments, call_id=call_id)
+
+
+def _parse_text_tool_call(content: str) -> ToolCall | None:
+    try:
+        raw_response = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw_response, Mapping):
+        return None
+
+    raw_call = raw_response.get("tool_call")
+    if raw_call is None and "tool_calls" in raw_response:
+        raw_calls = raw_response.get("tool_calls")
+        if not isinstance(raw_calls, list) or not raw_calls:
+            raise ProviderError("provider response contained invalid tool calls")
+        raw_call = raw_calls[0]
+    if raw_call is None:
+        return None
+    if not isinstance(raw_call, Mapping):
+        raise ProviderError("provider response contained an invalid tool call")
+
+    name = raw_call.get("name")
+    arguments = raw_call.get("arguments", {})
+    if not isinstance(name, str) or not name.strip():
+        raise ProviderError("provider tool call did not contain a name")
+    if not isinstance(arguments, Mapping):
+        raise ProviderError(
+            "provider response tool call arguments must be an object"
+        )
+    call_id = raw_call.get("id", raw_call.get("call_id"))
+    if call_id is not None and not isinstance(call_id, str):
+        raise ProviderError("provider tool call id must be a string")
+    return ToolCall(name=name, arguments=arguments, call_id=call_id)
+
+
+def _parse_text_final(content: str) -> str | None:
+    try:
+        raw_response = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw_response, Mapping) or "final" not in raw_response:
+        return None
+    final = raw_response["final"]
+    if not isinstance(final, str):
+        raise ProviderError("provider response final must be a string")
+    return final

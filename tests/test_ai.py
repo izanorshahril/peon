@@ -4,7 +4,7 @@ from typing import cast
 
 import pytest
 
-from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
+from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition, run_task
 from peon.ai import (
     CustomProvider,
     CustomRequestFields,
@@ -14,6 +14,7 @@ from peon.ai import (
     ProviderError,
     UrllibJsonTransport,
 )
+from peon.extensions import ExtensionRegistry, register_sample_tools
 
 
 class StubTransport:
@@ -49,6 +50,25 @@ class StubTransport:
         return cast(Mapping[str, object], self.get_response)
 
 
+class QueuedTransport(StubTransport):
+    def __init__(self, responses: list[object]) -> None:
+        super().__init__({})
+        self.responses = responses
+        self.payloads: list[Mapping[str, object]] = []
+
+    def post(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+        payload: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        self.payloads.append(payload)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return cast(Mapping[str, object], response)
+
+
 def test_openai_compatible_provider_normalizes_request_and_text_response() -> None:
     transport = StubTransport(
         {"choices": [{"message": {"content": "Repository summarized."}}]}
@@ -75,6 +95,7 @@ def test_openai_compatible_provider_normalizes_request_and_text_response() -> No
     assert transport.headers == {
         "Authorization": "Bearer openai-key",
         "Content-Type": "application/json",
+        "User-Agent": "peon",
     }
     assert transport.payload is not None
     assert transport.payload["model"] == "small-model"
@@ -119,7 +140,10 @@ def test_custom_provider_matches_corporate_chat_payload(monkeypatch) -> None:
 
     assert response == ModelResponse(content="Corporate response.")
     assert transport.url == "https://proxy.test/api/client-apps"
-    assert transport.headers == {"Content-Type": "application/json"}
+    assert transport.headers == {
+        "Content-Type": "application/json",
+        "User-Agent": "peon",
+    }
     assert transport.payload == {
         "version": 1,
         "service": "chat",
@@ -131,10 +155,13 @@ def test_custom_provider_matches_corporate_chat_payload(monkeypatch) -> None:
         "responseFormat": "text",
         "messages": [
             {
-                "role": "developer",
-                "content": '{"tools": [{"name": "lookup", "description": "Look up a value.", "parameters": {"type": "object"}}]}',
+                "role": "user",
+                "content": "Hello",
             },
-            {"role": "user", "content": "Hello"},
+            {
+                "role": "developer",
+                "content": "Peon provided callable tools through the tools field. When the next step requires using a tool, respond with only compact JSON in this exact shape: {\"tool_call\":{\"name\":\"tool_name\",\"arguments\":{...}}}. Use only listed tool names and arguments that match their schemas. Use only one tool call per response. When no tool is needed, respond with only: {\"final\":\"answer text\"}. Available tools: [{\"name\": \"lookup\", \"description\": \"Look up a value.\", \"parameters\": {\"type\": \"object\"}}]",
+            },
         ],
     }
 
@@ -191,6 +218,91 @@ def test_custom_provider_uses_configured_corporate_field_names() -> None:
     assert transport.payload["response_format"] == "json_object"
 
 
+def test_custom_provider_can_place_tool_prompt_in_system_role() -> None:
+    transport = StubTransport({"completion": "Configured response."})
+    provider = CustomProvider(
+        base_url="http://localhost:8080",
+        model="chat-model",
+        tool_prompt_role="system",
+        transport=transport,
+    )
+
+    provider.complete(
+        messages=[AgentMessage(role="user", content="Hello")],
+        tools=[
+            ToolDefinition(
+                name="lookup",
+                description="Look up a value.",
+                parameters={"type": "object"},
+            )
+        ],
+    )
+
+    assert transport.payload is not None
+    assert transport.payload["messages"][1]["role"] == "system"  # type: ignore[index]
+
+
+def test_custom_provider_parses_ai_bridge_tool_call_completion() -> None:
+    transport = StubTransport(
+        {
+            "completion": '{"tool_call":{"name":"lookup","arguments":{"key":"owner"}}}'
+        }
+    )
+    provider = CustomProvider(
+        base_url="http://localhost:8080",
+        model="chat-model",
+        transport=transport,
+    )
+
+    response = provider.complete(messages=[])
+
+    assert response == ModelResponse(
+        tool_call=ToolCall(name="lookup", arguments={"key": "owner"})
+    )
+
+
+def test_word_count_fallback_turn_executes_and_returns_final_answer() -> None:
+    transport = QueuedTransport(
+        [
+            {
+                "completion": (
+                    '{"tool_call":{"name":"word_count",'
+                    '"arguments":{"text":"one two three"}}}'
+                )
+            },
+            {"completion": '{"final":"There are three words."}'},
+        ]
+    )
+    provider = CustomProvider(
+        base_url="http://localhost:8080",
+        model="chat-model",
+        transport=transport,
+    )
+    registry = ExtensionRegistry()
+    register_sample_tools(registry)
+
+    result = run_task(
+        "Count the words in one two three.",
+        provider,
+        executor=registry,
+    )
+
+    assert result == "There are three words."
+    assert len(transport.payloads) == 2
+    second_messages = transport.payloads[1]["messages"]
+    assert isinstance(second_messages, list)
+    assert second_messages[-3:-1] == [
+        {
+            "role": "assistant",
+            "content": (
+                '{"tool_call":{"name":"word_count",'
+                '"arguments":{"text":"one two three"}}}'
+            ),
+        },
+        {"role": "tool", "content": "word count: 3"},
+    ]
+
+
 def test_openai_provider_applies_config_and_wraps_tools_when_unsupported() -> None:
     transport = StubTransport(
         {"choices": [{"message": {"content": "Configured response."}}]}
@@ -229,7 +341,7 @@ def test_openai_provider_applies_config_and_wraps_tools_when_unsupported() -> No
     assert transport.payload["max_tokens"] == 4096
     assert transport.payload["response_format"] == {"type": "json_object"}
     assert "tools" not in transport.payload
-    assert transport.payload["messages"][0]["role"] == "developer"  # type: ignore[index]
+    assert transport.payload["messages"][1]["role"] == "developer"  # type: ignore[index]
 
 
 def test_custom_provider_uses_chat_suffix_and_configured_response_path() -> None:
@@ -277,7 +389,10 @@ def test_openai_compatible_provider_allows_optional_api_key() -> None:
     response = provider.complete(messages=[])
 
     assert response == ModelResponse(content="Local response.")
-    assert transport.headers == {"Content-Type": "application/json"}
+    assert transport.headers == {
+        "Content-Type": "application/json",
+        "User-Agent": "peon",
+    }
 
 
 def test_openai_compatible_provider_discovers_available_models() -> None:
@@ -301,7 +416,7 @@ def test_openai_compatible_provider_discovers_available_models() -> None:
 
     assert models == ("local-small", "local-large")
     assert transport.url == "http://localhost:11434/v1/models"
-    assert transport.headers == {}
+    assert transport.headers == {"User-Agent": "peon"}
 
 
 def test_openai_compatible_provider_normalizes_tool_call_response() -> None:

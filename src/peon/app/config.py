@@ -308,11 +308,15 @@ def _parse_provider_config(raw_config: object) -> ProviderConfig | None:
         "response_format_field",
         "response_format",
         "response_content_field",
+        "tool_prompt_role",
     ):
         value = raw_config.get(field_name)
         if value is not None and not isinstance(value, str):
             return None
         optional_values[field_name] = value
+    tool_prompt_role = optional_values.get("tool_prompt_role")
+    if tool_prompt_role is not None and tool_prompt_role not in {"system", "developer"}:
+        return None
 
     numeric_values: dict[str, int | float | None] = {}
     for field_name in (
@@ -329,8 +333,9 @@ def _parse_provider_config(raw_config: object) -> ProviderConfig | None:
         numeric_values[field_name] = value
 
     boolean_values: dict[str, bool] = {}
+    provider_type = optional_values["provider_type"] or name
     for field_name, default in (
-        ("supports_tools", False),
+        ("supports_tools", provider_type != "custom"),
         ("supports_stream", False),
         ("supports_chat_completions", True),
     ):
@@ -383,6 +388,7 @@ def _parse_provider_config(raw_config: object) -> ProviderConfig | None:
         ),
         response_content_field=optional_values.pop("response_content_field")
         or "completion",
+        tool_prompt_role=tool_prompt_role or "developer",
         supports_tools=boolean_values["supports_tools"],
         supports_stream=boolean_values["supports_stream"],
         supports_chat_completions=boolean_values["supports_chat_completions"],
@@ -411,6 +417,7 @@ def _serialize_provider_config(config: ProviderConfig) -> dict[str, object]:
         "response_format_field": config.response_format_field,
         "response_format": config.response_format,
         "response_content_field": config.response_content_field,
+        "tool_prompt_role": config.tool_prompt_role,
         "supports_tools": config.supports_tools,
         "supports_stream": config.supports_stream,
         "supports_chat_completions": config.supports_chat_completions,

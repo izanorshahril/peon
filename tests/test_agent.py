@@ -210,9 +210,20 @@ def test_run_task_reports_unknown_tool_failures() -> None:
         received_messages=[],
         received_tools=[],
     )
+    context = AgentContext()
 
     with pytest.raises(AgentError, match="tool 'missing'.*not registered"):
-        run_task("Use the missing tool.", provider, executor=build_lookup_registry())
+        run_task(
+            "Use the missing tool.",
+            provider,
+            context=context,
+            executor=build_lookup_registry(),
+        )
+
+    assert context.messages[-1] == AgentMessage(
+        role="tool",
+        content="tool error: tool 'missing' is not registered",
+    )
 
 
 def test_run_task_rejects_invalid_tool_arguments() -> None:

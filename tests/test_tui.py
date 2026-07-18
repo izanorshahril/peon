@@ -2,9 +2,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from io import StringIO
 
-from peon.agent import AgentMessage, ModelResponse, ToolDefinition
+from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
 from peon.app import JsonProviderConfigStore, ProviderConfig
 from peon.app.tui import SlashCommandCompleter, run_tui
+from peon.app.sessions import JsonlSessionStore, MemorySessionStore
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
@@ -49,6 +50,46 @@ class ProviderFactory:
             received_messages=[],
             received_tools=[],
             models=("first-model", "second-model"),
+        )
+        self.providers.append(provider)
+        return provider
+
+
+class ToolCallingProvider(FakeProvider):
+    def __init__(self, responses: list[ModelResponse]) -> None:
+        super().__init__(responses=[], received_messages=[], received_tools=[])
+        self.model_responses = responses
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+    ) -> ModelResponse:
+        self.received_messages.append(tuple(messages))
+        self.received_tools.append(tuple(tools))
+        return self.model_responses.pop(0)
+
+    def list_models(self) -> tuple[str, ...]:
+        return ("first-model",)
+
+
+class ToolCallingFactory:
+    def __init__(self) -> None:
+        self.providers: list[ToolCallingProvider] = []
+
+    def __call__(self, config: ProviderConfig) -> ToolCallingProvider:
+        provider = ToolCallingProvider(
+            [
+                ModelResponse(
+                    tool_call=ToolCall(
+                        name="word_count",
+                        arguments={"text": "one two three"},
+                    )
+                ),
+                ModelResponse(content="There are three words."),
+            ]
         )
         self.providers.append(provider)
         return provider
@@ -100,6 +141,18 @@ class MultiMemoryConfigStore:
         ]
         if self.active == config and self.configurations:
             self.active = self.configurations[0]
+
+
+class FailOnceSessionStore(MemorySessionStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    def append(self, session_id: str, message: AgentMessage) -> None:
+        if not self.failed:
+            self.failed = True
+            raise OSError("storage temporarily unavailable")
+        super().append(session_id, message)
 
 
 def scripted_input(values: list[str]):
@@ -155,12 +208,169 @@ def test_tui_configures_provider_and_keeps_context_between_tasks() -> None:
     assert output.getvalue().count("first response") == 1
     assert output.getvalue().count("second response") == 1
     assert [tool.name for tool in factory.providers[1].received_tools[0]] == [
-        "word_count"
+        "word_count",
+        "read",
+        "ls",
+        "find",
+        "grep",
     ]
     assert factory.providers[1].received_messages[1] == (
         AgentMessage(role="user", content="first task"),
         AgentMessage(role="assistant", content="first response"),
         AgentMessage(role="user", content="second task"),
+    )
+
+
+def test_tui_executes_native_word_count_and_renders_final_response() -> None:
+    factory = ToolCallingFactory()
+    config_store = MemoryConfigStore()
+    output = StringIO()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(
+            [
+                "1",
+                "https://example.test/v1",
+                "1",
+                "count the words",
+                "/quit",
+            ]
+        ),
+        secret_input=scripted_secret(["api-key"]),
+        output=output,
+        config_store=config_store,
+    )
+
+    assert result == 0
+    assert "There are three words." in output.getvalue()
+    assert "unhandled tool" not in output.getvalue()
+    assert factory.providers[1].received_messages[1][-2:] == (
+        AgentMessage(
+            role="assistant",
+            content="",
+            tool_call=ToolCall(
+                name="word_count",
+                arguments={"text": "one two three"},
+            ),
+        ),
+        AgentMessage(role="tool", content="word count: 3"),
+    )
+
+
+def test_tui_resumes_sessions_and_new_preserves_previous_conversation() -> None:
+    config_store = MemoryConfigStore()
+    session_store = MemorySessionStore()
+    first_factory = ProviderFactory()
+    run_tui(
+        provider_factory=first_factory,
+        input_fn=scripted_input(
+            [
+                "1",
+                "https://example.test/v1",
+                "1",
+                "first task",
+                "/quit",
+            ]
+        ),
+        secret_input=scripted_secret(["api-key"]),
+        output=StringIO(),
+        config_store=config_store,
+        session_store=session_store,
+    )
+    first_session = session_store.load_latest()
+    assert first_session is not None
+    assert first_session.messages[0] == AgentMessage(
+        role="user", content="first task"
+    )
+
+    second_factory = ProviderFactory()
+    run_tui(
+        provider_factory=second_factory,
+        input_fn=scripted_input(["second task", "/new", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=config_store,
+        session_store=session_store,
+    )
+
+    resumed_messages = second_factory.providers[0].received_messages[0]
+    assert resumed_messages == (
+        AgentMessage(role="user", content="first task"),
+        AgentMessage(role="assistant", content="first response"),
+        AgentMessage(role="user", content="second task"),
+    )
+    assert len(session_store.order) == 2
+    assert session_store.load(first_session.session_id).messages == (
+        *first_session.messages,
+        AgentMessage(role="user", content="second task"),
+        AgentMessage(role="assistant", content="first response"),
+    )
+    latest = session_store.load_latest()
+    assert latest is not None
+    assert latest.session_id != first_session.session_id
+    assert latest.messages == ()
+
+
+def test_tui_resumes_jsonl_session_after_process_restart(tmp_path) -> None:
+    config_store = MemoryConfigStore()
+    session_store = JsonlSessionStore(tmp_path / "sessions")
+    run_tui(
+        provider_factory=ProviderFactory(),
+        input_fn=scripted_input(
+            ["1", "https://example.test/v1", "1", "first task", "/quit"]
+        ),
+        secret_input=scripted_secret(["api-key"]),
+        output=StringIO(),
+        config_store=config_store,
+        session_store=session_store,
+    )
+
+    second_factory = ProviderFactory()
+    run_tui(
+        provider_factory=second_factory,
+        input_fn=scripted_input(["second task", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=config_store,
+        session_store=JsonlSessionStore(tmp_path / "sessions"),
+    )
+
+    assert second_factory.providers[0].received_messages[0] == (
+        AgentMessage(role="user", content="first task"),
+        AgentMessage(role="assistant", content="first response"),
+        AgentMessage(role="user", content="second task"),
+    )
+
+
+def test_tui_retries_unsaved_messages_on_the_next_task() -> None:
+    config_store = MemoryConfigStore()
+    session_store = FailOnceSessionStore()
+    run_tui(
+        provider_factory=ProviderFactory(),
+        input_fn=scripted_input(
+            [
+                "1",
+                "https://example.test/v1",
+                "1",
+                "first task",
+                "second task",
+                "/quit",
+            ]
+        ),
+        secret_input=scripted_secret(["api-key"]),
+        output=StringIO(),
+        config_store=config_store,
+        session_store=session_store,
+    )
+
+    saved = session_store.load_latest()
+    assert saved is not None
+    assert saved.messages == (
+        AgentMessage(role="user", content="first task"),
+        AgentMessage(role="assistant", content="first response"),
+        AgentMessage(role="user", content="second task"),
+        AgentMessage(role="assistant", content="second response"),
     )
 
 

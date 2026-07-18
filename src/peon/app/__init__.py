@@ -9,6 +9,13 @@ from .commands import (
 	CommandMatch,
 )
 from .config import JsonProviderConfigStore, ProviderConfigStore, UiConfig
+from .sessions import (
+	JsonlSessionStore,
+	MemorySessionStore,
+	SessionRecord,
+	SessionStore,
+	SessionStoreError,
+)
 from .tui import TuiSession, run_tui
 
 __all__ = [
@@ -19,8 +26,13 @@ __all__ = [
 	"CommandInvocation",
 	"CommandMatch",
 	"JsonProviderConfigStore",
+	"JsonlSessionStore",
+	"MemorySessionStore",
 	"ProviderConfig",
 	"ProviderConfigStore",
+	"SessionRecord",
+	"SessionStore",
+	"SessionStoreError",
 	"TuiSession",
 	"UiConfig",
 	"build_parser",

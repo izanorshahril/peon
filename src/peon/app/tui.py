@@ -16,7 +16,11 @@ from prompt_toolkit.document import Document
 
 from peon.agent import AgentContext, AgentError, ModelProvider, ToolCall, run_task
 from peon.ai import ProviderError
-from peon.extensions import ExtensionRegistry, register_sample_tools
+from peon.extensions import (
+    ExtensionRegistry,
+    register_filesystem_tools,
+    register_sample_tools,
+)
 
 from .cli import (
     CONFIG_SETTING_SPECS,
@@ -42,6 +46,12 @@ from .config import (
     update_ui_setting,
 )
 from .commands import DEFAULT_COMMAND_CATALOG, CommandDefinition
+from .sessions import (
+    JsonlSessionStore,
+    MemorySessionStore,
+    SessionStore,
+    SessionStoreError,
+)
 
 InputFunction = Callable[[str], str]
 SecretInputFunction = Callable[[str], str]
@@ -95,6 +105,9 @@ class TuiSession:
     config: ProviderConfig
     context: AgentContext = field(default_factory=AgentContext)
     registry: ExtensionRegistry = field(default_factory=ExtensionRegistry)
+    session_id: str = ""
+    session_store: SessionStore = field(default_factory=MemorySessionStore)
+    persisted_message_count: int = 0
 
 
 def _terminal_rule() -> str:
@@ -153,6 +166,7 @@ def run_tui(
     error: TextIO | None = None,
     registry: ExtensionRegistry | None = None,
     config_store: ProviderConfigStore | None = None,
+    session_store: SessionStore | None = None,
     user_top_blank_lines: int = 1,
     user_bottom_blank_lines: int = 1,
     message_left_padding: int = 1,
@@ -163,8 +177,10 @@ def run_tui(
     secret_input = secret_input or getpass.getpass
     active_registry = registry or ExtensionRegistry()
     active_config_store = config_store or JsonProviderConfigStore()
+    active_session_store = session_store or _default_session_store(active_config_store)
     if registry is None:
         register_sample_tools(active_registry)
+        register_filesystem_tools(active_registry)
 
     if input_fn is None:
         from .textual_tui import run_textual_tui
@@ -175,19 +191,25 @@ def run_tui(
             error=error,
             registry=active_registry,
             config_store=active_config_store,
+            session_store=active_session_store,
             user_top_blank_lines=user_top_blank_lines,
             user_bottom_blank_lines=user_bottom_blank_lines,
             message_left_padding=message_left_padding,
         )
 
     _print_header(output=output)
+    active_session_store, session_id, context = _load_starting_session(
+        active_session_store, error=error
+    )
     session = _restore_session(
         provider_factory=provider_factory,
         config_store=active_config_store,
         output=output,
         error=error,
-        context=AgentContext(),
+        context=context,
         registry=active_registry,
+        session_id=session_id,
+        session_store=active_session_store,
     )
     try:
         while session is None:
@@ -197,9 +219,11 @@ def run_tui(
                 secret_input=secret_input,
                 output=output,
                 error=error,
-                context=AgentContext(),
+                context=context,
                 registry=active_registry,
                 config_store=active_config_store,
+                session_id=session_id,
+                session_store=active_session_store,
             )
         result, session = _conversation_loop(
             session,
@@ -217,6 +241,34 @@ def run_tui(
         return 0
 
 
+def _default_session_store(config_store: ProviderConfigStore) -> SessionStore:
+    if isinstance(config_store, JsonProviderConfigStore):
+        return JsonlSessionStore()
+    return MemorySessionStore()
+
+
+def _load_starting_session(
+    store: SessionStore,
+    *,
+    error: TextIO,
+) -> tuple[SessionStore, str, AgentContext]:
+    try:
+        latest = store.load_latest()
+    except SessionStoreError as caught:
+        print(f"peon: could not resume saved session: {caught}", file=error)
+        latest = None
+    if latest is not None:
+        return store, latest.session_id, AgentContext(messages=list(latest.messages))
+    try:
+        created = store.create()
+    except (OSError, SessionStoreError) as caught:
+        print(f"peon: could not create saved session: {caught}", file=error)
+        fallback = MemorySessionStore()
+        created = fallback.create()
+        return fallback, created.session_id, AgentContext()
+    return store, created.session_id, AgentContext()
+
+
 def _configure_session(
     *,
     provider_factory: ProviderFactory | None,
@@ -227,6 +279,9 @@ def _configure_session(
     context: AgentContext,
     registry: ExtensionRegistry,
     config_store: ProviderConfigStore,
+    session_id: str,
+    session_store: SessionStore,
+    persisted_message_count: int | None = None,
 ) -> TuiSession | None:
     provider_name = _select_provider(input_fn=input_fn, output=output, error=error)
     if provider_name is None:
@@ -308,6 +363,13 @@ def _configure_session(
         config=config,
         context=context,
         registry=registry,
+        session_id=session_id,
+        session_store=session_store,
+        persisted_message_count=(
+            len(context.messages)
+            if persisted_message_count is None
+            else persisted_message_count
+        ),
     )
 
 
@@ -319,6 +381,8 @@ def _restore_session(
     error: TextIO,
     context: AgentContext,
     registry: ExtensionRegistry,
+    session_id: str,
+    session_store: SessionStore,
 ) -> TuiSession | None:
     configs = config_store.load_all()
     if not configs:
@@ -342,6 +406,9 @@ def _restore_session(
         config=config,
         context=context,
         registry=registry,
+        session_id=session_id,
+        session_store=session_store,
+        persisted_message_count=len(context.messages),
     )
 
 
@@ -567,6 +634,9 @@ def _configure_provider_category(
             config=config,
             context=session.context,
             registry=session.registry,
+            session_id=session.session_id,
+            session_store=session.session_store,
+            persisted_message_count=session.persisted_message_count,
         )
         print(f"Updated {spec.label}.", file=output)
 
@@ -659,6 +729,9 @@ def _configure_settings(
                 context=session.context,
                 registry=session.registry,
                 config_store=config_store,
+                session_id=session.session_id,
+                session_store=session.session_store,
+                persisted_message_count=session.persisted_message_count,
             )
             session = replacement or session
             continue
@@ -760,6 +833,9 @@ def _update_active_provider_setting(
         config=config,
         context=session.context,
         registry=session.registry,
+        session_id=session.session_id,
+        session_store=session.session_store,
+        persisted_message_count=session.persisted_message_count,
     )
 
 
@@ -788,6 +864,9 @@ def _switch_model(
         config=config,
         context=session.context,
         registry=session.registry,
+        session_id=session.session_id,
+        session_store=session.session_store,
+        persisted_message_count=session.persisted_message_count,
     )
 
 
@@ -831,8 +910,10 @@ def _conversation_loop(
                 model=session.config.model,
             )
         except AgentError as caught:
+            _persist_new_messages(session, error=error)
             print(f"peon: {caught}", file=error)
             continue
+        _persist_new_messages(session, error=error)
         if isinstance(response, ToolCall):
             print(
                 f"peon: provider requested unhandled tool '{response.name}'",
@@ -913,6 +994,8 @@ def _handle_command(
                 context=session.context,
                 registry=session.registry,
                 config_store=config_store,
+                session_id=session.session_id,
+                session_store=session.session_store,
             )
             return replacement or session, False
         if selected != session.config:
@@ -935,6 +1018,9 @@ def _handle_command(
             config=replacement_config,
             context=session.context,
             registry=session.registry,
+            session_id=session.session_id,
+            session_store=session.session_store,
+            persisted_message_count=session.persisted_message_count,
         )
         return replacement, False
     if definition.id == "model":
@@ -973,7 +1059,17 @@ def _handle_command(
                 print(f"- {tool.name}: {tool.description}", file=output)
         return session, False
     if definition.id == "new":
-        session.context.messages.clear()
+        try:
+            created = session.session_store.create()
+        except (OSError, SessionStoreError) as caught:
+            print(f"peon: could not start a new conversation: {caught}", file=error)
+            return session, False
+        session = replace(
+            session,
+            context=AgentContext(),
+            session_id=created.session_id,
+            persisted_message_count=0,
+        )
         print("Conversation cleared.", file=output)
         return session, False
     if definition.id == "provider":
@@ -986,6 +1082,9 @@ def _handle_command(
             context=session.context,
             registry=session.registry,
             config_store=config_store,
+            session_id=session.session_id,
+            session_store=session.session_store,
+            persisted_message_count=session.persisted_message_count,
         )
         return replacement or session, False
     if definition.id == "settings":
@@ -1002,3 +1101,18 @@ def _handle_command(
             False,
         )
     return session, False
+
+
+def _persist_new_messages(
+    session: TuiSession,
+    *,
+    error: TextIO,
+) -> None:
+    for index in range(session.persisted_message_count, len(session.context.messages)):
+        message = session.context.messages[index]
+        try:
+            session.session_store.append(session.session_id, message)
+        except (OSError, SessionStoreError) as caught:
+            print(f"peon: could not save conversation: {caught}", file=error)
+            return
+        session.persisted_message_count = index + 1

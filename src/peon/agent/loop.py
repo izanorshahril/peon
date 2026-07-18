@@ -77,10 +77,24 @@ def _continue_with_tool_call(
     try:
         result = executor.invoke(tool_call.name, tool_call.arguments)
     except Exception as error:
+        context.add(
+            AgentMessage(
+                role="tool",
+                content=f"tool error: {error}",
+                tool_call_id=tool_call.call_id,
+            )
+        )
         raise AgentError(
             f"tool '{tool_call.name}' failed: {error}"
         ) from error
     if not isinstance(result, str):
+        context.add(
+            AgentMessage(
+                role="tool",
+                content=f"tool error: '{tool_call.name}' returned a non-text result",
+                tool_call_id=tool_call.call_id,
+            )
+        )
         raise AgentError(f"tool '{tool_call.name}' returned a non-text result")
     context.add(
         AgentMessage(

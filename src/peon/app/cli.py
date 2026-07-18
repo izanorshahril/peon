@@ -39,9 +39,15 @@ class ProviderConfig:
     response_format_field: str = "responseFormat"
     response_format: str | None = "text"
     response_content_field: str = "completion"
-    supports_tools: bool = False
+    tool_prompt_role: str = "developer"
+    supports_tools: bool | None = None
     supports_stream: bool = False
     supports_chat_completions: bool = True
+
+    def __post_init__(self) -> None:
+        if self.supports_tools is None:
+            provider_type = self.provider_type or self.name
+            object.__setattr__(self, "supports_tools", provider_type != "custom")
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +83,13 @@ CONFIG_SETTING_SPECS = (
         ("none", "low", "medium", "high"),
     ),
     ProviderSettingSpec("supports-tools", "Supports tools", "supports_tools", "toggle"),
+    ProviderSettingSpec(
+        "tool-prompt-role",
+        "Tool prompt role",
+        "tool_prompt_role",
+        "choice",
+        ("developer", "system"),
+    ),
     ProviderSettingSpec(
         "supports-stream", "Supports stream", "supports_stream", "toggle"
     ),
@@ -186,6 +199,8 @@ def update_provider_setting(
         lowered_value = value.lower()
         if lowered_value not in spec.choices:
             raise CommandError(f"{setting} must be one of: {', '.join(spec.choices)}")
+        if field_name == "tool_prompt_role":
+            return replace(config, tool_prompt_role=lowered_value)
         return replace(
             config,
             reasoning_effort=None if lowered_value == "none" else lowered_value,
@@ -294,6 +309,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Custom provider reasoning effort value",
     )
     parser.add_argument(
+        "--tool-prompt-role",
+        choices=("developer", "system"),
+        default="developer",
+        help="Role used for fallback tool instructions",
+    )
+    parser.add_argument(
         "--tui",
         action="store_true",
         help="Start an interactive session with in-session provider setup",
@@ -371,6 +392,7 @@ def main(
             copilot_token=args.copilot_token,
             reasoning_effort_field=args.reasoning_effort_field,
             reasoning_effort=args.reasoning_effort,
+            tool_prompt_role=args.tool_prompt_role,
         )
         provider = (provider_factory or create_provider)(config)
         response = run_task(task, provider, model=config.model)
@@ -389,6 +411,7 @@ def main(
 
 def create_provider(config: ProviderConfig) -> ModelProvider:
     """Create a provider adapter from generic command configuration."""
+    assert config.supports_tools is not None
     provider_type = config.provider_type or config.name
     if provider_type == "openai-compatible":
         if config.base_url is None:
@@ -405,6 +428,7 @@ def create_provider(config: ProviderConfig) -> ModelProvider:
             response_format=config.response_format,
             supports_tools=config.supports_tools,
             supports_chat_completions=config.supports_chat_completions,
+            tool_prompt_role=config.tool_prompt_role,
         )
     if provider_type == "github-copilot":
         return GitHubCopilotProvider(
@@ -437,5 +461,6 @@ def create_provider(config: ProviderConfig) -> ModelProvider:
             response_format=config.response_format,
             supports_tools=config.supports_tools,
             supports_chat_completions=config.supports_chat_completions,
+            tool_prompt_role=config.tool_prompt_role,
         )
     raise CommandError(f"provider adapter '{config.name}' is not available")

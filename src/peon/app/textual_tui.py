@@ -49,6 +49,7 @@ from .config import (
     update_saved_provider,
     update_ui_setting,
 )
+from .sessions import MemorySessionStore, SessionStore, SessionStoreError
 from .commands import (
     DEFAULT_COMMAND_CATALOG,
     CommandDefinition,
@@ -513,6 +514,7 @@ class TextualPeonApp(App[int]):
         provider_factory: ProviderFactory | None,
         config_store: ProviderConfigStore,
         registry: ExtensionRegistry,
+        session_store: SessionStore | None = None,
         processing_status_text: str | None = None,
         user_top_blank_lines: int = 1,
         user_bottom_blank_lines: int = 1,
@@ -525,6 +527,9 @@ class TextualPeonApp(App[int]):
         self.config: ProviderConfig | None = None
         self.context = AgentContext()
         self.registry = registry
+        self.session_store = session_store or MemorySessionStore()
+        self.session_id = ""
+        self.persisted_message_count = 0
         self.skill_names = tuple(
             dict.fromkeys((*registry.skills, *discover_skill_names()))
         )
@@ -615,11 +620,35 @@ class TextualPeonApp(App[int]):
     def on_mount(self) -> None:
         self.title = "Peon"
         self._apply_ui_config()
+        self._restore_conversation()
         config = self.config_store.load()
         if config is not None:
             self._activate(config)
         else:
             self._begin_provider_setup()
+
+    def _restore_conversation(self) -> None:
+        try:
+            latest = self.session_store.load_latest()
+            if latest is None:
+                latest = self.session_store.create()
+            self.session_id = latest.session_id
+            self.context = AgentContext(messages=list(latest.messages))
+            self.persisted_message_count = len(self.context.messages)
+        except (OSError, SessionStoreError) as caught:
+            self._write(f"Could not resume saved session: {caught}")
+            fallback = MemorySessionStore()
+            latest = fallback.create()
+            self.session_store = fallback
+            self.session_id = latest.session_id
+            self.context = AgentContext()
+            self.persisted_message_count = 0
+        transcript = self.query_one("#transcript", ChatMessage)
+        for message in self.context.messages:
+            if message.role == "user":
+                transcript.append_message(message.content, role="user")
+            elif message.role == "assistant" and message.content:
+                transcript.append_message(message.content, role="assistant")
 
     def _apply_ui_config(self) -> None:
         self.screen.styles.background = self.ui_config.background_color
@@ -955,13 +984,31 @@ class TextualPeonApp(App[int]):
     def _run_task(self, task: str) -> str | ToolCall:
         assert self.provider is not None
         assert self.config is not None
-        return run_task(
-            task,
-            self.provider,
-            context=self.context,
-            executor=self.registry,
-            model=self.config.model,
-        )
+        try:
+            return run_task(
+                task,
+                self.provider,
+                context=self.context,
+                executor=self.registry,
+                model=self.config.model,
+            )
+        finally:
+            self._persist_new_messages()
+
+    def _persist_new_messages(self) -> None:
+        for index in range(
+            self.persisted_message_count, len(self.context.messages)
+        ):
+            message = self.context.messages[index]
+            try:
+                self.session_store.append(self.session_id, message)
+            except (OSError, SessionStoreError) as caught:
+                self.call_from_thread(
+                    self._write,
+                    f"Could not save conversation: {caught}",
+                )
+                return
+            self.persisted_message_count = index + 1
 
     def _start_task(self, task: str) -> None:
         self._set_processing(True)
@@ -1786,7 +1833,14 @@ class TextualPeonApp(App[int]):
         elif definition.id == "settings":
             self._show_settings()
         elif definition.id == "new":
-            self.context.messages.clear()
+            try:
+                created = self.session_store.create()
+            except (OSError, SessionStoreError) as caught:
+                self._write(f"Could not start a new conversation: {caught}")
+                return
+            self.session_id = created.session_id
+            self.context = AgentContext()
+            self.persisted_message_count = 0
             self.query_one("#transcript", ChatMessage).clear_transcript()
             self._write("✓ New session started", role="success")
             self._set_status()
@@ -1878,6 +1932,7 @@ def run_textual_tui(
     error: object,
     registry: ExtensionRegistry,
     config_store: ProviderConfigStore,
+    session_store: SessionStore | None = None,
     user_top_blank_lines: int = 1,
     user_bottom_blank_lines: int = 1,
     message_left_padding: int = 1,
@@ -1891,6 +1946,7 @@ def run_textual_tui(
         user_top_blank_lines=user_top_blank_lines,
         user_bottom_blank_lines=user_bottom_blank_lines,
         message_left_padding=message_left_padding,
+        session_store=session_store,
     )
     app.run()
     return int(app.return_code or 0)

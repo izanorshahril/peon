@@ -1,3 +1,5 @@
+import json
+
 from peon.app import JsonProviderConfigStore, ProviderConfig, UiConfig
 from peon.app.cli import update_provider_setting
 
@@ -21,6 +23,24 @@ def test_json_store_round_trips_multiple_profiles_and_active_provider(tmp_path) 
 
     assert store.load_all() == (first, second)
     assert store.load() == second
+
+
+def test_legacy_openai_profile_enables_native_tools_by_default(tmp_path) -> None:
+    path = tmp_path / "provider.json"
+    path.write_text(
+        json.dumps(
+            {
+                "providers": [{"name": "openai-compatible", "base_url": "http://localhost"}],
+                "active": "openai-compatible|http://localhost",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = JsonProviderConfigStore(path).load()
+
+    assert config is not None
+    assert config.supports_tools is True
 
 
 def test_json_store_round_trips_custom_provider_settings(tmp_path) -> None:
@@ -97,6 +117,7 @@ def test_json_store_round_trips_expanded_provider_and_ui_settings(tmp_path) -> N
         max_output_tokens_field="outputTokenLimit",
         max_tokens_field="tokenLimit",
         response_content_field="result.message",
+        tool_prompt_role="system",
         supports_tools=True,
         supports_stream=True,
         supports_chat_completions=False,
@@ -138,6 +159,14 @@ def test_renaming_legacy_provider_preserves_adapter_type() -> None:
 
     assert renamed.name == "Local AI"
     assert renamed.provider_type == "openai-compatible"
+
+
+def test_provider_setting_can_switch_tool_prompt_role() -> None:
+    config = ProviderConfig(name="custom", provider_type="custom")
+
+    updated = update_provider_setting(config, "tool-prompt-role", "system")
+
+    assert updated.tool_prompt_role == "system"
 
 
 def test_json_store_keeps_ui_settings_after_last_provider_is_deleted(tmp_path) -> None:

@@ -51,6 +51,29 @@ def test_command_runs_task_through_injected_provider_factory() -> None:
     )
 
 
+def test_command_forwards_tool_prompt_role() -> None:
+    provider = FakeProvider(response="Done.")
+    configurations: list[ProviderConfig] = []
+
+    def provider_factory(config: ProviderConfig) -> FakeProvider:
+        configurations.append(config)
+        return provider
+
+    result = main(
+        [
+            "Use a tool.",
+            "--provider",
+            "custom",
+            "--tool-prompt-role",
+            "system",
+        ],
+        provider_factory=provider_factory,
+    )
+
+    assert result == 0
+    assert configurations[0].tool_prompt_role == "system"
+
+
 def test_command_reports_missing_task_without_traceback() -> None:
     calls: list[dict[str, object]] = []
 

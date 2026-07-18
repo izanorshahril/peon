@@ -8,6 +8,7 @@ from .providers import (
 	GitHubCopilotProvider,
 	JsonTransport,
 	OpenAICompatibleProvider,
+	ToolPromptRole,
 	UrllibJsonTransport,
 )
 
@@ -18,6 +19,7 @@ __all__ = [
 	"CustomResponseFields",
 	"JsonTransport",
 	"OpenAICompatibleProvider",
+	"ToolPromptRole",
 	"ProviderError",
 	"UrllibJsonTransport",
 ]

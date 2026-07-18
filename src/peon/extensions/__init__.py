@@ -9,6 +9,7 @@ from .registry import (
 	discover_skill_names,
 )
 from .sample import register_sample_tools
+from .filesystem import register_filesystem_tools
 
 __all__ = [
 	"ExtensionError",
@@ -18,4 +19,5 @@ __all__ = [
 	"ToolHandler",
 	"discover_skill_names",
 	"register_sample_tools",
+	"register_filesystem_tools",
 ]

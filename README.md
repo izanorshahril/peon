@@ -252,8 +252,11 @@ are not automatically loaded or executed.
 The footer currently shows the working directory, provider, model, context
 message count, and `n/a` for effort and token usage. The provider-neutral
 `ModelResponse` contract does not expose usage metadata yet. Session context is
-discarded when Peon exits. A filesystem/read tool and persistent session
-history are not included yet.
+stored as append-only JSONL files under `~/.peon/sessions` by default; set
+`PEON_SESSION_DIR` to choose another directory. Startup resumes the latest
+session, and `/new` starts a fresh one without rewriting previous history.
+The default registry also includes cwd-bound, read-only `read`, `ls`, `find`,
+and `grep` tools with bounded output and continuation offsets.
 
 Interactive commands:
 

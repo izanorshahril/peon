@@ -4,6 +4,7 @@ import threading
 from rich.color import Color
 from peon.agent import AgentMessage, ModelResponse
 from peon.app import ProviderConfig
+from peon.app.sessions import MemorySessionStore
 from peon.app.textual_tui import ChatMessage, TextualPeonApp
 from peon.extensions import ExtensionRegistry
 from textual.document._document import Selection
@@ -769,6 +770,51 @@ def test_textual_processing_status_runs_while_provider_is_busy() -> None:
                     break
             assert not processing.display
             assert app.query_one("#transcript", ChatMessage).text.endswith("done\n")
+
+    asyncio.run(exercise())
+
+
+def test_textual_resumes_persistent_session() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        config_store = MemoryConfigStore((config,))
+        session_store = MemorySessionStore()
+
+        async with TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=config_store,
+            registry=ExtensionRegistry(),
+            session_store=session_store,
+        ).run_test() as pilot:
+            prompt = pilot.app.query_one("#prompt")
+            prompt.value = "hello"
+            await pilot.press("enter")
+            for _ in range(20):
+                await pilot.pause()
+                if not pilot.app.query_one("#processing").display:
+                    break
+            assert pilot.app.query_one("#transcript", ChatMessage).text.endswith(
+                "ok\n"
+            )
+
+        async with TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=config_store,
+            registry=ExtensionRegistry(),
+            session_store=session_store,
+        ).run_test() as pilot:
+            await pilot.pause()
+            assert pilot.app.context.messages == [
+                AgentMessage(role="user", content="hello"),
+                AgentMessage(role="assistant", content="ok"),
+            ]
+            assert pilot.app.query_one("#transcript", ChatMessage).text.endswith(
+                "ok\n"
+            )
 
     asyncio.run(exercise())
 
