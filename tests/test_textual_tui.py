@@ -2,7 +2,7 @@ import asyncio
 import threading
 
 from rich.color import Color
-from peon.agent import ModelResponse
+from peon.agent import AgentMessage, ModelResponse
 from peon.app import ProviderConfig
 from peon.app.textual_tui import ChatMessage, TextualPeonApp
 from peon.extensions import ExtensionRegistry
@@ -85,7 +85,7 @@ def test_textual_mounts_stable_layout_and_command_suggestions() -> None:
             await pilot.pause()
             suggestions = app.query_one("#suggestions", Static)
             assert str(suggestions.renderable).startswith("> /model")
-            assert "/models" in str(suggestions.renderable)
+            assert "/models" not in str(suggestions.renderable)
             await pilot.press("tab")
             assert prompt.value == "/model"
             assert app.focused is prompt
@@ -101,6 +101,202 @@ def test_textual_mounts_stable_layout_and_command_suggestions() -> None:
             assert app.focused is prompt
             prompt.value = "/quit"
             await pilot.press("enter")
+
+    asyncio.run(exercise())
+
+
+def test_textual_command_palette_wraps_selection_and_preserves_draft_on_escape() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/"
+            await pilot.pause()
+            assert "(also: reset)" in str(app.query_one("#suggestions").renderable)
+            assert "[reserved]" in str(app.query_one("#suggestions").renderable)
+            assert app.command_selected_index == 0
+
+            await pilot.press("up")
+            assert app.command_selected_index == len(app.command_matches) - 1
+            await pilot.press("down")
+            assert app.command_selected_index == 0
+
+            prompt.value = "/mo"
+            await pilot.press("escape")
+            assert prompt.value == "/mo"
+            assert not app.command_matches
+            assert str(app.query_one("#suggestions").renderable) == ""
+
+    asyncio.run(exercise())
+
+
+def test_textual_selected_command_preserves_typed_argument() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            models=("alpha", "beta"),
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/mo 2"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.config is not None
+            assert app.config.model == "beta"
+
+    asyncio.run(exercise())
+
+
+def test_textual_number_selects_focused_choice_instead_of_prompt() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/provider"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.choice_kind == "provider"
+            await pilot.press("3")
+            await pilot.pause()
+
+            assert app.pending_config is not None
+            assert app.pending_config.provider_type == "custom"
+            assert prompt.value == ""
+            assert app.focused is prompt
+
+    asyncio.run(exercise())
+
+
+def test_textual_changes_custom_provider_setting() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="Corporate",
+            provider_type="custom",
+            model="chat-model",
+            base_url="http://localhost:8080",
+        )
+        config_store = MemoryConfigStore((config,))
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=config_store,
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/settings"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.choice_kind == "settings-root"
+            await pilot.press("2", "1", "1", "3", "1")
+            await pilot.pause()
+            prompt.value = "reasoning_effort"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app.config is not None
+            assert app.config.reasoning_effort_field == "reasoning_effort"
+            assert config_store.load() == app.config
+            assert app.choice_kind == "settings-request"
+
+    asyncio.run(exercise())
+
+
+def test_textual_adjusts_ui_and_provider_config_without_closing_lists() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="Corporate",
+            provider_type="custom",
+            model="chat-model",
+            base_url="http://localhost:8080",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/settings"
+            await pilot.press("enter", "1", "right")
+            await pilot.pause()
+            assert app.ui_config.user_top_blank_lines == 2
+            assert app.choice_kind == "settings-ui"
+
+            await pilot.press("escape")
+            prompt.value = "/settings"
+            await pilot.press("enter", "2", "1", "1", "2")
+            await pilot.pause()
+            assert app.choice_kind == "settings-config"
+            await pilot.press("down", "down", "down", "down", "down", "right")
+            await pilot.pause()
+            assert app.config is not None
+            assert app.config.reasoning_effort == "medium"
+            assert app.choice_kind == "settings-config"
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert app.config.supports_tools is True
+            assert app.choice_kind == "settings-config"
+
+    asyncio.run(exercise())
+
+
+def test_textual_changes_provider_config_with_slash_commands() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="Corporate",
+            provider_type="custom",
+            model="chat-model",
+            base_url="http://localhost:8080",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/temperature 0.3"
+            await pilot.press("enter")
+            prompt.value = "/reasoning high"
+            await pilot.press("enter")
+            prompt.value = "/supports-chat-completions"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.config is not None
+            assert app.config.temperature == 0.3
+            assert app.config.reasoning_effort == "high"
+            assert app.config.supports_chat_completions is False
 
     asyncio.run(exercise())
 
@@ -593,7 +789,7 @@ def test_textual_model_switch_updates_status_without_transcript_trace() -> None:
     asyncio.run(exercise())
 
 
-def test_textual_picks_saved_provider_and_logs_out_inactive_profile() -> None:
+def test_textual_reuses_active_saved_provider_and_logs_out_selected_profile() -> None:
     async def exercise() -> None:
         first = ProviderConfig(
             name="openai-compatible",
@@ -614,14 +810,55 @@ def test_textual_picks_saved_provider_and_logs_out_inactive_profile() -> None:
 
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("down", "down", "enter")
             assert app.config == second
             prompt = app.query_one("#prompt")
             prompt.value = "/logout"
             await pilot.press("enter")
             await pilot.pause()
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert store.load_all() == (first,)
+            assert app.config == first
+
+    asyncio.run(exercise())
+
+
+def test_textual_model_picker_aggregates_profiles_and_preserves_context() -> None:
+    async def exercise() -> None:
+        first = ProviderConfig(
+            name="first provider",
+            model="alpha",
+            models=("alpha",),
+            base_url="https://first.example/v1",
+        )
+        second = ProviderConfig(
+            name="second provider",
+            model="beta",
+            models=("beta",),
+            base_url="https://second.example/v1",
+        )
+        store = MemoryConfigStore((first, second))
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=store,
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            context = app.context
+            context.messages.append(AgentMessage(role="user", content="prior"))
+            prompt = app.query_one("#prompt")
+            prompt.value = "/models"
             await pilot.press("enter")
-            assert store.load_all() == (second,)
-            assert app.config == second
+            await pilot.pause()
+            transcript = app.query_one("#transcript", ChatMessage).text
+            assert "alpha [first provider]" in transcript
+            assert "beta [second provider]" in transcript
+            prompt.value = "/model 1"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.config == first
+            assert app.context is context
+            assert context.messages == [AgentMessage(role="user", content="prior")]
 
     asyncio.run(exercise())

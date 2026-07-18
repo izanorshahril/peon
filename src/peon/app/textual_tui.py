@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 from typing import Literal, cast
 
 from rich.console import Console
@@ -24,8 +25,30 @@ from peon.agent import AgentContext, ModelProvider, ToolCall, run_task
 from peon.ai import ProviderError
 from peon.extensions import ExtensionRegistry
 
-from .cli import CommandError, ProviderConfig, ProviderFactory, create_provider
-from .config import ProviderConfigStore, provider_id
+from .cli import (
+    CONFIG_SETTING_SPECS,
+    CommandError,
+    ProviderConfig,
+    ProviderFactory,
+    ProviderSettingSpec,
+    REQUEST_FIELD_SETTING_SPECS,
+    RESPONSE_FIELD_SETTING_SPECS,
+    SavedModel,
+    create_provider,
+    saved_model_choices,
+    select_saved_model,
+    update_provider_setting,
+)
+from .config import (
+    UI_SETTING_SPECS,
+    ProviderConfigStore,
+    load_ui_config,
+    provider_id,
+    save_ui_config,
+    update_saved_provider,
+    update_ui_setting,
+)
+from .commands import DEFAULT_COMMAND_CATALOG, CommandMatch
 
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _MARKDOWN_CONSOLE = Console(width=4096)
@@ -54,42 +77,44 @@ def _render_markdown_lines(markdown: str) -> list[Text]:
 _PROVIDER_OPTIONS = (
     ("openai-compatible", "OpenAI-compatible"),
     ("github-copilot", "GitHub Copilot"),
+    ("custom", "Custom provider"),
 )
-_COMMAND_SPECS = (
-    ("/help", "show available commands"),
-    ("/model", "switch the active model"),
-    ("/models", "list detected models"),
-    ("/provider", "configure a provider"),
-    ("/logout", "remove one saved provider"),
-    ("/tools", "list registered tools"),
-    ("/clear", "clear conversation context"),
-    ("/quit", "exit Peon"),
-)
+def _format_setting_value(value: object, *, secret: bool = False) -> str:
+    if secret and value:
+        return "configured"
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
 
 
-def _matching_commands(prefix: str) -> list[str]:
-    name, _, _argument = prefix.partition(" ")
-    lowered_name = name.lower()
-    return [
-        command
-        for command, _description in _COMMAND_SPECS
-        if command.startswith(lowered_name)
-    ]
-
-
-def _resolve_command(command: str) -> str:
-    name, separator, argument = command.partition(" ")
-    matches = _matching_commands(command)
-    if not matches:
-        return command
-    resolved = next((match for match in matches if match == name.lower()), matches[0])
-    return f"{resolved}{separator}{argument}" if separator else resolved
+def _cycle_choice(
+    current: str,
+    choices: tuple[str, ...],
+    direction: int,
+) -> str:
+    try:
+        index = choices.index(current)
+    except ValueError:
+        index = 0
+    return choices[(index + direction) % len(choices)]
 
 
 SetupStep = Literal[
     "provider",
     "saved-provider",
     "logout-provider",
+    "custom-name",
+    "settings-root",
+    "settings-provider-type",
+    "settings-provider",
+    "settings-profile",
+    "settings-config",
+    "settings-request",
+    "settings-response",
+    "settings-ui",
+    "setting-value",
     "base-url",
     "api-key",
     "copilot-token",
@@ -101,41 +126,25 @@ class PeonInput(Input):
     """Composer input with live slash-command hints and Escape clearing."""
 
     def on_key(self, event: Key) -> None:
+        app = cast(TextualPeonApp, self.app)
         if event.key == "ctrl+c":
             event.stop()
             event.prevent_default()
-            cast(TextualPeonApp, self.app).action_confirm_quit()
+            app.action_confirm_quit()
+        elif event.key in {"up", "down"} and app.command_matches:
+            app.move_command_selection(1 if event.key == "down" else -1)
+            event.stop()
+            event.prevent_default()
         elif event.key == "tab":
-            command = _resolve_command(self.value)
-            if command != self.value:
-                self.value = command
-                self.cursor_position = len(command)
+            if app.complete_selected_command():
                 event.stop()
                 event.prevent_default()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        suggestions = self.app.query_one("#suggestions", Static)
-        if event.value.startswith("/") and " " not in event.value:
-            prefix = event.value.lower()
-            matches = [
-                (command, description)
-                for command, description in _COMMAND_SPECS
-                if command.startswith(prefix)
-            ]
-            rendered = Text()
-            for index, (command, description) in enumerate(matches):
-                if index:
-                    rendered.append("\n")
-                rendered.append("> " if index == 0 else "  ", style="dim")
-                rendered.append(command, style="bold reverse" if index == 0 else "")
-                rendered.append(f"  {description}", style="dim")
-            suggestions.update(rendered)
-        else:
-            suggestions.update("")
+        cast(TextualPeonApp, self.app).update_command_suggestions(event.value)
 
     def action_clear(self) -> None:
-        self.value = ""
-        self.app.query_one("#suggestions", Static).update("")
+        cast(TextualPeonApp, self.app).dismiss_command_palette()
 
     def action_confirm_quit(self) -> None:
         cast(TextualPeonApp, self.app).action_confirm_quit()
@@ -158,6 +167,10 @@ class ChatMessage(TextArea):
         user_top_blank_lines: int = 1,
         user_bottom_blank_lines: int = 1,
         message_left_padding: int = 1,
+        user_message_color: str = USER_FOREGROUND,
+        user_message_background: str = USER_BACKGROUND,
+        assistant_message_color: str = "#e0e0e0",
+        text_format: str = "normal",
     ) -> None:
         super().__init__(
             "",
@@ -172,6 +185,10 @@ class ChatMessage(TextArea):
         self.user_top_blank_lines = max(0, user_top_blank_lines)
         self.user_bottom_blank_lines = max(0, user_bottom_blank_lines)
         self.message_left_padding = max(0, message_left_padding)
+        self.user_message_color = user_message_color
+        self.user_message_background = user_message_background
+        self.assistant_message_color = assistant_message_color
+        self.text_format = text_format
         self.display = False
         if text:
             self.append_message(text, role=role)
@@ -215,12 +232,24 @@ class ChatMessage(TextArea):
         role = self._line_roles[line_index] if line_index < len(self._line_roles) else "system"
         if role == "user":
             line.stylize(
-                Style(color=self.USER_FOREGROUND, bgcolor=self.USER_BACKGROUND)
+                Style(
+                    color=self.user_message_color,
+                    bgcolor=self.user_message_background,
+                )
             )
+        elif role == "assistant":
+            line.stylize(Style(color=self.assistant_message_color))
         elif role in {"system", "thinking"}:
             line.stylize(Style(color=self.THINKING_FOREGROUND, italic=True))
         elif role == "success":
             line.stylize(Style(color=self.SUCCESS_FOREGROUND))
+        if role in {"user", "assistant"} and self.text_format != "normal":
+            line.stylize(
+                Style(
+                    bold=self.text_format == "bold",
+                    italic=self.text_format == "italic",
+                )
+            )
         return line
 
     def render_line(self, y: int) -> Strip:
@@ -240,7 +269,7 @@ class ChatMessage(TextArea):
         role = self._line_roles[line_index] if line_index < len(self._line_roles) else "system"
         role_style: Style | None = None
         if role == "user":
-            role_style = Style(bgcolor=self.USER_BACKGROUND)
+            role_style = Style(bgcolor=self.user_message_background)
         elif role == "assistant":
             role_style = Style(bgcolor=self.styles.background.rich_color)
         elif role == "success":
@@ -426,10 +455,15 @@ class TextualPeonApp(App[int]):
         self.registry = registry
         self.setup_step: SetupStep | None = None
         self.pending_config: ProviderConfig | None = None
+        self.pending_setting_spec: ProviderSettingSpec | None = None
+        self.pending_ui_setting: tuple[str, str, str] | None = None
+        self.settings_return_kind: SetupStep | None = None
         self.pending_models: tuple[str, ...] = ()
         self.choice_values: list[object] = []
         self.choice_kind: SetupStep | None = None
         self.choice_generation = 0
+        self.command_matches: tuple[CommandMatch, ...] = ()
+        self.command_selected_index = 0
         self.quit_confirmation_active = False
         self.quit_confirmation_label = ""
         self.quit_confirmation_password = False
@@ -437,9 +471,28 @@ class TextualPeonApp(App[int]):
         self.processing_status_text = (
             processing_status_text or self.PROCESSING_STATUS_TEXT
         )
-        self.user_top_blank_lines = max(0, user_top_blank_lines)
-        self.user_bottom_blank_lines = max(0, user_bottom_blank_lines)
-        self.message_left_padding = max(0, message_left_padding)
+        stored_ui = load_ui_config(config_store)
+        self.ui_config = replace(
+            stored_ui,
+            user_top_blank_lines=(
+                user_top_blank_lines
+                if user_top_blank_lines != 1
+                else stored_ui.user_top_blank_lines
+            ),
+            user_bottom_blank_lines=(
+                user_bottom_blank_lines
+                if user_bottom_blank_lines != 1
+                else stored_ui.user_bottom_blank_lines
+            ),
+            message_left_padding=(
+                message_left_padding
+                if message_left_padding != 1
+                else stored_ui.message_left_padding
+            ),
+        )
+        self.user_top_blank_lines = self.ui_config.user_top_blank_lines
+        self.user_bottom_blank_lines = self.ui_config.user_bottom_blank_lines
+        self.message_left_padding = self.ui_config.message_left_padding
         self.task_worker: Worker[str | ToolCall] | None = None
 
     def compose(self) -> ComposeResult:
@@ -457,6 +510,10 @@ class TextualPeonApp(App[int]):
                 user_top_blank_lines=self.user_top_blank_lines,
                 user_bottom_blank_lines=self.user_bottom_blank_lines,
                 message_left_padding=self.message_left_padding,
+                user_message_color=self.ui_config.user_message_color,
+                user_message_background=self.ui_config.user_message_background,
+                assistant_message_color=self.ui_config.assistant_message_color,
+                text_format=self.ui_config.text_format,
             )
         yield Static("", id="setup-label")
         yield ListView(id="choices")
@@ -471,25 +528,45 @@ class TextualPeonApp(App[int]):
 
     def on_mount(self) -> None:
         self.title = "Peon"
-        configs = self.config_store.load_all()
-        if len(configs) == 1:
-            self._activate(configs[0])
-        elif configs:
-            self._show_choices(
-                "saved-provider",
-                "Select saved provider:",
-                [
-                    (config, f"{config.name} · {config.model or 'no model'}")
-                    for config in configs
-                ],
-            )
+        self._apply_ui_config()
+        config = self.config_store.load()
+        if config is not None:
+            self._activate(config)
         else:
             self._begin_provider_setup()
+
+    def _apply_ui_config(self) -> None:
+        self.screen.styles.background = self.ui_config.background_color
+        conversation = self.query_one("#conversation", VerticalScroll)
+        conversation.styles.background = self.ui_config.chat_area_color
+        transcript = self.query_one("#transcript", ChatMessage)
+        transcript.styles.background = self.ui_config.chat_area_color
+        transcript.user_top_blank_lines = self.ui_config.user_top_blank_lines
+        transcript.user_bottom_blank_lines = self.ui_config.user_bottom_blank_lines
+        transcript.message_left_padding = self.ui_config.message_left_padding
+        transcript.user_message_color = self.ui_config.user_message_color
+        transcript.user_message_background = self.ui_config.user_message_background
+        transcript.assistant_message_color = self.ui_config.assistant_message_color
+        transcript.text_format = self.ui_config.text_format
+        transcript.refresh()
 
     def on_key(self, event: Key) -> None:
         if event.key == "ctrl+c":
             self._handle_ctrl_c(event)
             return
+        if event.key in {"left", "right"} and self._adjust_selected_setting(
+            1 if event.key == "right" else -1
+        ):
+            event.stop()
+            event.prevent_default()
+            return
+        if self.choice_kind is not None and event.character and event.character.isdigit():
+            index = int(event.character) - 1
+            if 0 <= index < len(self.choice_values):
+                event.stop()
+                event.prevent_default()
+                self._select_choice(index)
+                return
         if self._is_non_input_focus() and event.character and event.character.isprintable():
             prompt = self.query_one("#prompt", PeonInput)
             prompt.focus()
@@ -511,9 +588,79 @@ class TextualPeonApp(App[int]):
     def _is_non_input_focus(self) -> bool:
         return self.focused is not None and not isinstance(self.focused, PeonInput)
 
+    def update_command_suggestions(self, value: str) -> None:
+        matches: tuple[CommandMatch, ...] = ()
+        if value.startswith("/"):
+            matches = DEFAULT_COMMAND_CATALOG.search(value)
+            if not matches and any(character.isspace() for character in value):
+                command_head = value.split(maxsplit=1)[0]
+                matches = DEFAULT_COMMAND_CATALOG.search(command_head)
+        selected_id = (
+            self.command_matches[self.command_selected_index].command.id
+            if self.command_matches
+            and self.command_selected_index < len(self.command_matches)
+            else None
+        )
+        self.command_matches = matches
+        self.command_selected_index = next(
+            (
+                index
+                for index, match in enumerate(matches)
+                if match.command.id == selected_id
+            ),
+            0,
+        )
+        self._render_command_suggestions()
+
+    def _render_command_suggestions(self) -> None:
+        rendered = Text()
+        for index, match in enumerate(self.command_matches):
+            if index:
+                rendered.append("\n")
+            selected = index == self.command_selected_index
+            rendered.append("> " if selected else "  ", style="dim")
+            command = match.command
+            rendered.append(command.name, style="bold reverse" if selected else "bold")
+            rendered.append(f"  {command.description}", style="dim")
+            if command.candidate_names:
+                rendered.append(
+                    f"  (also: {', '.join(command.candidate_names)})",
+                    style="dim italic",
+                )
+            if match.is_reserved:
+                rendered.append("  [reserved]", style="yellow")
+        self.query_one("#suggestions", Static).update(rendered)
+
+    def move_command_selection(self, direction: int) -> None:
+        if not self.command_matches:
+            return
+        self.command_selected_index = (
+            self.command_selected_index + direction
+        ) % len(self.command_matches)
+        self._render_command_suggestions()
+
+    def complete_selected_command(self) -> bool:
+        if not self.command_matches:
+            return False
+        command = self.command_matches[self.command_selected_index].command.name
+        prompt = self.query_one("#prompt", PeonInput)
+        if prompt.value == command:
+            return False
+        prompt.value = command
+        prompt.cursor_position = len(command)
+        return True
+
+    def dismiss_command_palette(self) -> None:
+        self.command_matches = ()
+        self.command_selected_index = 0
+        self.query_one("#suggestions", Static).update("")
+
     def action_clear_prompt(self) -> None:
         if self.quit_confirmation_active:
             self._finish_quit_confirmation("")
+            return
+        if self.command_matches:
+            self.dismiss_command_palette()
             return
         if self.choice_kind is not None or self.setup_step is not None:
             self._cancel_selection()
@@ -663,6 +810,9 @@ class TextualPeonApp(App[int]):
         if event.item.id is None or not event.item.id.startswith("choice-"):
             return
         index = int(event.item.id.rsplit("-", maxsplit=1)[1])
+        self._select_choice(index)
+
+    def _select_choice(self, index: int) -> None:
         value = self.choice_values[index]
         kind = self.choice_kind
         self._hide_choices()
@@ -673,18 +823,334 @@ class TextualPeonApp(App[int]):
         elif kind == "logout-provider":
             self._remove_provider(value)  # type: ignore[arg-type]
         elif kind == "model":
-            self._finish_model_selection(str(value))
+            self._finish_model_selection(cast(SavedModel, value))
+        elif kind == "settings-root":
+            self._select_settings_root(str(value))
+        elif kind == "settings-provider-type":
+            self._show_settings_providers(str(value))
+        elif kind == "settings-provider":
+            self.pending_config = cast(ProviderConfig, value)
+            self._show_settings_profile()
+        elif kind == "settings-profile":
+            self._select_settings_profile(str(value))
+        elif kind in {"settings-config", "settings-request", "settings-response"}:
+            self._select_provider_setting(cast(ProviderSettingSpec, value), kind)
+        elif kind == "settings-ui":
+            self._select_ui_setting(cast(tuple[str, str, str], value))
+
+    def _show_settings(self) -> None:
+        self._show_choices(
+            "settings-root",
+            "Settings:",
+            [
+                ("ui", "1. UI"),
+                ("saved-provider", "2. Saved provider"),
+                ("add-provider", "3. Add provider"),
+            ],
+        )
+
+    def _select_settings_root(self, section: str) -> None:
+        if section == "ui":
+            self._show_ui_settings()
+        elif section == "add-provider":
+            self._begin_provider_setup()
+        else:
+            configs = self.config_store.load_all()
+            available = {config.provider_type or config.name for config in configs}
+            choices: list[tuple[object, str]] = [
+                (provider_type, f"{index}. {label}")
+                for index, (provider_type, label) in enumerate(
+                    (
+                        option
+                        for option in _PROVIDER_OPTIONS
+                        if option[0] in available
+                    ),
+                    1,
+                )
+            ]
+            if not choices:
+                self._write("No saved providers.")
+                self._show_settings()
+                return
+            self._show_choices(
+                "settings-provider-type",
+                "Select provider type:",
+                choices,
+            )
+
+    def _show_settings_providers(self, provider_type: str) -> None:
+        configs = tuple(
+            config
+            for config in self.config_store.load_all()
+            if (config.provider_type or config.name) == provider_type
+        )
+        self._show_choices(
+            "settings-provider",
+            "Select saved provider:",
+            [
+                (config, f"{index}. {config.name}")
+                for index, config in enumerate(configs, 1)
+            ],
+        )
+
+    def _show_settings_profile(self) -> None:
+        if self.pending_config is None:
+            self._show_settings()
+            return
+        sections = [("name", "Name"), ("config", "Config")]
+        if (self.pending_config.provider_type or self.pending_config.name) == "custom":
+            sections.extend(
+                [("request", "Request fields"), ("response", "Response fields")]
+            )
+        self._show_choices(
+            "settings-profile",
+            f"Provider settings: {self.pending_config.name}",
+            [
+                (key, f"{index}. {label}")
+                for index, (key, label) in enumerate(sections, 1)
+            ],
+        )
+
+    def _select_settings_profile(self, section: str) -> None:
+        if section == "name":
+            self._start_provider_setting_input(
+                ProviderSettingSpec("name", "Name", "name", "text"),
+                "settings-profile",
+            )
+        elif section == "config":
+            self._show_provider_settings_category("settings-config")
+        elif section == "request":
+            self._show_provider_settings_category("settings-request")
+        else:
+            self._show_provider_settings_category("settings-response")
+
+    def _settings_specs(self, kind: SetupStep) -> tuple[ProviderSettingSpec, ...]:
+        if kind == "settings-config":
+            return CONFIG_SETTING_SPECS
+        if kind == "settings-request":
+            return REQUEST_FIELD_SETTING_SPECS
+        return RESPONSE_FIELD_SETTING_SPECS
+
+    def _show_provider_settings_category(
+        self,
+        kind: SetupStep,
+        *,
+        focus_key: str | None = None,
+    ) -> None:
+        if self.pending_config is None:
+            self._show_settings()
+            return
+        specs = self._settings_specs(kind)
+        labels = {
+            "settings-config": "Config",
+            "settings-request": "Request fields",
+            "settings-response": "Response fields",
+        }
+        self._show_choices(
+            kind,
+            f"{self.pending_config.name} · {labels[kind]}",
+            [
+                (
+                    spec,
+                    f"{index}. {spec.label:<34} {_format_setting_value(getattr(self.pending_config, spec.field_name), secret=spec.value_kind == 'secret')}",
+                )
+                for index, spec in enumerate(specs, 1)
+            ],
+        )
+        if focus_key is not None:
+            focused_index = next(
+                (index for index, spec in enumerate(specs) if spec.key == focus_key),
+                0,
+            )
+            self.query_one("#choices", ListView).index = focused_index
+
+    def _select_provider_setting(
+        self,
+        spec: ProviderSettingSpec,
+        return_kind: SetupStep,
+    ) -> None:
+        if self.pending_config is None:
+            return
+        current = getattr(self.pending_config, spec.field_name)
+        if spec.value_kind == "toggle":
+            self._apply_provider_setting(spec, str(not bool(current)).lower(), return_kind)
+        elif spec.value_kind == "choice":
+            self._apply_provider_setting(
+                spec,
+                _cycle_choice(_format_setting_value(current), spec.choices, 1),
+                return_kind,
+            )
+        else:
+            self._start_provider_setting_input(spec, return_kind)
+
+    def _start_provider_setting_input(
+        self,
+        spec: ProviderSettingSpec,
+        return_kind: SetupStep | None,
+    ) -> None:
+        self.pending_setting_spec = spec
+        self.pending_ui_setting = None
+        self.settings_return_kind = return_kind
+        self.setup_step = "setting-value"
+        choices = f" ({'|'.join(spec.choices)})" if spec.choices else ""
+        self._show_input_prompt(
+            f"{spec.label}{choices}:",
+            password=spec.value_kind == "secret",
+        )
+
+    def _show_ui_settings(self, *, focus_key: str | None = None) -> None:
+        self._show_choices(
+            "settings-ui",
+            "UI settings:",
+            [
+                (
+                    spec,
+                    f"{index}. {label:<28} {getattr(self.ui_config, field_name)}",
+                )
+                for index, spec in enumerate(UI_SETTING_SPECS, 1)
+                for _key, label, field_name in (spec,)
+            ],
+        )
+        if focus_key is not None:
+            focused_index = next(
+                (index for index, spec in enumerate(UI_SETTING_SPECS) if spec[0] == focus_key),
+                0,
+            )
+            self.query_one("#choices", ListView).index = focused_index
+
+    def _select_ui_setting(self, spec: tuple[str, str, str]) -> None:
+        key, label, field_name = spec
+        current = getattr(self.ui_config, field_name)
+        if field_name == "text_format":
+            self._apply_ui_setting(
+                key,
+                _cycle_choice(str(current), ("normal", "bold", "italic"), 1),
+            )
+            return
+        self.pending_setting_spec = None
+        self.pending_ui_setting = spec
+        self.settings_return_kind = "settings-ui"
+        self.setup_step = "setting-value"
+        self._show_input_prompt(f"{label}:")
+
+    def _apply_provider_setting(
+        self,
+        spec: ProviderSettingSpec,
+        value: str,
+        return_kind: SetupStep | None,
+    ) -> None:
+        if self.pending_config is None:
+            return
+        previous = self.pending_config
+        try:
+            config = update_provider_setting(previous, spec.key, value)
+            provider = (self.provider_factory or create_provider)(config)
+            update_saved_provider(self.config_store, previous, config)
+        except (CommandError, ProviderError, OSError, ValueError) as caught:
+            self._write(f"Setting update failed: {caught}")
+            if return_kind in {
+                "settings-config",
+                "settings-request",
+                "settings-response",
+            }:
+                self._show_provider_settings_category(return_kind, focus_key=spec.key)
+            elif return_kind == "settings-profile":
+                self._show_settings_profile()
+            else:
+                self._reset_setup()
+            return
+        self.pending_config = config
+        self.provider = provider
+        self.config = config
+        self._set_status()
+        if return_kind in {
+            "settings-config",
+            "settings-request",
+            "settings-response",
+        }:
+            self._show_provider_settings_category(return_kind, focus_key=spec.key)
+        elif return_kind == "settings-profile":
+            self._show_settings_profile()
+        else:
+            self._reset_setup()
+
+    def _apply_ui_setting(self, setting: str, value: str) -> None:
+        try:
+            self.ui_config = update_ui_setting(self.ui_config, setting, value)
+            save_ui_config(self.config_store, self.ui_config)
+        except (OSError, ValueError) as caught:
+            self._write(f"UI setting update failed: {caught}")
+        self._apply_ui_config()
+        self._show_ui_settings(focus_key=setting)
+
+    def _adjust_selected_setting(self, direction: int) -> bool:
+        kind = self.choice_kind
+        if kind not in {
+            "settings-config",
+            "settings-request",
+            "settings-response",
+            "settings-ui",
+        }:
+            return False
+        index = self.query_one("#choices", ListView).index
+        if index is None or not 0 <= index < len(self.choice_values):
+            return False
+        if kind == "settings-ui":
+            key, _label, field_name = cast(tuple[str, str, str], self.choice_values[index])
+            current = getattr(self.ui_config, field_name)
+            if field_name == "text_format":
+                value = _cycle_choice(
+                    str(current),
+                    ("normal", "bold", "italic"),
+                    direction,
+                )
+            elif isinstance(current, int):
+                value = str(max(0, min(8, current + direction)))
+            else:
+                return False
+            self._apply_ui_setting(key, value)
+            return True
+        spec = cast(ProviderSettingSpec, self.choice_values[index])
+        if self.pending_config is None:
+            return False
+        current = getattr(self.pending_config, spec.field_name)
+        if spec.value_kind == "toggle":
+            value = str(not bool(current)).lower()
+        elif spec.value_kind == "choice":
+            value = _cycle_choice(
+                _format_setting_value(current),
+                spec.choices,
+                direction,
+            )
+        elif spec.value_kind == "temperature":
+            value = str(round(max(0.0, min(1.0, float(current or 0) + 0.1 * direction)), 1))
+        elif spec.value_kind == "integer" and current is not None:
+            value = str(max(1, int(current) + direction))
+        else:
+            return False
+        self._apply_provider_setting(spec, value, kind)
+        return True
 
     def _start_provider_inputs(self, provider_name: str) -> None:
-        self.setup_step = (
-            "base-url" if provider_name == "openai-compatible" else "copilot-token"
-        )
-        self.pending_config = ProviderConfig(name=provider_name)
-        prompt = (
-            f"Base URL (default: {_DEFAULT_OPENAI_BASE_URL})"
-            if provider_name == "openai-compatible"
-            else "Copilot token (blank uses GITHUB_COPILOT_TOKEN)"
-        )
+        if provider_name == "custom":
+            self.setup_step = "custom-name"
+            self.pending_config = ProviderConfig(
+                name="custom provider",
+                provider_type="custom",
+            )
+            prompt = "Custom provider name (default: custom provider)"
+        else:
+            self.setup_step = (
+                "base-url"
+                if provider_name == "openai-compatible"
+                else "copilot-token"
+            )
+            self.pending_config = ProviderConfig(name=provider_name)
+            prompt = (
+                f"Base URL (default: {_DEFAULT_OPENAI_BASE_URL})"
+                if provider_name == "openai-compatible"
+                else "Copilot token (blank uses GITHUB_COPILOT_TOKEN)"
+            )
         self.query_one("#setup-label", Static).update(prompt)
         prompt_input = self.query_one("#prompt", PeonInput)
         prompt_input.password = provider_name == "github-copilot"
@@ -692,31 +1158,89 @@ class TextualPeonApp(App[int]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
-        event.input.value = ""
         if self.quit_confirmation_active:
+            event.input.value = ""
             self._finish_quit_confirmation(value)
             return
-        if self.setup_step in {"base-url", "copilot-token", "api-key"}:
+        if self.setup_step in {
+            "custom-name",
+            "base-url",
+            "copilot-token",
+            "api-key",
+            "setting-value",
+        }:
+            event.input.value = ""
             self._handle_setup_input(value)
             return
         if not value:
+            event.input.value = ""
             return
         if self.provider is None or self.config is None:
+            event.input.value = ""
             self._begin_provider_setup()
             return
         if value.startswith("/"):
-            self._handle_command(_resolve_command(value))
+            invocation = DEFAULT_COMMAND_CATALOG.resolve(value)
+            selected = (
+                self.command_matches[self.command_selected_index]
+                if self.command_matches
+                else None
+            )
+            event.input.value = ""
+            self.dismiss_command_palette()
+            if selected is not None and (
+                invocation is None or not invocation.is_direct
+            ):
+                _name, separator, argument = value.partition(" ")
+                selected_value = (
+                    f"{selected.command.name}{separator}{argument}"
+                    if separator
+                    else selected.command.name
+                )
+                self._handle_command(selected_value)
+            else:
+                self._handle_command(value)
             return
+        event.input.value = ""
         self._write(value, role="user")
         self._start_task(value)
 
     def _handle_setup_input(self, value: str) -> None:
+        if self.setup_step == "setting-value":
+            self.query_one("#prompt", PeonInput).password = False
+            if self.pending_ui_setting is not None:
+                self._apply_ui_setting(self.pending_ui_setting[0], value)
+            elif self.pending_setting_spec is not None and self.pending_config is not None:
+                self._apply_provider_setting(
+                    self.pending_setting_spec,
+                    value,
+                    self.settings_return_kind,
+                )
+            else:
+                self._reset_setup()
+            return
         if self.pending_config is None:
+            return
+        if self.setup_step == "custom-name":
+            self.pending_config = ProviderConfig(
+                name=value or "custom provider",
+                provider_type="custom",
+            )
+            self.setup_step = "base-url"
+            self._show_input_prompt("Proxy URL:")
             return
         if self.setup_step == "base-url":
             self.pending_config = ProviderConfig(
                 name=self.pending_config.name,
-                base_url=value or _DEFAULT_OPENAI_BASE_URL,
+                provider_type=self.pending_config.provider_type,
+                base_url=(
+                    value
+                    or (
+                        _DEFAULT_OPENAI_BASE_URL
+                        if self.pending_config.provider_type is None
+                        else ""
+                    )
+                ),
             )
             self.setup_step = "api-key"
             self._show_input_prompt("API key (blank for an unauthenticated endpoint)", password=True)
@@ -724,6 +1248,7 @@ class TextualPeonApp(App[int]):
         if self.setup_step == "api-key":
             self.pending_config = ProviderConfig(
                 name=self.pending_config.name,
+                provider_type=self.pending_config.provider_type,
                 base_url=self.pending_config.base_url,
                 api_key=value or None,
             )
@@ -746,7 +1271,8 @@ class TextualPeonApp(App[int]):
         config = self.pending_config
         try:
             provider = (self.provider_factory or create_provider)(config)
-            if config.name == "openai-compatible":
+            provider_type = config.provider_type or config.name
+            if provider_type in {"openai-compatible", "custom"}:
                 models = self._discover_models(provider)
                 if not models:
                     raise ProviderError("provider did not advertise any models")
@@ -766,6 +1292,7 @@ class TextualPeonApp(App[int]):
                 self._complete_provider_setup(
                     ProviderConfig(
                         name=config.name,
+                        provider_type=config.provider_type,
                         model="gpt-4o",
                         copilot_token=config.copilot_token,
                     )
@@ -788,17 +1315,17 @@ class TextualPeonApp(App[int]):
             return ()
         return models
 
-    def _finish_model_selection(self, model: str) -> None:
-        if self.pending_config is None:
-            return
-        config = ProviderConfig(
-            name=self.pending_config.name,
-            model=model,
-            models=self.pending_models,
-            base_url=self.pending_config.base_url,
-            api_key=self.pending_config.api_key,
-            copilot_token=self.pending_config.copilot_token,
-        )
+    def _finish_model_selection(self, selection: SavedModel | str) -> None:
+        if isinstance(selection, SavedModel):
+            config = replace(selection.config, model=selection.model)
+        else:
+            if self.pending_config is None:
+                return
+            config = replace(
+                self.pending_config,
+                model=selection,
+                models=self.pending_models,
+            )
         self._complete_provider_setup(config)
 
     def _complete_provider_setup(self, config: ProviderConfig) -> None:
@@ -830,6 +1357,9 @@ class TextualPeonApp(App[int]):
     def _reset_setup(self) -> None:
         self.setup_step = None
         self.pending_config = None
+        self.pending_setting_spec = None
+        self.pending_ui_setting = None
+        self.settings_return_kind = None
         self.pending_models = ()
         self.query_one("#setup-label", Static).update("")
         self.query_one("#prompt", PeonInput).password = False
@@ -862,59 +1392,85 @@ class TextualPeonApp(App[int]):
         prompt.focus()
 
     def _handle_command(self, command: str) -> None:
-        name, _, argument = command.partition(" ")
-        matches = [
-            spec for spec, _description in _COMMAND_SPECS if spec.startswith(name.lower())
-        ]
-        if not matches:
+        name = command.split(maxsplit=1)[0]
+        invocation = DEFAULT_COMMAND_CATALOG.resolve(command)
+        if invocation is None:
             self._write(f"Unknown command: {name}")
             return
-        resolved = matches[0]
-        if resolved == "/quit":
-            self.exit(0)
-        elif resolved == "/logout":
-            self._show_logout_picker()
-        elif resolved == "/help":
-            self._write("/provider /models /model /logout /tools /clear /help /quit")
-        elif resolved == "/models":
-            self._write(
-                "Models: "
-                + ", ".join(self.config.models if self.config else ())
+        definition = invocation.command
+        if definition.setting_key is not None:
+            self._handle_provider_setting_command(
+                definition.setting_key,
+                invocation.argument,
             )
-        elif resolved == "/model":
-            self._show_model_picker(argument.strip())
-        elif resolved == "/provider":
+        elif definition.availability == "reserved":
+            self._write(f"{definition.name} is reserved and is not available yet.")
+        elif definition.id == "quit":
+            self.exit(0)
+        elif definition.id == "logout":
+            self._show_logout_picker()
+        elif definition.id == "help":
+            self._write(DEFAULT_COMMAND_CATALOG.help_text())
+        elif definition.id == "model" and name.casefold() == "/models" and not invocation.argument:
+            choices = saved_model_choices(self.config_store.load_all())
+            self._write("Models: " + ", ".join(choice.label for choice in choices))
+        elif definition.id == "model":
+            self._show_model_picker(invocation.argument)
+        elif definition.id == "provider":
             self._begin_provider_setup()
-        elif resolved == "/clear":
+        elif definition.id == "settings":
+            self._show_settings()
+        elif definition.id == "new":
             self.context.messages.clear()
             self.query_one("#transcript", ChatMessage).clear_transcript()
             self._write("✓ New session started", role="success")
             self._set_status()
-        elif resolved == "/tools":
+        elif definition.id == "tools":
             self._write("Tools: " + ", ".join(tool.name for tool in self.registry.tools))
 
+    def _handle_provider_setting_command(self, setting: str, value: str) -> None:
+        if self.config is None:
+            self._write("No active provider.")
+            return
+        spec = (
+            ProviderSettingSpec("name", "Name", "name", "text")
+            if setting == "name"
+            else next(spec for spec in CONFIG_SETTING_SPECS if spec.key == setting)
+        )
+        self.pending_config = self.config
+        current = getattr(self.config, spec.field_name)
+        if not value and spec.value_kind == "toggle":
+            value = str(not bool(current)).lower()
+        elif not value and spec.value_kind == "choice":
+            value = _cycle_choice(
+                _format_setting_value(current),
+                spec.choices,
+                1,
+            )
+        if value:
+            self._apply_provider_setting(spec, value, None)
+        else:
+            self._start_provider_setting_input(spec, None)
+
     def _show_model_picker(self, argument: str) -> None:
-        if self.config is None or not self.config.models:
+        choices = saved_model_choices(self.config_store.load_all())
+        if not choices:
             self._write("No saved models. Use /provider to discover models.")
             return
         if argument:
-            self.pending_config = self.config
-            self.pending_models = self.config.models
             try:
-                model = _select_model(argument, self.config.models)
-            except ValueError as caught:
+                choice = select_saved_model(argument, choices)
+            except CommandError as caught:
                 self._write(str(caught))
                 return
-            self._finish_model_selection(model)
+            self._finish_model_selection(choice)
             return
-        self.pending_config = self.config
-        self.pending_models = self.config.models
         self._show_choices(
             "model",
             "Select model:",
             [
-                (model, f"{index}. {model}")
-                for index, model in enumerate(self.config.models, 1)
+                (choice, f"{index}. {choice.label}")
+                for index, choice in enumerate(choices, 1)
             ],
         )
 

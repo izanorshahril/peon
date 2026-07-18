@@ -122,9 +122,8 @@ peon/
 │   ├── agent/                # Portable runtime and harness
 │   ├── app/                  # CLI/TUI/application shell
 │   └── extensions/           # Extension API and loading
-├── src/report_harness/       # Legacy report-generation prototype; not the Peon core
 ├── tests/                    # Current prototype tests; core tests will follow the target seams
-├── .scratch/report-generation-harness/
+├── .scratch/peon-spec/
 │   ├── map.md                # Current direction and resolved decisions
 │   ├── spec.md               # Buildable Peon specification
 │   └── issues/               # Dependency-ordered implementation tickets
@@ -140,10 +139,10 @@ The next implementation phase should fill `src/peon/agent` first, then add `ai`,
 ```powershell
 uv sync
 uv run pytest
-uv run mypy src/peon src/report_harness
+uv run mypy src/peon
 ```
 
-The current `report-harness` command still belongs to the legacy prototype. The `peon` command now lives under `src/peon/app` and accepts a task plus an injected provider configuration; concrete provider adapters will follow in the AI layer.
+The `peon` command lives under `src/peon/app` and accepts a task plus an injected provider configuration.
 
 ## Interaction levels
 
@@ -201,9 +200,12 @@ plus configurable visual left padding for user and assistant text; the
 defaults match Pi-like spacing. Assistant spacer bars use the current black
 theme background.
 The TUI flags `--user-top-blank-lines`, `--user-bottom-blank-lines`, and
-`--message-left-padding` adjust those values. If focus is anywhere outside the composer, typing automatically
+`--message-left-padding` adjust those values. `/settings` also persists message
+spacing, left padding, application and chat backgrounds, user and assistant
+colors, and normal/bold/italic text formatting. Font family and font size remain
+terminal-emulator settings because Textual cannot control them reliably. If focus is anywhere outside the composer, typing automatically
 returns focus to it and preserves the first character typed. Successful
-session commands such as `/clear` leave a light-blue checkmark confirmation
+session commands such as `/new` leave a light-blue checkmark confirmation
 in the transcript. Slash-command suggestions appear above the composer as
 soon as a command prefix is typed; the first matching command is highlighted
 as the candidate that will run. Press `Esc` while a provider, model, or logout
@@ -214,12 +216,23 @@ not interrupt an active chat or discard a draft prompt. `Ctrl+D` and `/quit`
 remain direct exit commands. Switching models updates the compact status line
 without adding provider or model trace text to the conversation.
 
-Peon can retain more than one provider profile. When multiple profiles are
-saved, startup presents a provider picker. `/provider` adds or replaces a
-profile, `/model` switches among the models detected for the active profile,
-and `/logout` presents a picker that removes only the selected provider. If the
-active provider is removed, Peon switches to another saved profile or starts
-provider setup when none remain.
+Peon can retain more than one provider profile. Startup reuses the last active
+profile without prompting. `/provider` adds a profile, `/model` lists and
+switches models from every saved profile, and compatibility `/models` remains
+hidden from suggestions. The model command can change model and provider
+without clearing conversation context. `/logout` removes only the selected
+provider. If the active provider is removed, Peon switches to another saved
+profile or starts provider setup when none remain.
+
+`/settings` opens a retained hierarchy: `UI`, `Saved provider`, or `Add
+provider`. Saved providers are grouped by adapter type and profile name. An
+OpenAI-compatible profile exposes its name and config; a custom profile also
+exposes request- and response-field mappings. Request rows use canonical
+OpenAI names such as `reasoning_effort` and `max_completion_tokens` on the left
+and the configured corporate field name on the right. In Textual, Left/Right
+changes reasoning, booleans, token counts, temperature, spacing, and text
+format in place; Enter cycles choices or toggles booleans. Values that require
+typing return to the same list after they are saved.
 
 The footer currently shows the working directory, provider, model, context
 message count, and `n/a` for effort and token usage. The provider-neutral
@@ -230,14 +243,18 @@ history are not included yet.
 Interactive commands:
 
 ```text
-/provider  configure or replace the active provider
-/models    list detected models
-/model     switch the active model
-/logout    remove one saved provider
+/help      show available and reserved commands
+/new       start a clean conversation
+/model     list and switch model and provider
+/provider  configure another provider profile
+/settings  configure UI and saved provider profiles
 /tools     list registered tools
-/clear     clear the conversation context
-/help      show commands
+/logout    remove one saved provider
 /quit      exit Peon
+
+Provider-field commands remain available as hidden compatibility aliases and
+are managed through `/settings`. Reserved future commands appear in `/help`
+with honest unavailable feedback.
 ```
 
 One-shot requests remain available for scripts and automation:

@@ -4,7 +4,9 @@ from io import StringIO
 
 from peon.agent import AgentMessage, ModelResponse, ToolDefinition
 from peon.app import JsonProviderConfigStore, ProviderConfig
-from peon.app.tui import _resolve_command, run_tui
+from peon.app.tui import SlashCommandCompleter, run_tui
+from prompt_toolkit.completion import CompleteEvent
+from prompt_toolkit.document import Document
 
 
 @dataclass
@@ -68,6 +70,36 @@ class MemoryConfigStore:
     def delete(self, config: ProviderConfig) -> None:
         if self.configuration == config:
             self.configuration = None
+
+
+@dataclass
+class MultiMemoryConfigStore:
+    configurations: list[ProviderConfig]
+    active: ProviderConfig
+
+    def load(self) -> ProviderConfig:
+        return self.active
+
+    def load_all(self) -> tuple[ProviderConfig, ...]:
+        return tuple(self.configurations)
+
+    def save(self, config: ProviderConfig) -> None:
+        for index, existing in enumerate(self.configurations):
+            if existing.name == config.name and existing.base_url == config.base_url:
+                self.configurations[index] = config
+                self.active = config
+                return
+        self.configurations.append(config)
+        self.active = config
+
+    def delete(self, config: ProviderConfig) -> None:
+        self.configurations = [
+            existing
+            for existing in self.configurations
+            if existing != config
+        ]
+        if self.active == config and self.configurations:
+            self.active = self.configurations[0]
 
 
 def scripted_input(values: list[str]):
@@ -252,6 +284,43 @@ def test_tui_auto_discovers_and_selects_openai_compatible_model() -> None:
     assert config_store.configuration.models == ("first-model", "second-model")
 
 
+def test_tui_configures_named_custom_provider_and_request_field() -> None:
+    factory = ProviderFactory()
+    config_store = MemoryConfigStore()
+    output = StringIO()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(
+            [
+                "3",
+                "Corporate proxy",
+                "http://localhost:8080/chat",
+                "1",
+                "/quit",
+            ]
+        ),
+        secret_input=scripted_secret([""]),
+        output=output,
+        config_store=config_store,
+    )
+
+    assert result == 0
+    assert factory.configurations[0] == ProviderConfig(
+        name="Corporate proxy",
+        provider_type="custom",
+        base_url="http://localhost:8080/chat",
+    )
+    assert factory.configurations[1] == ProviderConfig(
+        name="Corporate proxy",
+        provider_type="custom",
+        model="first-model",
+        models=("first-model", "second-model"),
+        base_url="http://localhost:8080/chat",
+    )
+    assert config_store.configuration == factory.configurations[1]
+
+
 def test_tui_reuses_saved_provider_configuration() -> None:
     factory = ProviderFactory()
     config_store = MemoryConfigStore(
@@ -275,6 +344,82 @@ def test_tui_reuses_saved_provider_configuration() -> None:
     assert result == 0
     assert factory.configurations == [config_store.configuration]
     assert "Using saved provider: openai-compatible (saved-model)" in output.getvalue()
+
+
+def test_tui_changes_custom_provider_settings() -> None:
+    factory = ProviderFactory()
+    config_store = MemoryConfigStore(
+        configuration=ProviderConfig(
+            name="Corporate",
+            provider_type="custom",
+            model="chat-model",
+            base_url="http://localhost:8080",
+        )
+    )
+    output = StringIO()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(
+            [
+                "/settings",
+                "2",
+                "1",
+                "1",
+                "3",
+                "1",
+                "reasoning_effort",
+                "",
+                "",
+                "",
+                "/quit",
+            ]
+        ),
+        secret_input=scripted_secret([]),
+        output=output,
+        config_store=config_store,
+    )
+
+    assert result == 0
+    assert config_store.configuration is not None
+    assert config_store.configuration.reasoning_effort_field == "reasoning_effort"
+    assert factory.configurations[-1] == config_store.configuration
+    assert "Updated reasoning_effort." in output.getvalue()
+
+
+def test_tui_changes_active_provider_config_with_slash_commands() -> None:
+    factory = ProviderFactory()
+    config_store = MemoryConfigStore(
+        configuration=ProviderConfig(
+            name="Corporate",
+            provider_type="custom",
+            model="chat-model",
+            base_url="http://localhost:8080",
+        )
+    )
+    output = StringIO()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(
+            [
+                "/temperature 0.4",
+                "/reasoning high",
+                "/supports-tools",
+                "/quit",
+            ]
+        ),
+        secret_input=scripted_secret([]),
+        output=output,
+        config_store=config_store,
+    )
+
+    assert result == 0
+    assert config_store.configuration is not None
+    assert config_store.configuration.temperature == 0.4
+    assert config_store.configuration.reasoning_effort == "high"
+    assert config_store.configuration.supports_tools is True
+    assert factory.configurations[-1] == config_store.configuration
 
 
 def test_tui_lists_and_switches_saved_models() -> None:
@@ -303,6 +448,45 @@ def test_tui_lists_and_switches_saved_models() -> None:
     assert config_store.configuration.model == "second-model"
     assert "1. first-model" in output.getvalue()
     assert "Model selected: second-model" in output.getvalue()
+
+
+def test_tui_aggregates_saved_models_and_switches_provider_without_losing_context() -> None:
+    factory = ProviderFactory()
+    first = ProviderConfig(
+        name="first provider",
+        model="alpha",
+        models=("alpha",),
+        base_url="http://first.example/v1",
+    )
+    second = ProviderConfig(
+        name="second provider",
+        model="beta",
+        models=("beta",),
+        base_url="http://second.example/v1",
+    )
+    config_store = MultiMemoryConfigStore([first, second], active=second)
+    output = StringIO()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(
+            ["first task", "/models", "/model 1", "second task", "/quit"]
+        ),
+        secret_input=scripted_secret([]),
+        output=output,
+        config_store=config_store,
+    )
+
+    assert result == 0
+    assert config_store.active == first
+    assert factory.configurations[-1] == first
+    assert "alpha [first provider]" in output.getvalue()
+    assert "beta [second provider]" in output.getvalue()
+    assert factory.providers[-1].received_messages[0] == (
+        AgentMessage(role="user", content="first task"),
+        AgentMessage(role="assistant", content="first response"),
+        AgentMessage(role="user", content="second task"),
+    )
 
 
 def test_tui_runs_first_matching_abbreviated_command() -> None:
@@ -366,10 +550,39 @@ def test_tui_logout_removes_saved_provider_and_exits() -> None:
     assert "Saved provider removed: openai-compatible." in output.getvalue()
 
 
-def test_command_resolution_prefers_first_matching_command() -> None:
-    assert _resolve_command("/mo") == "/model"
-    assert _resolve_command("/q") == "/quit"
-    assert _resolve_command("/missing") is None
+def test_prompt_completer_does_not_replace_typed_arguments() -> None:
+    completer = SlashCommandCompleter()
+
+    completions = tuple(
+        completer.get_completions(
+            Document("/model 2"),
+            CompleteEvent(completion_requested=True),
+        )
+    )
+
+    assert completions == ()
+
+
+def test_reserved_command_does_not_enter_agent_conversation() -> None:
+    factory = ProviderFactory()
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+    output = StringIO()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(["/compact", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=output,
+        config_store=MemoryConfigStore(configuration=config),
+    )
+
+    assert result == 0
+    assert "/compact is reserved and is not available yet." in output.getvalue()
+    assert factory.providers[-1].received_messages == []
 
 
 def test_json_provider_config_store_round_trips(tmp_path) -> None:

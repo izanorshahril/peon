@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 import sys
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TextIO
 
 from prompt_toolkit import PromptSession
@@ -18,8 +18,30 @@ from peon.agent import AgentContext, AgentError, ModelProvider, ToolCall, run_ta
 from peon.ai import ProviderError
 from peon.extensions import ExtensionRegistry, register_sample_tools
 
-from .cli import CommandError, ProviderConfig, ProviderFactory, create_provider
-from .config import JsonProviderConfigStore, ProviderConfigStore
+from .cli import (
+    CONFIG_SETTING_SPECS,
+    CommandError,
+    ProviderConfig,
+    ProviderFactory,
+    ProviderSettingSpec,
+    REQUEST_FIELD_SETTING_SPECS,
+    RESPONSE_FIELD_SETTING_SPECS,
+    SavedModel,
+    create_provider,
+    saved_model_choices,
+    select_saved_model,
+    update_provider_setting,
+)
+from .config import (
+    UI_SETTING_SPECS,
+    JsonProviderConfigStore,
+    ProviderConfigStore,
+    load_ui_config,
+    save_ui_config,
+    update_saved_provider,
+    update_ui_setting,
+)
+from .commands import DEFAULT_COMMAND_CATALOG, CommandDefinition
 
 InputFunction = Callable[[str], str]
 SecretInputFunction = Callable[[str], str]
@@ -29,19 +51,8 @@ _PEON_VERSION = "0.1.0"
 _PROVIDER_OPTIONS = (
     ("openai-compatible", "OpenAI-compatible"),
     ("github-copilot", "GitHub Copilot"),
+    ("custom", "Custom provider"),
 )
-_COMMAND_SPECS = (
-    ("/help", "show available commands"),
-    ("/model", "switch the active model"),
-    ("/models", "list saved models"),
-    ("/provider", "configure a provider"),
-    ("/logout", "remove one saved provider"),
-    ("/tools", "list registered tools"),
-    ("/clear", "clear conversation context"),
-    ("/quit", "exit Peon"),
-)
-
-
 class SlashCommandCompleter(Completer):
     """Suggest slash commands while the user types a command prefix."""
 
@@ -52,17 +63,22 @@ class SlashCommandCompleter(Completer):
     ) -> Iterator[Completion]:
         del complete_event
         text = document.text
-        if not text.startswith("/") or " " in text:
+        if not text.startswith("/") or any(character.isspace() for character in text):
             return
-        prefix = text.lower()
-        for command, description in _COMMAND_SPECS:
-            if command.startswith(prefix):
-                yield Completion(
-                    command,
-                    start_position=-len(text),
-                    display=command,
-                    display_meta=description,
-                )
+        for match in DEFAULT_COMMAND_CATALOG.search(text):
+            command = match.command
+            candidates = ", ".join(command.candidate_names)
+            metadata = command.description
+            if candidates:
+                metadata = f"{metadata} (also: {candidates})"
+            if match.is_reserved:
+                metadata = f"{metadata} [reserved]"
+            yield Completion(
+                command.name,
+                start_position=-len(text),
+                display=command.name,
+                display_meta=metadata,
+            )
 
 
 def _create_input_function() -> InputFunction:
@@ -92,7 +108,7 @@ def _print_header(*, output: TextIO) -> None:
         " escape interrupt · ctrl+c/ctrl+d clear/exit · / commands",
         file=output,
     )
-    print(" Type /help for commands and /models for detected models.", file=output)
+    print(" Type /help for commands and /model for saved models.", file=output)
 
 
 def _print_footer(session: TuiSession, *, output: TextIO) -> None:
@@ -168,7 +184,6 @@ def run_tui(
     session = _restore_session(
         provider_factory=provider_factory,
         config_store=active_config_store,
-        input_fn=input_fn,
         output=output,
         error=error,
         context=AgentContext(),
@@ -228,6 +243,16 @@ def _configure_session(
             base_url=base_url,
             api_key=api_key,
         )
+    elif provider_name == "custom":
+        custom_name = input_fn("Custom provider name (default: custom provider): ").strip()
+        base_url = input_fn("Proxy URL: ").strip()
+        api_key = secret_input("API key (optional): ").strip()
+        config = ProviderConfig(
+            name=custom_name or "custom provider",
+            provider_type="custom",
+            base_url=base_url,
+            api_key=api_key or None,
+        )
     else:
         token = secret_input(
             "Copilot token (leave blank to use GITHUB_COPILOT_TOKEN): "
@@ -239,7 +264,7 @@ def _configure_session(
 
     try:
         provider = (provider_factory or create_provider)(config)
-        if provider_name == "openai-compatible":
+        if provider_name in {"openai-compatible", "custom"}:
             models = _discover_models(provider, error=error)
             if not models:
                 raise CommandError("provider did not advertise any models")
@@ -250,20 +275,26 @@ def _configure_session(
             )
             config = ProviderConfig(
                 name=config.name,
+                provider_type=config.provider_type,
                 model=selected_model,
                 models=models,
                 base_url=config.base_url,
                 api_key=config.api_key,
                 copilot_token=config.copilot_token,
+                reasoning_effort_field=config.reasoning_effort_field,
+                reasoning_effort=config.reasoning_effort,
             )
             provider = (provider_factory or create_provider)(config)
         else:
             config = ProviderConfig(
                 name=config.name,
+                provider_type=config.provider_type,
                 model="gpt-4o",
                 base_url=config.base_url,
                 api_key=config.api_key,
                 copilot_token=config.copilot_token,
+                reasoning_effort_field=config.reasoning_effort_field,
+                reasoning_effort=config.reasoning_effort,
             )
             provider = (provider_factory or create_provider)(config)
     except (CommandError, ProviderError, ValueError) as caught:
@@ -284,7 +315,6 @@ def _restore_session(
     *,
     provider_factory: ProviderFactory | None,
     config_store: ProviderConfigStore,
-    input_fn: InputFunction,
     output: TextIO,
     error: TextIO,
     context: AgentContext,
@@ -293,7 +323,7 @@ def _restore_session(
     configs = config_store.load_all()
     if not configs:
         return None
-    config = _select_saved_provider(configs, input_fn=input_fn, output=output, error=error)
+    config = config_store.load()
     if config is None:
         return None
     try:
@@ -398,18 +428,6 @@ def _select_default_model(
     )
 
 
-def _matching_commands(command_name: str) -> tuple[str, ...]:
-    prefix = command_name.lower()
-    return tuple(
-        command for command, _description in _COMMAND_SPECS if command.startswith(prefix)
-    )
-
-
-def _resolve_command(command_name: str) -> str | None:
-    matches = _matching_commands(command_name)
-    return matches[0] if matches else None
-
-
 def _print_models(models: tuple[str, ...], *, output: TextIO) -> None:
     if not models:
         print("No saved models. Use /provider to discover models.", file=output)
@@ -419,34 +437,352 @@ def _print_models(models: tuple[str, ...], *, output: TextIO) -> None:
         print(f"  {index}. {model}", file=output)
 
 
+def _print_saved_models(
+    choices: tuple[SavedModel, ...],
+    *,
+    output: TextIO,
+) -> None:
+    if not choices:
+        print("No saved models. Use /provider to discover models.", file=output)
+        return
+    print("Available models:", file=output)
+    for index, choice in enumerate(choices, start=1):
+        print(f"  {index}. {choice.label}", file=output)
+
+
+def _select_setting(
+    selection: str,
+    specs: tuple[ProviderSettingSpec, ...],
+) -> ProviderSettingSpec | None:
+    if selection.isdigit() and 1 <= int(selection) <= len(specs):
+        return specs[int(selection) - 1]
+    return next((spec for spec in specs if spec.key == selection), None)
+
+
+def _format_setting_value(value: object) -> str:
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
+
+
+def _print_provider_settings(
+    config: ProviderConfig,
+    specs: tuple[ProviderSettingSpec, ...],
+    *,
+    output: TextIO,
+) -> None:
+    for index, spec in enumerate(specs, 1):
+        value = getattr(config, spec.field_name)
+        if spec.value_kind == "secret" and value:
+            value = "configured"
+        print(f"  {index}. {spec.label}: {_format_setting_value(value)}", file=output)
+
+
+def _configure_ui_settings(
+    *,
+    input_fn: InputFunction,
+    output: TextIO,
+    error: TextIO,
+    config_store: ProviderConfigStore,
+) -> None:
+    ui_config = load_ui_config(config_store)
+    while True:
+        print("UI settings:", file=output)
+        for index, (key, label, field_name) in enumerate(UI_SETTING_SPECS, 1):
+            print(f"  {index}. {label}: {getattr(ui_config, field_name)}", file=output)
+        selection = input_fn("UI setting (blank to go back): ").strip()
+        if not selection:
+            return
+        if selection.isdigit() and 1 <= int(selection) <= len(UI_SETTING_SPECS):
+            key, label, _field_name = UI_SETTING_SPECS[int(selection) - 1]
+        else:
+            match = next((spec for spec in UI_SETTING_SPECS if spec[0] == selection), None)
+            if match is None:
+                print("peon: select a UI setting by number or exact name", file=error)
+                continue
+            key, label, _field_name = match
+        value = input_fn(f"{label}: ").strip()
+        try:
+            ui_config = update_ui_setting(ui_config, key, value)
+            save_ui_config(config_store, ui_config)
+        except (OSError, ValueError) as caught:
+            print(f"peon: UI setting update failed: {caught}", file=error)
+            continue
+        print(f"Updated {label}. The fullscreen UI applies it immediately.", file=output)
+
+
+def _provider_types(configs: tuple[ProviderConfig, ...]) -> tuple[tuple[str, str], ...]:
+    available = {config.provider_type or config.name for config in configs}
+    return tuple(
+        (provider_type, label)
+        for provider_type, label in _PROVIDER_OPTIONS
+        if provider_type in available
+    )
+
+
+def _configure_provider_category(
+    session: TuiSession,
+    config: ProviderConfig,
+    specs: tuple[ProviderSettingSpec, ...],
+    *,
+    provider_factory: ProviderFactory | None,
+    input_fn: InputFunction,
+    secret_input: SecretInputFunction,
+    output: TextIO,
+    error: TextIO,
+    config_store: ProviderConfigStore,
+) -> TuiSession:
+    while True:
+        _print_provider_settings(config, specs, output=output)
+        selection = input_fn("Setting (blank to go back): ").strip()
+        if not selection:
+            return session
+        spec = _select_setting(selection, specs)
+        if spec is None:
+            print("peon: select a setting by number or exact name", file=error)
+            continue
+        current = getattr(config, spec.field_name)
+        if spec.value_kind == "toggle":
+            value = str(not bool(current)).lower()
+        else:
+            choices = f" ({'|'.join(spec.choices)})" if spec.choices else ""
+            prompt = f"{spec.label}{choices}: "
+            value = (
+                secret_input(prompt).strip()
+                if spec.value_kind == "secret"
+                else input_fn(prompt).strip()
+            )
+        try:
+            updated = update_provider_setting(config, spec.key, value)
+            provider = (provider_factory or create_provider)(updated)
+            update_saved_provider(config_store, config, updated)
+        except (CommandError, ProviderError, OSError, ValueError) as caught:
+            print(f"peon: setting update failed: {caught}", file=error)
+            continue
+        config = updated
+        session = TuiSession(
+            provider=provider,
+            config=config,
+            context=session.context,
+            registry=session.registry,
+        )
+        print(f"Updated {spec.label}.", file=output)
+
+
+def _configure_provider_profile(
+    session: TuiSession,
+    config: ProviderConfig,
+    *,
+    provider_factory: ProviderFactory | None,
+    input_fn: InputFunction,
+    secret_input: SecretInputFunction,
+    output: TextIO,
+    error: TextIO,
+    config_store: ProviderConfigStore,
+) -> TuiSession:
+    while True:
+        provider_type = config.provider_type or config.name
+        sections: list[tuple[str, str, tuple[ProviderSettingSpec, ...]]] = [
+            ("name", "Name", (ProviderSettingSpec("name", "Name", "name", "text"),)),
+            ("config", "Config", CONFIG_SETTING_SPECS),
+        ]
+        if provider_type == "custom":
+            sections.extend(
+                [
+                    ("request", "Request fields", REQUEST_FIELD_SETTING_SPECS),
+                    ("response", "Response fields", RESPONSE_FIELD_SETTING_SPECS),
+                ]
+            )
+        print(f"Provider settings: {config.name}", file=output)
+        for index, (_key, label, _specs) in enumerate(sections, 1):
+            print(f"  {index}. {label}", file=output)
+        selection = input_fn("Section (blank to go back): ").strip()
+        if not selection:
+            return session
+        section = (
+            sections[int(selection) - 1]
+            if selection.isdigit() and 1 <= int(selection) <= len(sections)
+            else next((item for item in sections if item[0] == selection), None)
+        )
+        if section is None:
+            print("peon: select a section by number or exact name", file=error)
+            continue
+        session = _configure_provider_category(
+            session,
+            config,
+            section[2],
+            provider_factory=provider_factory,
+            input_fn=input_fn,
+            secret_input=secret_input,
+            output=output,
+            error=error,
+            config_store=config_store,
+        )
+        config = session.config
+
+
+def _configure_settings(
+    session: TuiSession,
+    *,
+    provider_factory: ProviderFactory | None,
+    input_fn: InputFunction,
+    secret_input: SecretInputFunction,
+    output: TextIO,
+    error: TextIO,
+    config_store: ProviderConfigStore,
+) -> TuiSession:
+    while True:
+        print("Settings:", file=output)
+        print("  1. UI", file=output)
+        print("  2. Saved provider", file=output)
+        print("  3. Add provider", file=output)
+        selection = input_fn("Section (blank to finish): ").strip()
+        if not selection:
+            return session
+        if selection in {"1", "ui"}:
+            _configure_ui_settings(
+                input_fn=input_fn,
+                output=output,
+                error=error,
+                config_store=config_store,
+            )
+            continue
+        if selection in {"3", "add-provider"}:
+            replacement = _configure_session(
+                provider_factory=provider_factory,
+                input_fn=input_fn,
+                secret_input=secret_input,
+                output=output,
+                error=error,
+                context=session.context,
+                registry=session.registry,
+                config_store=config_store,
+            )
+            session = replacement or session
+            continue
+        if selection not in {"2", "saved-provider"}:
+            print("peon: select a settings section", file=error)
+            continue
+        configs = config_store.load_all()
+        provider_types = _provider_types(configs)
+        if not provider_types:
+            print("No saved providers.", file=output)
+            continue
+        print("Provider types:", file=output)
+        for index, (_provider_type, label) in enumerate(provider_types, 1):
+            print(f"  {index}. {label}", file=output)
+        type_selection = input_fn("Provider type (blank to go back): ").strip()
+        if not type_selection:
+            continue
+        selected_type = (
+            provider_types[int(type_selection) - 1][0]
+            if type_selection.isdigit() and 1 <= int(type_selection) <= len(provider_types)
+            else type_selection
+        )
+        profiles = tuple(
+            config
+            for config in configs
+            if (config.provider_type or config.name) == selected_type
+        )
+        if not profiles:
+            print("peon: select a saved provider type", file=error)
+            continue
+        print("Saved providers:", file=output)
+        for index, config in enumerate(profiles, 1):
+            print(f"  {index}. {config.name}", file=output)
+        profile_selection = input_fn("Provider (blank to go back): ").strip()
+        if not profile_selection:
+            continue
+        selected_profile = (
+            profiles[int(profile_selection) - 1]
+            if profile_selection.isdigit() and 1 <= int(profile_selection) <= len(profiles)
+            else next((config for config in profiles if config.name == profile_selection), None)
+        )
+        if selected_profile is None:
+            print("peon: select a saved provider", file=error)
+            continue
+        session = _configure_provider_profile(
+            session,
+            selected_profile,
+            provider_factory=provider_factory,
+            input_fn=input_fn,
+            secret_input=secret_input,
+            output=output,
+            error=error,
+            config_store=config_store,
+        )
+
+
+def _update_active_provider_setting(
+    session: TuiSession,
+    command: CommandDefinition,
+    argument: str,
+    *,
+    provider_factory: ProviderFactory | None,
+    input_fn: InputFunction,
+    secret_input: SecretInputFunction,
+    output: TextIO,
+    error: TextIO,
+    config_store: ProviderConfigStore,
+) -> TuiSession:
+    setting = command.setting_key
+    if setting is None:
+        return session
+    spec = next(
+        spec
+        for spec in (*CONFIG_SETTING_SPECS,)
+        if spec.key == setting
+    ) if setting != "name" else ProviderSettingSpec("name", "Name", "name", "text")
+    current = getattr(session.config, spec.field_name)
+    value = argument.strip()
+    if not value and spec.value_kind == "toggle":
+        value = str(not bool(current)).lower()
+    elif not value:
+        choices = f" ({'|'.join(spec.choices)})" if spec.choices else ""
+        prompt = f"{spec.label}{choices}: "
+        value = (
+            secret_input(prompt).strip()
+            if spec.value_kind == "secret"
+            else input_fn(prompt).strip()
+        )
+    try:
+        config = update_provider_setting(session.config, setting, value)
+        provider = (provider_factory or create_provider)(config)
+        update_saved_provider(config_store, session.config, config)
+    except (CommandError, ProviderError, OSError, ValueError) as caught:
+        print(f"peon: setting update failed: {caught}", file=error)
+        return session
+    print(f"Updated {spec.label}: {_format_setting_value(getattr(config, spec.field_name))}", file=output)
+    return TuiSession(
+        provider=provider,
+        config=config,
+        context=session.context,
+        registry=session.registry,
+    )
+
+
 def _switch_model(
     session: TuiSession,
     *,
-    selection: str,
+    selection: SavedModel,
     provider_factory: ProviderFactory | None,
     output: TextIO,
     error: TextIO,
     config_store: ProviderConfigStore,
 ) -> TuiSession:
-    if not session.config.models:
+    if not selection.config.models:
         print("No saved models. Use /provider to discover models.", file=output)
         return session
     try:
-        model = _select_model(selection, session.config.models)
-        config = ProviderConfig(
-            name=session.config.name,
-            model=model,
-            models=session.config.models,
-            base_url=session.config.base_url,
-            api_key=session.config.api_key,
-            copilot_token=session.config.copilot_token,
-        )
+        config = replace(selection.config, model=selection.model)
         provider = (provider_factory or create_provider)(config)
     except (CommandError, ProviderError, ValueError) as caught:
         print(f"peon: {caught}", file=error)
         return session
     _save_configuration(config_store, config, error=error)
-    print(f"Model selected: {model}", file=output)
+    print(f"Model selected: {selection.label}", file=output)
     return TuiSession(
         provider=provider,
         config=config,
@@ -518,30 +854,39 @@ def _handle_command(
     config_store: ProviderConfigStore,
     ) -> tuple[TuiSession, bool]:
     command_name = command.split(maxsplit=1)[0].lower()
-    resolved_command = _resolve_command(command_name)
-    if resolved_command is None:
+    invocation = DEFAULT_COMMAND_CATALOG.resolve(command)
+    if invocation is None:
         print(f"peon: unknown command '{command_name}'; type /help", file=error)
         return session, False
-    command_name = resolved_command
-    if command_name == "/quit":
-        print("Goodbye.", file=output)
-        return session, True
-    if command_name == "/help":
+    definition = invocation.command
+    if definition.setting_key is not None:
+        return (
+            _update_active_provider_setting(
+                session,
+                definition,
+                invocation.argument,
+                provider_factory=provider_factory,
+                input_fn=input_fn,
+                secret_input=secret_input,
+                output=output,
+                error=error,
+                config_store=config_store,
+            ),
+            False,
+        )
+    if definition.availability == "reserved":
         print(
-            "/provider  configure a provider\n"
-            "/models    list saved models\n"
-            "/model     switch the active model\n"
-            "/tools     list registered tools\n"
-            "/clear     clear conversation context\n"
-            "/help      show these commands\n"
-            "/quit      exit Peon",
+            f"{definition.name} is reserved and is not available yet.",
             file=output,
         )
         return session, False
-    if command_name == "/models":
-        _print_models(session.config.models, output=output)
+    if definition.id == "quit":
+        print("Goodbye.", file=output)
+        return session, True
+    if definition.id == "help":
+        print(DEFAULT_COMMAND_CATALOG.help_text(), file=output)
         return session, False
-    if command_name == "/logout":
+    if definition.id == "logout":
         configs = config_store.load_all()
         selected = _select_saved_provider(
             configs,
@@ -592,18 +937,27 @@ def _handle_command(
             registry=session.registry,
         )
         return replacement, False
-    if command_name == "/model":
-        parts = command.split(maxsplit=1)
-        selection = parts[1].strip() if len(parts) == 2 else ""
+    if definition.id == "model":
+        selection = invocation.argument
+        choices = saved_model_choices(config_store.load_all())
+        if not choices:
+            _print_saved_models(choices, output=output)
+            return session, False
+        if command_name == "/models" and not selection:
+            _print_saved_models(choices, output=output)
+            return session, False
         if not selection:
-            _print_models(session.config.models, output=output)
-            if not session.config.models:
-                return session, False
+            _print_saved_models(choices, output=output)
             selection = input_fn("Model: ").strip()
+        try:
+            selected_model = select_saved_model(selection, choices)
+        except CommandError as caught:
+            print(f"peon: {caught}", file=error)
+            return session, False
         return (
             _switch_model(
                 session,
-                selection=selection,
+                selection=selected_model,
                 provider_factory=provider_factory,
                 output=output,
                 error=error,
@@ -611,18 +965,18 @@ def _handle_command(
             ),
             False,
         )
-    if command_name == "/tools":
+    if definition.id == "tools":
         if not session.registry.tools:
             print("No tools registered.", file=output)
         else:
             for tool in session.registry.tools:
                 print(f"- {tool.name}: {tool.description}", file=output)
         return session, False
-    if command_name == "/clear":
+    if definition.id == "new":
         session.context.messages.clear()
         print("Conversation cleared.", file=output)
         return session, False
-    if command_name == "/provider":
+    if definition.id == "provider":
         replacement = _configure_session(
             provider_factory=provider_factory,
             input_fn=input_fn,
@@ -634,4 +988,17 @@ def _handle_command(
             config_store=config_store,
         )
         return replacement or session, False
+    if definition.id == "settings":
+        return (
+            _configure_settings(
+                session,
+                provider_factory=provider_factory,
+                input_fn=input_fn,
+                secret_input=secret_input,
+                output=output,
+                error=error,
+                config_store=config_store,
+            ),
+            False,
+        )
     return session, False
