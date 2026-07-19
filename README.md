@@ -306,10 +306,25 @@ with honest unavailable feedback. `/thinking` is no longer a command; use
 `/reasoning` for effort levels and the General setting for block visibility.
 ```
 
-One-shot requests remain available for scripts and automation:
+One-shot requests remain available for scripts and automation. Use `-p` or
+`--print` for decoration-free final text output; print mode creates an
+ephemeral session by default and reads piped standard input when present:
 
 ```powershell
-uv run peon "Summarize the repository." `
+Get-Content README.md | uv run peon -p "Summarize this input." `
+  --provider openai-compatible `
+  --base-url "https://api.openai.com/v1" `
+  --api-key $env:OPENAI_API_KEY `
+  --model "gpt-4o-mini"
+```
+
+Use `--events` (also available as `--jsonl` or `--json`) with print mode for
+one parseable JSON event per line. Explicit `--continue`, `--session`, or
+`--session-name` opts a print request into durable session behavior.
+
+```powershell
+uv run peon -p "Summarize the repository." `
+  --events `
   --provider openai-compatible `
   --base-url "https://api.openai.com/v1" `
   --api-key $env:OPENAI_API_KEY `

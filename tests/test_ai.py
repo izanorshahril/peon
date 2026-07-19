@@ -118,7 +118,7 @@ def test_openai_compatible_provider_normalizes_request_and_text_response() -> No
 
 
 def test_custom_provider_matches_corporate_chat_payload(monkeypatch) -> None:
-    monkeypatch.setattr("peon.ai.providers.time.time", lambda: 1784295526)
+    monkeypatch.setattr("peon.ai.provider_adapters.time.time", lambda: 1784295526)
     transport = StubTransport(
         {
             "service": "chat",
@@ -177,7 +177,7 @@ def test_custom_provider_matches_corporate_chat_payload(monkeypatch) -> None:
 
 
 def test_custom_provider_supports_configured_request_field_and_embedding(monkeypatch) -> None:
-    monkeypatch.setattr("peon.ai.providers.time.time", lambda: 1784295526)
+    monkeypatch.setattr("peon.ai.provider_adapters.time.time", lambda: 1784295526)
     transport = StubTransport(
         {"embedding": [[1, 2.5], [3.25, 4]]}
     )

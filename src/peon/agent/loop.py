@@ -2,11 +2,11 @@
 
 from collections.abc import Callable, Mapping, Sequence
 
-from .errors import AgentError
+from .runtime_errors import AgentError
 
 from .executor import ToolExecutor
 from .models import AgentContext, AgentMessage, ToolCall, ToolDefinition
-from .provider import ModelProvider
+from .provider_protocol import ModelProvider
 
 
 def run_task(
@@ -19,10 +19,11 @@ def run_task(
     max_tool_calls: int = 8,
     model: str | None = None,
     on_message: Callable[[AgentMessage], None] | None = None,
+    preserve_task_whitespace: bool = False,
 ) -> str | ToolCall:
     """Run one task against an injected provider and return its response."""
-    normalized_task = task.strip()
-    if not normalized_task:
+    normalized_task = task if preserve_task_whitespace else task.strip()
+    if not normalized_task.strip():
         raise AgentError("task is required")
     if max_tool_calls < 1:
         raise AgentError("max_tool_calls must be at least 1")

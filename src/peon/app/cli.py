@@ -1,12 +1,13 @@
 """Command boundary for running a minimal Peon task."""
 
 import argparse
+import json
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal, TextIO
 
-from peon.agent import AgentError, ModelProvider, ToolCall, run_task
+from peon.agent import AgentContext, AgentError, AgentMessage, ModelProvider, ToolCall, run_task
 from peon.ai import (
     CustomProvider,
     CustomRequestFields,
@@ -15,6 +16,13 @@ from peon.ai import (
     OpenAICompatibleProvider,
     ProviderError,
 )
+from peon.extensions import (
+    ExtensionRegistry,
+    register_filesystem_tools,
+    register_sample_tools,
+)
+
+from .sessions import SessionStore
 
 
 REASONING_EFFORTS = ("none", "low", "medium", "high")
@@ -366,6 +374,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start an interactive session with in-session provider setup",
     )
     parser.add_argument(
+        "-p",
+        "--print",
+        dest="print_mode",
+        action="store_true",
+        help="Run one prompt and print the final assistant response",
+    )
+    parser.add_argument(
+        "--events",
+        "--jsonl",
+        "--json",
+        dest="event_mode",
+        action="store_true",
+        help="Emit one normalized JSON event per line in print mode",
+    )
+    parser.add_argument(
         "-c",
         "--continue",
         dest="continue_session",
@@ -419,9 +442,13 @@ def main(
     *,
     provider_factory: ProviderFactory | None = None,
     tui_runner: Callable[..., int] | None = None,
+    input: TextIO | None = None,
     output: TextIO | None = None,
     error: TextIO | None = None,
+    registry: ExtensionRegistry | None = None,
+    session_store: SessionStore | None = None,
 ) -> int:
+    input_stream = input or sys.stdin
     output = output or sys.stdout
     error = error or sys.stderr
     parser = build_parser()
@@ -440,6 +467,40 @@ def main(
         if args.continue_session and args.session_name:
             raise CommandError("--continue and --session-name cannot be combined")
         task = " ".join(args.task).strip()
+        if args.print_mode:
+            if args.tui or args.mode is not None:
+                raise CommandError("--print cannot be combined with interactive mode")
+            if not task:
+                task = _read_piped_input(input_stream)
+            else:
+                piped_input = _read_piped_input(input_stream)
+                if piped_input:
+                    task = f"{task}\n\n{piped_input}"
+            if not task:
+                raise CommandError("task is required")
+            if args.event_mode:
+                return _run_print_mode(
+                    task,
+                    args=args,
+                    provider_factory=provider_factory,
+                    output=output,
+                    error=error,
+                    registry=registry,
+                    session_store=session_store,
+                    event_mode=True,
+                )
+            return _run_print_mode(
+                task,
+                args=args,
+                provider_factory=provider_factory,
+                output=output,
+                error=error,
+                registry=registry,
+                session_store=session_store,
+                event_mode=False,
+            )
+        if args.event_mode:
+            raise CommandError("--events requires --print")
         mode: InteractionMode = args.mode or (
             "minimal" if args.tui or not task else "non-interactive"
         )
@@ -503,6 +564,192 @@ def main(
 
     print(response, file=output)
     return 0
+
+
+def _read_piped_input(input_stream: TextIO) -> str:
+    try:
+        if input_stream.isatty():
+            return ""
+    except (AttributeError, OSError):
+        pass
+    try:
+        return input_stream.read()
+    except (OSError, ValueError):
+        return ""
+
+
+def _run_print_mode(
+    task: str,
+    *,
+    args: argparse.Namespace,
+    provider_factory: ProviderFactory | None,
+    output: TextIO,
+    error: TextIO,
+    registry: ExtensionRegistry | None,
+    session_store: SessionStore | None,
+    event_mode: bool,
+) -> int:
+    from .sessions import (
+        JsonlSessionStore,
+        MemorySessionStore,
+        SessionStoreError,
+        create_session,
+        select_session,
+    )
+
+    events = _EventWriter(output) if event_mode else None
+    explicit_durable_session = bool(
+        args.continue_session or args.session_target or args.session_name
+    )
+    active_store: SessionStore
+    if args.no_session or not explicit_durable_session:
+        active_store = MemorySessionStore()
+    elif session_store is not None:
+        active_store = session_store
+    else:
+        active_store = JsonlSessionStore()
+
+    session_id = ""
+    session_started = False
+    try:
+        if args.session_target:
+            selected = select_session(active_store, args.session_target)
+            context = AgentContext(messages=list(selected.messages))
+            session_id = selected.session_id
+        elif args.continue_session:
+            latest = active_store.load_latest()
+            if latest is None:
+                created = create_session(active_store, name=args.session_name)
+                context = AgentContext()
+                session_id = created.session_id
+            else:
+                context = AgentContext(messages=list(latest.messages))
+                session_id = latest.session_id
+        else:
+            created = create_session(active_store, name=args.session_name)
+            context = AgentContext()
+            session_id = created.session_id
+    except (OSError, SessionStoreError, ValueError) as caught:
+        return _print_mode_failure(
+            caught,
+            events=events,
+            error=error,
+            session_started=False,
+        )
+
+    if events is not None:
+        events.write(
+            "session_start",
+            session_id=session_id,
+            persistent=explicit_durable_session and not args.no_session,
+        )
+        session_started = True
+
+    active_registry = registry or ExtensionRegistry()
+    if registry is None:
+        register_sample_tools(active_registry)
+        register_filesystem_tools(active_registry)
+
+    def on_message(message: AgentMessage) -> None:
+        active_store.append(session_id, message)
+        if events is None:
+            return
+        if message.role == "user":
+            events.write("user", content=message.content)
+        if message.thinking:
+            events.write("thinking", content=message.thinking)
+        if message.tool_call is not None:
+            events.write(
+                "tool_call",
+                name=message.tool_call.name,
+                arguments=dict(message.tool_call.arguments),
+                call_id=message.tool_call.call_id,
+            )
+        elif message.role == "assistant":
+            events.write("assistant", content=message.content)
+        elif message.role == "tool":
+            events.write(
+                "tool_result",
+                content=message.content,
+                call_id=message.tool_call_id,
+            )
+
+    config = ProviderConfig(
+        name=args.provider_name or args.provider,
+        provider_type=args.provider if args.provider == "custom" else None,
+        model=args.model,
+        base_url=args.base_url,
+        api_key=args.api_key,
+        copilot_token=args.copilot_token,
+        reasoning_effort_field=args.reasoning_effort_field,
+        reasoning_effort=(
+            None if args.reasoning_effort == "none" else args.reasoning_effort
+        ),
+        tool_prompt_role=args.tool_prompt_role,
+    )
+    try:
+        if not args.provider:
+            raise CommandError("provider is not configured")
+        provider = (provider_factory or create_provider)(config)
+        response = run_task(
+            task,
+            provider,
+            context=context,
+            executor=active_registry,
+            model=config.model,
+            on_message=on_message,
+            preserve_task_whitespace=True,
+        )
+        if isinstance(response, ToolCall):
+            raise CommandError(
+                f"provider requested tool '{response.name}', but tool execution "
+                "is not configured"
+            )
+    except (AgentError, CommandError, ProviderError, SessionStoreError, ValueError) as caught:
+        return _print_mode_failure(
+            caught,
+            events=events,
+            error=error,
+            session_started=session_started,
+            session_id=session_id,
+        )
+
+    if events is not None:
+        events.write("turn_end", success=True)
+        events.write("session_end", session_id=session_id, success=True)
+    else:
+        print(response, file=output)
+    return 0
+
+
+def _print_mode_failure(
+    caught: Exception,
+    *,
+    events: "_EventWriter | None",
+    error: TextIO,
+    session_started: bool,
+    session_id: str = "",
+) -> int:
+    if events is not None:
+        events.write("error", message=str(caught))
+        if session_started:
+            events.write(
+                "session_end",
+                session_id=session_id,
+                success=False,
+            )
+    else:
+        print(f"peon: {caught}", file=error)
+    return 1
+
+
+class _EventWriter:
+    def __init__(self, output: TextIO) -> None:
+        self._output = output
+
+    def write(self, event_type: str, **fields: object) -> None:
+        payload = {"type": event_type, **fields}
+        print(json.dumps(payload, separators=(",", ":"), default=str), file=self._output)
 
 
 def create_provider(config: ProviderConfig) -> ModelProvider:

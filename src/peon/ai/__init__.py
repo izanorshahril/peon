@@ -1,7 +1,7 @@
 """Provider and model adapters for Peon."""
 
-from .errors import ProviderError
-from .providers import (
+from .provider_errors import ProviderError
+from .provider_adapters import (
 	CustomProvider,
 	CustomRequestFields,
 	CustomResponseFields,

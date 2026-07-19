@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 
 from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
 
-from .errors import ProviderError
+from .provider_errors import ProviderError
 
 JsonObject = Mapping[str, object]
 ToolPromptRole = Literal["system", "developer"]

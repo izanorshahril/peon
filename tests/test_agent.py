@@ -101,6 +101,20 @@ def test_run_task_forwards_compact_context_and_returns_final_response() -> None:
     )
 
 
+def test_run_task_can_preserve_task_whitespace() -> None:
+    provider = FakeProvider(response="Task complete.")
+
+    run_task(
+        "  Keep this text.\n",
+        provider,
+        preserve_task_whitespace=True,
+    )
+
+    assert provider.received_messages == (
+        AgentMessage(role="user", content="  Keep this text.\n"),
+    )
+
+
 def test_run_task_forwards_available_tools_to_provider() -> None:
     provider = FakeProvider(response="Task complete.")
     tools = [
