@@ -320,6 +320,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start an interactive session with in-session provider setup",
     )
     parser.add_argument(
+        "-c",
+        "--continue",
+        dest="continue_session",
+        action="store_true",
+        help="Continue the most recent session for the current directory",
+    )
+    parser.add_argument(
+        "--no-session",
+        dest="no_session",
+        action="store_true",
+        help="Keep the conversation in memory without saving a session",
+    )
+    parser.add_argument(
         "--mode",
         choices=("non-interactive", "minimal", "fullscreen", "webapp"),
         help="Interaction level; defaults to non-interactive with a task, minimal without one",
@@ -358,10 +371,16 @@ def main(
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
+        if args.continue_session and args.no_session:
+            raise CommandError("--continue and --no-session cannot be combined")
         task = " ".join(args.task).strip()
         mode: InteractionMode = args.mode or (
             "minimal" if args.tui or not task else "non-interactive"
         )
+        if mode != "minimal" and (args.continue_session or args.no_session):
+            raise CommandError(
+                "session lifecycle options require interactive mode"
+            )
         if mode == "non-interactive":
             if not task:
                 raise CommandError("task is required")

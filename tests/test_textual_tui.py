@@ -783,6 +783,11 @@ def test_textual_resumes_persistent_session() -> None:
         )
         config_store = MemoryConfigStore((config,))
         session_store = MemorySessionStore()
+        previous = session_store.create()
+        session_store.append(
+            previous.session_id,
+            AgentMessage(role="user", content="old task"),
+        )
 
         async with TextualPeonApp(
             provider_factory=provider_factory,
@@ -800,12 +805,17 @@ def test_textual_resumes_persistent_session() -> None:
             assert pilot.app.query_one("#transcript", ChatMessage).text.endswith(
                 "ok\n"
             )
+            assert pilot.app.context.messages == [
+                AgentMessage(role="user", content="hello"),
+                AgentMessage(role="assistant", content="ok"),
+            ]
 
         async with TextualPeonApp(
             provider_factory=provider_factory,
             config_store=config_store,
             registry=ExtensionRegistry(),
             session_store=session_store,
+            continue_session=True,
         ).run_test() as pilot:
             await pilot.pause()
             assert pilot.app.context.messages == [

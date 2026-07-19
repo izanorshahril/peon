@@ -126,6 +126,47 @@ def test_command_passes_tui_transcript_layout_options() -> None:
     assert calls[0]["message_left_padding"] == 4
 
 
+def test_command_forwards_session_lifecycle_options_to_tui() -> None:
+    calls: list[dict[str, object]] = []
+
+    def tui_runner(**kwargs) -> int:
+        calls.append(kwargs)
+        return 0
+
+    result = main(["--tui", "-c"], tui_runner=tui_runner)
+
+    assert result == 0
+    assert calls[0]["continue_session"] is True
+    assert calls[0]["no_session"] is False
+
+    result = main(["--tui", "--no-session"], tui_runner=tui_runner)
+
+    assert result == 0
+    assert calls[1]["continue_session"] is False
+    assert calls[1]["no_session"] is True
+
+
+def test_command_rejects_conflicting_session_lifecycle_options() -> None:
+    error = StringIO()
+
+    result = main(["--tui", "--continue", "--no-session"], error=error)
+
+    assert result == 1
+    assert "cannot be combined" in error.getvalue()
+
+
+def test_command_rejects_session_lifecycle_options_for_tasks() -> None:
+    error = StringIO()
+
+    result = main(
+        ["Do work.", "--continue", "--provider", "fake"],
+        error=error,
+    )
+
+    assert result == 1
+    assert "require interactive mode" in error.getvalue()
+
+
 def test_command_supports_explicit_interactive_modes() -> None:
     calls: list[dict[str, object]] = []
 

@@ -55,6 +55,41 @@ class ProviderFactory:
         return provider
 
 
+class LegacySessionStore:
+    def __init__(self) -> None:
+        self.delegate = MemorySessionStore()
+
+    def create(self):
+        return self.delegate.create()
+
+    def append(self, session_id: str, message: AgentMessage) -> None:
+        self.delegate.append(session_id, message)
+
+    def load(self, session_id: str):
+        return self.delegate.load(session_id)
+
+    def load_latest(self):
+        return self.delegate.load_latest()
+
+
+class OpaqueCreate:
+    def __init__(self, delegate: MemorySessionStore) -> None:
+        self.delegate = delegate
+
+    @property
+    def __signature__(self):
+        raise ValueError("signature unavailable")
+
+    def __call__(self):
+        return self.delegate.create()
+
+
+class OpaqueLegacySessionStore(LegacySessionStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.create = OpaqueCreate(self.delegate)
+
+
 class ToolCallingProvider(FakeProvider):
     def __init__(self, responses: list[ModelResponse]) -> None:
         super().__init__(responses=[], received_messages=[], received_tools=[])
@@ -258,6 +293,87 @@ def test_tui_executes_native_word_count_and_renders_final_response() -> None:
     )
 
 
+def test_tui_starts_a_fresh_session_without_implicit_resume() -> None:
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+    config_store = MemoryConfigStore(config)
+    session_store = MemorySessionStore()
+    previous = session_store.create()
+    session_store.append(previous.session_id, AgentMessage(role="user", content="old task"))
+    factory = ProviderFactory()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(["new task", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=config_store,
+        session_store=session_store,
+    )
+
+    assert result == 0
+    assert factory.providers[0].received_messages[0] == (
+        AgentMessage(role="user", content="new task"),
+    )
+    assert len(session_store.order) == 2
+
+
+def test_tui_no_session_mode_does_not_write_durable_sessions(tmp_path) -> None:
+    session_store = JsonlSessionStore(tmp_path / "sessions")
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+
+    result = run_tui(
+        provider_factory=ProviderFactory(),
+        input_fn=scripted_input(["temporary task", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=MemoryConfigStore(config),
+        session_store=session_store,
+        no_session=True,
+    )
+
+    assert result == 0
+    assert not (tmp_path / "sessions").exists()
+
+
+def test_tui_new_supports_legacy_session_store_create_api() -> None:
+    store = LegacySessionStore()
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+
+    result = run_tui(
+        provider_factory=ProviderFactory(),
+        input_fn=scripted_input(["task", "/new", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=MemoryConfigStore(config),
+        session_store=store,
+    )
+
+    assert result == 0
+    assert len(store.delegate.order) == 2
+
+
+def test_create_session_supports_uninspectable_legacy_create_api() -> None:
+    store = OpaqueLegacySessionStore()
+
+    from peon.app.sessions import create_session
+
+    created = create_session(store, parent_id="previous")
+
+    assert created.session_id in store.delegate.order
+
+
 def test_tui_resumes_sessions_and_new_preserves_previous_conversation() -> None:
     config_store = MemoryConfigStore()
     session_store = MemorySessionStore()
@@ -292,6 +408,7 @@ def test_tui_resumes_sessions_and_new_preserves_previous_conversation() -> None:
         output=StringIO(),
         config_store=config_store,
         session_store=session_store,
+        continue_session=True,
     )
 
     resumed_messages = second_factory.providers[0].received_messages[0]

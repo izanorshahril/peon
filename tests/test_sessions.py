@@ -31,11 +31,105 @@ def test_jsonl_session_store_round_trips_tool_messages(tmp_path) -> None:
     assert store.load(session.session_id) == session.__class__(
         session_id=session.session_id,
         messages=messages,
+        cwd=session.cwd,
+        created_at=session.created_at,
+        parent_id=session.parent_id,
     )
     assert store.load_latest() == session.__class__(
         session_id=session.session_id,
         messages=messages,
+        cwd=session.cwd,
+        created_at=session.created_at,
+        parent_id=session.parent_id,
     )
+
+
+def test_jsonl_session_store_writes_metadata_and_reads_legacy_sessions(tmp_path) -> None:
+    store = JsonlSessionStore(tmp_path / "sessions")
+    current = store.create()
+    header = json.loads(
+        (tmp_path / "sessions" / f"{current.session_id}.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+
+    assert header["version"] == 2
+    assert header["session_id"] == current.session_id
+    assert isinstance(header["cwd"], str)
+    assert isinstance(header["created_at"], str)
+
+    legacy_id = "legacy-session"
+    (tmp_path / "sessions" / f"{legacy_id}.jsonl").write_text(
+        json.dumps(
+            {"type": "session", "version": 1, "session_id": legacy_id}
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "message",
+                "message": {"role": "user", "content": "legacy task"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = store.load(legacy_id)
+
+    assert loaded.session_id == legacy_id
+    assert loaded.messages == (AgentMessage(role="user", content="legacy task"),)
+
+
+def test_jsonl_session_store_does_not_continue_legacy_session_without_cwd(
+    tmp_path,
+) -> None:
+    directory = tmp_path / "sessions"
+    directory.mkdir()
+    legacy_id = "legacy-session"
+    (directory / f"{legacy_id}.jsonl").write_text(
+        json.dumps(
+            {"type": "session", "version": 1, "session_id": legacy_id}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    store = JsonlSessionStore(directory, working_directory=tmp_path / "project")
+
+    assert store.load_latest() is None
+    assert store.load(legacy_id).session_id == legacy_id
+
+
+def test_jsonl_store_ignores_corrupt_session_from_another_directory(tmp_path) -> None:
+    directory = tmp_path / "sessions"
+    store = JsonlSessionStore(directory, working_directory=tmp_path / "project")
+    valid = store.create()
+    store.append(valid.session_id, AgentMessage(role="user", content="kept"))
+    os.utime(
+        directory / f"{valid.session_id}.jsonl",
+        ns=(1_000_000_000, 1_000_000_000),
+    )
+    foreign = directory / "foreign.jsonl"
+    foreign.write_text(
+        json.dumps(
+            {
+                "type": "session",
+                "version": 2,
+                "session_id": "foreign",
+                "cwd": str((tmp_path / "other").resolve()),
+                "created_at": "2025-01-01T00:00:00+00:00",
+                "parent_id": None,
+            }
+        )
+        + "\n{not-json}\n",
+        encoding="utf-8",
+    )
+    os.utime(foreign, ns=(2_000_000_000, 2_000_000_000))
+
+    loaded = store.load_latest()
+
+    assert loaded is not None
+    assert loaded.session_id == valid.session_id
 
 
 def test_jsonl_session_store_creates_new_session_without_rewriting_previous(tmp_path) -> None:

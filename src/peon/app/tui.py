@@ -51,6 +51,7 @@ from .sessions import (
     MemorySessionStore,
     SessionStore,
     SessionStoreError,
+    create_session,
 )
 
 InputFunction = Callable[[str], str]
@@ -170,6 +171,8 @@ def run_tui(
     user_top_blank_lines: int = 1,
     user_bottom_blank_lines: int = 1,
     message_left_padding: int = 1,
+    continue_session: bool = False,
+    no_session: bool = False,
 ) -> int:
     """Run an interactive Peon conversation until the user exits."""
     output = output or sys.stdout
@@ -178,6 +181,8 @@ def run_tui(
     active_registry = registry or ExtensionRegistry()
     active_config_store = config_store or JsonProviderConfigStore()
     active_session_store = session_store or _default_session_store(active_config_store)
+    if no_session:
+        active_session_store = MemorySessionStore()
     if registry is None:
         register_sample_tools(active_registry)
         register_filesystem_tools(active_registry)
@@ -195,11 +200,15 @@ def run_tui(
             user_top_blank_lines=user_top_blank_lines,
             user_bottom_blank_lines=user_bottom_blank_lines,
             message_left_padding=message_left_padding,
+            continue_session=continue_session,
+            no_session=no_session,
         )
 
     _print_header(output=output)
     active_session_store, session_id, context = _load_starting_session(
-        active_session_store, error=error
+        active_session_store,
+        error=error,
+        continue_session=continue_session,
     )
     session = _restore_session(
         provider_factory=provider_factory,
@@ -251,14 +260,16 @@ def _load_starting_session(
     store: SessionStore,
     *,
     error: TextIO,
+    continue_session: bool = False,
 ) -> tuple[SessionStore, str, AgentContext]:
-    try:
-        latest = store.load_latest()
-    except SessionStoreError as caught:
-        print(f"peon: could not resume saved session: {caught}", file=error)
-        latest = None
-    if latest is not None:
-        return store, latest.session_id, AgentContext(messages=list(latest.messages))
+    if continue_session:
+        try:
+            latest = store.load_latest()
+        except SessionStoreError as caught:
+            print(f"peon: could not resume saved session: {caught}", file=error)
+            latest = None
+        if latest is not None:
+            return store, latest.session_id, AgentContext(messages=list(latest.messages))
     try:
         created = store.create()
     except (OSError, SessionStoreError) as caught:
@@ -1060,7 +1071,10 @@ def _handle_command(
         return session, False
     if definition.id == "new":
         try:
-            created = session.session_store.create()
+            created = create_session(
+                session.session_store,
+                parent_id=session.session_id,
+            )
         except (OSError, SessionStoreError) as caught:
             print(f"peon: could not start a new conversation: {caught}", file=error)
             return session, False

@@ -2,6 +2,8 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import inspect
 import json
 import os
 from pathlib import Path
@@ -19,10 +21,13 @@ class SessionStoreError(Exception):
 class SessionRecord:
     session_id: str
     messages: tuple[AgentMessage, ...] = ()
+    cwd: str | None = None
+    created_at: str | None = None
+    parent_id: str | None = None
 
 
 class SessionStore(Protocol):
-    def create(self) -> SessionRecord:
+    def create(self, *, parent_id: str | None = None) -> SessionRecord:
         """Create and select a fresh conversation session."""
 
     def append(self, session_id: str, message: AgentMessage) -> None:
@@ -35,23 +40,60 @@ class SessionStore(Protocol):
         """Load the most recently modified session, if one exists."""
 
 
+def create_session(
+    store: SessionStore,
+    *,
+    parent_id: str | None = None,
+) -> SessionRecord:
+    """Create a session while accepting stores from the v1 API."""
+    if parent_id is None:
+        return store.create()
+    try:
+        parameters = inspect.signature(store.create).parameters
+    except (TypeError, ValueError):
+        return store.create()
+    if "parent_id" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return store.create(parent_id=parent_id)
+    return store.create()
+
+
 class JsonlSessionStore:
     """Store each conversation as a separate append-only JSONL file."""
 
-    def __init__(self, directory: Path | None = None) -> None:
+    def __init__(
+        self,
+        directory: Path | None = None,
+        *,
+        working_directory: Path | None = None,
+    ) -> None:
         self.directory = directory or default_session_directory()
+        self.working_directory = str(
+            (working_directory or Path.cwd()).resolve()
+        )
 
-    def create(self) -> SessionRecord:
+    def create(self, *, parent_id: str | None = None) -> SessionRecord:
         self.directory.mkdir(parents=True, exist_ok=True)
         session_id = uuid4().hex
+        created_at = _utc_timestamp()
         path = self._path_for(session_id)
         header = {
             "type": "session",
-            "version": 1,
+            "version": 2,
             "session_id": session_id,
+            "cwd": self.working_directory,
+            "created_at": created_at,
+            "parent_id": parent_id,
         }
         path.write_text(json.dumps(header, separators=(",", ":")) + "\n", encoding="utf-8")
-        return SessionRecord(session_id=session_id)
+        return SessionRecord(
+            session_id=session_id,
+            cwd=self.working_directory,
+            created_at=created_at,
+            parent_id=parent_id,
+        )
 
     def append(self, session_id: str, message: AgentMessage) -> None:
         path = self._path_for(session_id)
@@ -88,15 +130,31 @@ class JsonlSessionStore:
         for path in paths:
             try:
                 text = path.read_text(encoding="utf-8")
-                return _decode_session(path, text)
+                try:
+                    header = json.loads(text.splitlines()[0])
+                except (IndexError, json.JSONDecodeError):
+                    header = None
+                if (
+                    isinstance(header, Mapping)
+                    and header.get("type") == "session"
+                    and header.get("version") == 2
+                    and isinstance(header.get("cwd"), str)
+                    and header["cwd"] != self.working_directory
+                ):
+                    continue
+                record = _decode_session(path, text)
+                if record.cwd != self.working_directory:
+                    continue
+                return record
             except SessionStoreError as error:
                 first_error = first_error or error
             except (OSError, UnicodeDecodeError) as error:
                 first_error = first_error or SessionStoreError(
                     f"could not read session '{path.name}'"
                 )
-        assert first_error is not None
-        raise first_error
+        if first_error is not None:
+            raise first_error
+        return None
 
     def _path_for(self, session_id: str) -> Path:
         if not session_id or Path(session_id).name != session_id:
@@ -110,12 +168,23 @@ class MemorySessionStore:
 
     records: dict[str, list[AgentMessage]] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
+    metadata: dict[str, SessionRecord] = field(default_factory=dict)
+    working_directory: str = field(
+        default_factory=lambda: str(Path.cwd().resolve())
+    )
 
-    def create(self) -> SessionRecord:
+    def create(self, *, parent_id: str | None = None) -> SessionRecord:
         session_id = uuid4().hex
         self.records[session_id] = []
         self.order.append(session_id)
-        return SessionRecord(session_id=session_id)
+        session = SessionRecord(
+            session_id=session_id,
+            cwd=self.working_directory,
+            created_at=_utc_timestamp(),
+            parent_id=parent_id,
+        )
+        self.metadata[session_id] = session
+        return session
 
     def append(self, session_id: str, message: AgentMessage) -> None:
         try:
@@ -141,6 +210,10 @@ def default_session_directory() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".peon" / "sessions"
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _serialize_message(message: AgentMessage) -> dict[str, object]:
@@ -200,13 +273,22 @@ def _decode_session(path: Path, text: str) -> SessionRecord:
         raise SessionStoreError(f"session '{path.name}' is corrupt") from error
     if not isinstance(header, Mapping):
         raise SessionStoreError(f"session '{path.name}' has an invalid header")
-    if header.get("type") != "session" or header.get("version") != 1:
+    if header.get("type") != "session" or header.get("version") not in {1, 2}:
         raise SessionStoreError(f"session '{path.name}' has an invalid header")
     session_id = header.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         raise SessionStoreError(f"session '{path.name}' has an invalid ID")
     if session_id != path.stem:
         raise SessionStoreError(f"session '{path.name}' has a mismatched ID")
+    cwd = header.get("cwd")
+    if cwd is not None and not isinstance(cwd, str):
+        raise SessionStoreError(f"session '{path.name}' has an invalid cwd")
+    created_at = header.get("created_at")
+    if created_at is not None and not isinstance(created_at, str):
+        raise SessionStoreError(f"session '{path.name}' has an invalid timestamp")
+    parent_id = header.get("parent_id")
+    if parent_id is not None and not isinstance(parent_id, str):
+        raise SessionStoreError(f"session '{path.name}' has an invalid parent ID")
 
     messages: list[AgentMessage] = []
     for line_number, line in enumerate(lines[1:], start=2):
@@ -228,7 +310,13 @@ def _decode_session(path: Path, text: str) -> SessionRecord:
             raise SessionStoreError(
                 f"session '{path.name}' has an invalid message at line {line_number}"
             ) from error
-    return SessionRecord(session_id=session_id, messages=tuple(messages))
+    return SessionRecord(
+        session_id=session_id,
+        messages=tuple(messages),
+        cwd=cwd,
+        created_at=created_at,
+        parent_id=parent_id,
+    )
 
 
 def _deserialize_message(raw: object) -> AgentMessage:

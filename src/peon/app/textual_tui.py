@@ -515,6 +515,8 @@ class TextualPeonApp(App[int]):
         config_store: ProviderConfigStore,
         registry: ExtensionRegistry,
         session_store: SessionStore | None = None,
+        continue_session: bool = False,
+        no_session: bool = False,
         processing_status_text: str | None = None,
         user_top_blank_lines: int = 1,
         user_bottom_blank_lines: int = 1,
@@ -528,6 +530,9 @@ class TextualPeonApp(App[int]):
         self.context = AgentContext()
         self.registry = registry
         self.session_store = session_store or MemorySessionStore()
+        if no_session:
+            self.session_store = MemorySessionStore()
+        self.continue_session = continue_session
         self.session_id = ""
         self.persisted_message_count = 0
         self.skill_names = tuple(
@@ -629,7 +634,11 @@ class TextualPeonApp(App[int]):
 
     def _restore_conversation(self) -> None:
         try:
-            latest = self.session_store.load_latest()
+            latest = (
+                self.session_store.load_latest()
+                if self.continue_session
+                else None
+            )
             if latest is None:
                 latest = self.session_store.create()
             self.session_id = latest.session_id
@@ -1834,7 +1843,10 @@ class TextualPeonApp(App[int]):
             self._show_settings()
         elif definition.id == "new":
             try:
-                created = self.session_store.create()
+                created = create_session(
+                    self.session_store,
+                    parent_id=self.session_id,
+                )
             except (OSError, SessionStoreError) as caught:
                 self._write(f"Could not start a new conversation: {caught}")
                 return
@@ -1933,6 +1945,8 @@ def run_textual_tui(
     registry: ExtensionRegistry,
     config_store: ProviderConfigStore,
     session_store: SessionStore | None = None,
+    continue_session: bool = False,
+    no_session: bool = False,
     user_top_blank_lines: int = 1,
     user_bottom_blank_lines: int = 1,
     message_left_padding: int = 1,
@@ -1947,6 +1961,8 @@ def run_textual_tui(
         user_bottom_blank_lines=user_bottom_blank_lines,
         message_left_padding=message_left_padding,
         session_store=session_store,
+        continue_session=continue_session,
+        no_session=no_session,
     )
     app.run()
     return int(app.return_code or 0)
