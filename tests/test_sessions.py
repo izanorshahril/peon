@@ -1,15 +1,39 @@
 import json
 import os
+from dataclasses import dataclass
+from typing import Sequence
 
 import pytest
 
-from peon.agent import AgentMessage, ToolCall
+from peon.agent import (
+    AgentContext,
+    AgentMessage,
+    ModelResponse,
+    ToolCall,
+    ToolDefinition,
+    run_task,
+)
 from peon.app.sessions import (
     JsonlSessionStore,
     MemorySessionStore,
     SessionStoreError,
     select_session,
 )
+from peon.extensions import ExtensionRegistry
+from peon.extensions.filesystem import register_filesystem_tools
+
+@dataclass
+class SessionScriptedProvider:
+    responses: list[ModelResponse]
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+    ) -> ModelResponse:
+        return self.responses.pop(0)
 
 
 def test_jsonl_session_store_round_trips_tool_messages(tmp_path) -> None:
@@ -46,6 +70,86 @@ def test_jsonl_session_store_round_trips_tool_messages(tmp_path) -> None:
         cwd=session.cwd,
         created_at=session.created_at,
         parent_id=session.parent_id,
+    )
+
+
+def test_jsonl_session_store_round_trips_filesystem_mutation_result(tmp_path) -> None:
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    messages = (
+        AgentMessage(
+            role="assistant",
+            content="",
+            tool_call=ToolCall(
+                name="edit",
+                arguments={
+                    "path": "notes.txt",
+                    "old_text": "before",
+                    "new_text": "after",
+                },
+                call_id="edit-1",
+            ),
+        ),
+        AgentMessage(
+            role="tool",
+            content="edit: updated notes.txt (line 1)",
+            tool_call_id="edit-1",
+        ),
+        AgentMessage(role="assistant", content="Updated the note."),
+    )
+
+    for message in messages:
+        store.append(session.session_id, message)
+
+    loaded = store.load(session.session_id)
+
+    assert loaded is not None
+    assert loaded.messages == messages
+
+
+def test_jsonl_session_store_persists_run_task_filesystem_sequence(tmp_path) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("before\n", encoding="utf-8")
+    provider = SessionScriptedProvider(
+        responses=[
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="edit",
+                    arguments={
+                        "path": "notes.txt",
+                        "old_text": "before",
+                        "new_text": "after",
+                    },
+                    call_id="edit-2",
+                )
+            ),
+            ModelResponse(content="Updated the note."),
+        ],
+    )
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+    context = AgentContext()
+
+    run_task(
+        "Update the note.",
+        provider,
+        context=context,
+        executor=registry,
+    )
+
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    for message in context.messages:
+        store.append(session.session_id, message)
+
+    loaded = store.load(session.session_id)
+
+    assert loaded is not None
+    assert loaded.messages == tuple(context.messages)
+    assert loaded.messages[-2] == AgentMessage(
+        role="tool",
+        content="edit: updated notes.txt (line 1)",
+        tool_call_id="edit-2",
     )
 
 

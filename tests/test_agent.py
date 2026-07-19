@@ -12,6 +12,7 @@ from peon.agent import (
     run_task,
 )
 from peon.extensions import ExtensionRegistry
+from peon.extensions.filesystem import register_filesystem_tools
 from peon.agent import AgentError
 
 
@@ -198,6 +199,88 @@ def test_run_task_executes_tool_and_continues_until_final_response() -> None:
     )
     assert context.messages == list(provider.received_messages[1]) + [
         AgentMessage(role="assistant", content="The owner is Peon."),
+    ]
+
+
+def test_run_task_executes_registered_filesystem_edit_and_records_result(tmp_path) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("before\n", encoding="utf-8")
+    provider = ScriptedProvider(
+        responses=[
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="edit",
+                    arguments={
+                        "path": "notes.txt",
+                        "old_text": "before",
+                        "new_text": "after",
+                    },
+                    call_id="edit-1",
+                )
+            ),
+            ModelResponse(content="Updated the note."),
+        ],
+        received_messages=[],
+        received_tools=[],
+    )
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+    context = AgentContext()
+
+    result = run_task(
+        "Update the note.",
+        provider,
+        context=context,
+        executor=registry,
+    )
+
+    assert result == "Updated the note."
+    assert target.read_text(encoding="utf-8") == "after\n"
+    assert context.messages[-2:] == [
+        AgentMessage(
+            role="tool",
+            content="edit: updated notes.txt (line 1)",
+            tool_call_id="edit-1",
+        ),
+        AgentMessage(role="assistant", content="Updated the note."),
+    ]
+
+
+def test_run_task_executes_registered_filesystem_write(tmp_path) -> None:
+    provider = ScriptedProvider(
+        responses=[
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="write",
+                    arguments={"path": "notes.txt", "content": "saved\n"},
+                    call_id="write-1",
+                )
+            ),
+            ModelResponse(content="Saved the note."),
+        ],
+        received_messages=[],
+        received_tools=[],
+    )
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+    context = AgentContext()
+
+    result = run_task(
+        "Save the note.",
+        provider,
+        context=context,
+        executor=registry,
+    )
+
+    assert result == "Saved the note."
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "saved\n"
+    assert context.messages[-2:] == [
+        AgentMessage(
+            role="tool",
+            content="write: wrote 6 bytes and 1 lines to notes.txt",
+            tool_call_id="write-1",
+        ),
+        AgentMessage(role="assistant", content="Saved the note."),
     ]
 
 

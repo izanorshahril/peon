@@ -41,6 +41,14 @@ def test_workspace_discovery_tools_are_bounded_and_skip_generated_directories(
     (tmp_path / "src" / "other.txt").write_text("nothing\n", encoding="utf-8")
     (tmp_path / ".git").mkdir()
     (tmp_path / ".git" / "ignored.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / ".HG").mkdir()
+    (tmp_path / ".HG" / "ignored-uppercase.py").write_text(
+        "needle\n", encoding="utf-8"
+    )
+    (tmp_path / "NODE_MODULES").mkdir()
+    (tmp_path / "NODE_MODULES" / "ignored.py").write_text(
+        "needle\n", encoding="utf-8"
+    )
     registry = ExtensionRegistry()
     register_filesystem_tools(registry, root=tmp_path, max_results=10)
 
@@ -109,28 +117,178 @@ def test_write_and_edit_are_cwd_bound_and_exact(tmp_path) -> None:
     registry = ExtensionRegistry()
     register_filesystem_tools(registry, root=tmp_path)
 
-    assert registry.invoke(
+    write_result = registry.invoke(
         "write",
         {"path": "src/note.txt", "content": "one\ntwo\n"},
-    ).startswith("write: wrote")
+    )
+    assert write_result == "write: wrote 8 bytes and 2 lines to src/note.txt"
     assert (tmp_path / "src" / "note.txt").read_text(encoding="utf-8") == (
         "one\ntwo\n"
     )
     assert registry.invoke(
         "edit",
         {"path": "src/note.txt", "old_text": "two", "new_text": "three"},
-    ) == "edit: updated src/note.txt"
+    ) == "edit: updated src/note.txt (line 2)"
     assert (tmp_path / "src" / "note.txt").read_text(encoding="utf-8") == (
         "one\nthree\n"
     )
     assert registry.invoke(
         "edit",
         {"path": "src/note.txt", "old_text": "missing", "new_text": "x"},
-    ).startswith("edit error:")
+    ) == "edit error: old_text was not found"
     assert registry.invoke(
         "write",
         {"path": "../outside.txt", "content": "secret"},
     ).startswith("write error:")
+
+
+def test_mutations_report_excluded_and_unicode_targets_without_writing(tmp_path) -> None:
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+
+    assert registry.invoke(
+        "write",
+        {"path": ".git/config", "content": "secret"},
+    ) == "write error: '.git/config' is excluded"
+    assert registry.invoke(
+        "edit",
+        {
+            "path": "Credentials.JSON",
+            "old_text": "secret",
+            "new_text": "changed",
+        },
+    ) == "edit error: 'Credentials.JSON' is a sensitive target"
+    assert registry.invoke(
+        "write",
+        {"path": "unicode.txt", "content": "café\n"},
+    ) == "write: wrote 6 bytes and 1 lines to unicode.txt"
+
+
+def test_edit_reports_ambiguous_unchanged_and_invalid_requests(tmp_path) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("same\nsame\n", encoding="utf-8")
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+
+    assert registry.invoke(
+        "edit",
+        {"path": "notes.txt", "old_text": "same", "new_text": "changed"},
+    ) == "edit error: old_text matched 2 times"
+    target.write_text("same\nother\n", encoding="utf-8")
+    assert registry.invoke(
+        "edit",
+        {"path": "notes.txt", "old_text": "same", "new_text": "same"},
+    ) == "edit: no changes to notes.txt"
+    assert registry.invoke(
+        "edit",
+        {"path": "notes.txt", "old_text": "", "new_text": "changed"},
+    ) == "edit error: old_text must be a non-empty string"
+    target.write_text("aaaa\n", encoding="utf-8")
+    assert registry.invoke(
+        "edit",
+        {"path": "notes.txt", "old_text": "aaa", "new_text": "x"},
+    ) == "edit error: old_text matched 2 times"
+
+
+def test_mutations_reject_sensitive_targets_and_symlink_escapes(tmp_path) -> None:
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+
+    assert registry.invoke(
+        "write",
+        {"path": ".env", "content": "secret"},
+    ) == "write error: '.env' is a sensitive target"
+    assert registry.invoke(
+        "write",
+        {"path": ".ENV", "content": "secret"},
+    ) == "write error: '.ENV' is a sensitive target"
+    assert not (tmp_path / ".env").exists()
+
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        return
+
+    assert registry.invoke(
+        "edit",
+        {"path": "link.txt", "old_text": "secret", "new_text": "changed"},
+    ) == "edit error: 'link.txt' is a symlink"
+    assert registry.invoke(
+        "write",
+        {"path": "link.txt", "content": "changed"},
+    ) == "write error: 'link.txt' is a symlink"
+    assert outside.read_text(encoding="utf-8") == "secret"
+
+    outside_directory = tmp_path.parent / "outside-directory"
+    outside_directory.mkdir()
+    nested_link = tmp_path / "nested-link"
+    try:
+        nested_link.symlink_to(outside_directory, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        return
+
+    assert registry.invoke(
+        "write",
+        {"path": "nested-link/child.txt", "content": "changed"},
+    ) == "write error: 'nested-link/child.txt' is a symlink"
+    assert not (outside_directory / "child.txt").exists()
+
+
+def test_edit_preserves_crlf_newlines_and_reports_changed_lines(tmp_path) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_bytes(b"one\r\ntwo\r\nthree\r\n")
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+
+    result = registry.invoke(
+        "edit",
+        {"path": "notes.txt", "old_text": "two", "new_text": "updated"},
+    )
+
+    assert result == "edit: updated notes.txt (line 2)"
+    assert target.read_bytes() == b"one\r\nupdated\r\nthree\r\n"
+
+
+def test_edit_preserves_mixed_newlines_and_normalizes_replacement_text(tmp_path) -> None:
+    target = tmp_path / "mixed.txt"
+    target.write_bytes(b"one\r\ntwo\nthree\r\nfour\n")
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+
+    result = registry.invoke(
+        "edit",
+        {"path": "mixed.txt", "old_text": "two\nthree", "new_text": "2\r\n3"},
+    )
+
+    assert result == "edit: updated mixed.txt (lines 2-3)"
+    assert target.read_bytes() == b"one\r\n2\n3\r\nfour\n"
+
+
+def test_edit_uses_local_newline_for_inserted_lines(tmp_path) -> None:
+    target = tmp_path / "mixed.txt"
+    target.write_bytes(b"one\r\ntwo\nthree\r\nfour\n")
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+
+    result = registry.invoke(
+        "edit",
+        {"path": "mixed.txt", "old_text": "two", "new_text": "2\r\nsecond"},
+    )
+
+    assert result == "edit: updated mixed.txt (lines 2-3)"
+    assert target.read_bytes() == b"one\r\n2\nsecond\nthree\r\nfour\n"
+
+    target.write_bytes(b"one\r\ntwo\nthree")
+    result = registry.invoke(
+        "edit",
+        {"path": "mixed.txt", "old_text": "three", "new_text": "3\nfinal"},
+    )
+
+    assert result == "edit: updated mixed.txt (lines 3-4)"
+    assert target.read_bytes() == b"one\r\ntwo\n3\nfinal"
 
 
 def test_bash_runs_in_workspace_and_bounds_output(tmp_path) -> None:

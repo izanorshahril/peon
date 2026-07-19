@@ -26,6 +26,18 @@ _DEFAULT_EXCLUDED_DIRECTORIES = frozenset(
         "venv",
     }
 )
+_SENSITIVE_FILE_NAMES = frozenset(
+    {
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".env.development",
+        "credentials.json",
+        "secrets.json",
+        "id_rsa",
+        "id_ed25519",
+    }
+)
 
 
 def register_filesystem_tools(
@@ -176,16 +188,23 @@ def _write(root: Path, arguments: Mapping[str, object]) -> str:
     if not isinstance(content, str):
         return "write error: content must be a string"
     assert path is not None
-    if _is_excluded_path(root, path):
-        return f"write error: '{_display_path(root, path)}' is excluded"
+    policy_error = _mutation_policy_error(root, path, operation="write")
+    if policy_error is not None:
+        return policy_error
     if path.exists() and path.is_dir():
         return f"write error: '{_display_path(root, path)}' is a directory"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        policy_error = _mutation_policy_error(root, path, operation="write")
+        if policy_error is not None:
+            return policy_error
+        path.write_bytes(content.encode("utf-8"))
     except OSError as error:
         return f"write error: could not write '{_display_path(root, path)}': {error}"
-    line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+    normalized_content = _normalize_newlines(content)
+    line_count = normalized_content.count("\n") + (
+        1 if normalized_content and not normalized_content.endswith("\n") else 0
+    )
     byte_count = len(content.encode("utf-8"))
     return f"write: wrote {byte_count} bytes and {line_count} lines to {_display_path(root, path)}"
 
@@ -199,27 +218,56 @@ def _edit(root: Path, arguments: Mapping[str, object]) -> str:
     if not isinstance(old_text, str) or not isinstance(new_text, str):
         return "edit error: old_text and new_text must be strings"
     assert path is not None
-    if _is_excluded_path(root, path):
-        return f"edit error: '{_display_path(root, path)}' is excluded"
+    policy_error = _mutation_policy_error(root, path, operation="edit")
+    if policy_error is not None:
+        return policy_error
     if not path.is_file():
         return f"edit error: '{_display_path(root, path)}' is not a file"
     try:
-        content = path.read_text(encoding="utf-8")
+        raw_content = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as error:
         return f"edit error: could not read '{_display_path(root, path)}': {error}"
-    matches = content.count(old_text) if old_text else 0
+    content, offsets = _normalize_with_offsets(raw_content)
+    normalized_old_text = _normalize_newlines(old_text)
+    normalized_new_text = _normalize_newlines(new_text)
+    if not old_text:
+        return "edit error: old_text must be a non-empty string"
+    matches = _count_overlapping(content, normalized_old_text)
     if matches == 0:
         return "edit error: old_text was not found"
     if matches > 1:
         return f"edit error: old_text matched {matches} times"
-    updated = content.replace(old_text, new_text, 1)
-    if updated == content:
+    start = content.index(normalized_old_text)
+    end = start + len(normalized_old_text)
+    raw_start = offsets[start]
+    raw_end = offsets[end]
+    replacement = _replacement_text(
+        normalized_new_text,
+        raw_content[raw_start:raw_end],
+        raw_content,
+        raw_start,
+        raw_end,
+    )
+    updated_raw = raw_content[:raw_start] + replacement + raw_content[raw_end:]
+    if updated_raw == raw_content:
         return f"edit: no changes to {_display_path(root, path)}"
+    policy_error = _mutation_policy_error(root, path, operation="edit")
+    if policy_error is not None:
+        return policy_error
     try:
-        path.write_text(updated, encoding="utf-8")
+        path.write_bytes(updated_raw.encode("utf-8"))
     except OSError as error:
         return f"edit error: could not write '{_display_path(root, path)}': {error}"
-    return f"edit: updated {_display_path(root, path)}"
+    start_line = content.count("\n", 0, start) + 1
+    old_line_count = _line_count(normalized_old_text)
+    new_line_count = _line_count(normalized_new_text)
+    end_line = start_line + max(old_line_count, new_line_count) - 1
+    line_summary = (
+        f"line {start_line}"
+        if end_line == start_line
+        else f"lines {start_line}-{end_line}"
+    )
+    return f"edit: updated {_display_path(root, path)} ({line_summary})"
 
 
 def _bash(
@@ -353,7 +401,7 @@ def _ls(
             entry
             for entry in path.iterdir()
             if _visible(entry.name, include_hidden)
-            and entry.name not in _DEFAULT_EXCLUDED_DIRECTORIES
+            and entry.name.casefold() not in _DEFAULT_EXCLUDED_DIRECTORIES
             and _inside(root, entry)
         ]
     except OSError as error:
@@ -527,13 +575,110 @@ def _resolve_mutation_path(
     *,
     operation: str,
 ) -> tuple[Path | None, str | None]:
-    path, error = _resolve_argument_path(root, arguments, operation=operation)
-    if error is not None:
-        return None, error
-    assert path is not None
+    raw_path = arguments.get("path", ".")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None, f"{operation} error: path must be a non-empty string"
+    lexical_path = root / raw_path
+    if _contains_symlink(root, lexical_path):
+        return None, f"{operation} error: '{_display_path(root, lexical_path)}' is a symlink"
+    path = lexical_path.resolve()
+    if not _inside(root, path):
+        return None, f"{operation} error: path escapes the working directory"
     if _is_excluded_path(root, path):
         return None, f"{operation} error: '{_display_path(root, path)}' is excluded"
+    if _is_sensitive_path(root, path):
+        return None, f"{operation} error: '{_display_path(root, path)}' is a sensitive target"
     return path, None
+
+
+def _mutation_policy_error(root: Path, path: Path, *, operation: str) -> str | None:
+    if _contains_symlink(root, path):
+        return f"{operation} error: '{_display_path(root, path)}' is a symlink"
+    if _is_excluded_path(root, path):
+        return f"{operation} error: '{_display_path(root, path)}' is excluded"
+    if _is_sensitive_path(root, path):
+        return f"{operation} error: '{_display_path(root, path)}' is a sensitive target"
+    return None
+
+
+def _contains_symlink(root: Path, candidate: Path) -> bool:
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return False
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _is_sensitive_path(root: Path, candidate: Path) -> bool:
+    relative = candidate.relative_to(root)
+    return relative.name.casefold() in _SENSITIVE_FILE_NAMES
+
+
+def _normalize_newlines(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _normalize_with_offsets(value: str) -> tuple[str, list[int]]:
+    normalized: list[str] = []
+    offsets = [0]
+    index = 0
+    while index < len(value):
+        if value[index] == "\r":
+            index += 2 if index + 1 < len(value) and value[index + 1] == "\n" else 1
+            normalized.append("\n")
+        else:
+            normalized.append(value[index])
+            index += 1
+        offsets.append(index)
+    return "".join(normalized), offsets
+
+
+def _replacement_newline(raw_content: str) -> str:
+    if "\r\n" in raw_content:
+        return "\r\n"
+    if "\r" in raw_content:
+        return "\r"
+    return "\n"
+
+
+def _replacement_text(
+    normalized_text: str,
+    raw_match: str,
+    raw_content: str,
+    raw_start: int,
+    raw_end: int,
+) -> str:
+    newline_forms = re.findall(r"\r\n|\r|\n", raw_match)
+    fallback = _local_newline(raw_content, raw_start, raw_end)
+    parts = normalized_text.split("\n")
+    replacement = parts[0]
+    for index, part in enumerate(parts[1:]):
+        newline = newline_forms[index] if index < len(newline_forms) else fallback
+        replacement += newline + part
+    return replacement
+
+
+def _line_count(value: str) -> int:
+    return value.count("\n") + (1 if value and not value.endswith("\n") else 0)
+
+
+def _count_overlapping(value: str, target: str) -> int:
+    return sum(value.startswith(target, index) for index in range(len(value)))
+
+
+def _local_newline(raw_content: str, raw_start: int, raw_end: int) -> str:
+    after = re.match(r"\r\n|\r|\n", raw_content[raw_end:])
+    if after is not None:
+        return after.group()
+    before_matches = list(re.finditer(r"\r\n|\r|\n", raw_content[:raw_start]))
+    if before_matches:
+        return before_matches[-1].group()
+    return _replacement_newline(raw_content)
 
 
 def _inside(root: Path, candidate: Path) -> bool:
@@ -546,7 +691,10 @@ def _inside(root: Path, candidate: Path) -> bool:
 
 def _is_excluded_path(root: Path, candidate: Path) -> bool:
     relative = candidate.relative_to(root)
-    return any(part in _DEFAULT_EXCLUDED_DIRECTORIES for part in relative.parts)
+    return any(
+        part.casefold() in _DEFAULT_EXCLUDED_DIRECTORIES
+        for part in relative.parts
+    )
 
 
 def _walk_files(root: Path, start: Path, *, include_hidden: bool) -> Iterator[Path]:
@@ -556,7 +704,7 @@ def _walk_files(root: Path, start: Path, *, include_hidden: bool) -> Iterator[Pa
             name
             for name in directories
             if _visible(name, include_hidden)
-            and name not in _DEFAULT_EXCLUDED_DIRECTORIES
+            and name.casefold() not in _DEFAULT_EXCLUDED_DIRECTORIES
             and _inside(root, (directory_path / name).resolve())
         ]
         directories.sort(key=str.casefold)
