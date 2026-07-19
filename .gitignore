@@ -8,11 +8,7 @@ __pycache__/
 .scratch/
 !.scratch/
 .scratch/*
-!.scratch/peon-spec/
-.scratch/peon-spec/*
-!.scratch/peon-spec/*.md
-!.scratch/peon-spec/issues/
-!.scratch/peon-spec/issues/*.md
+!.scratch/project-history.md
 peon_output/
 tau_output/
 pi_output/
