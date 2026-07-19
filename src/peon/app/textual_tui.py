@@ -1552,6 +1552,11 @@ class TextualPeonApp(App[int]):
             self._write(f"Thinking setting could not be saved: {caught}")
         transcript = self.query_one("#transcript", ChatMessage)
         transcript.set_thinking_visible(not self.ui_config.hide_thinking)
+        self._write(
+            "Thinking blocks: "
+            + ("visible" if not self.ui_config.hide_thinking else "hidden"),
+            role="success",
+        )
         self._set_status()
 
     def action_toggle_tools(self) -> None:
