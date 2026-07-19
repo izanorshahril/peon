@@ -277,6 +277,37 @@ def test_textual_shortcuts_toggle_thinking_and_cycle_reasoning_separately() -> N
     asyncio.run(exercise())
 
 
+def test_textual_thinking_toggle_refreshes_visible_blocks() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            app._write("private reasoning", role="thinking")
+            transcript = app.query_one("#transcript", ChatMessage)
+            assert "private reasoning" in transcript.text
+
+            await pilot.press("ctrl+t")
+            assert not transcript.thinking_visible
+            assert "private reasoning" not in transcript.text
+            assert "Thinking blocks: hidden" in transcript.text
+
+            await pilot.press("ctrl+t")
+            assert transcript.thinking_visible
+            assert "private reasoning" in transcript.text
+            assert "Thinking blocks: visible" in transcript.text
+
+    asyncio.run(exercise())
+
+
 def test_textual_general_settings_toggle_thinking() -> None:
     async def exercise() -> None:
         config = ProviderConfig(
@@ -1564,6 +1595,40 @@ def test_textual_reuses_active_saved_provider_and_logs_out_selected_profile() ->
             await pilot.pause()
             assert store.load_all() == (first,)
             assert app.config == first
+
+    asyncio.run(exercise())
+
+
+def test_textual_logs_out_inactive_profile_without_switching_provider() -> None:
+    async def exercise() -> None:
+        first = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://first.example/v1",
+        )
+        second = ProviderConfig(
+            name="openai-compatible",
+            model="beta",
+            base_url="https://second.example/v1",
+        )
+        store = MemoryConfigStore((first, second))
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=store,
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.config == second
+            prompt = app.query_one("#prompt")
+            prompt.value = "/logout"
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert store.load_all() == (second,)
+            assert app.config == second
 
     asyncio.run(exercise())
 
