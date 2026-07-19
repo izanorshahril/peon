@@ -1,9 +1,9 @@
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import StringIO
 
 from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
-from peon.app import JsonProviderConfigStore, ProviderConfig
+from peon.app import JsonProviderConfigStore, ProviderConfig, UiConfig
 from peon.app.tui import SlashCommandCompleter, run_tui
 from peon.app.sessions import JsonlSessionStore, MemorySessionStore
 from prompt_toolkit.completion import CompleteEvent
@@ -133,6 +133,7 @@ class ToolCallingFactory:
 @dataclass
 class MemoryConfigStore:
     configuration: ProviderConfig | None = None
+    ui_configuration: UiConfig = field(default_factory=UiConfig)
 
     def load(self) -> ProviderConfig | None:
         return self.configuration
@@ -146,6 +147,12 @@ class MemoryConfigStore:
     def delete(self, config: ProviderConfig) -> None:
         if self.configuration == config:
             self.configuration = None
+
+    def load_ui(self) -> UiConfig:
+        return self.ui_configuration
+
+    def save_ui(self, config: UiConfig) -> None:
+        self.ui_configuration = config
 
 
 @dataclass
@@ -243,11 +250,10 @@ def test_tui_configures_provider_and_keeps_context_between_tasks() -> None:
     assert output.getvalue().count("first response") == 1
     assert output.getvalue().count("second response") == 1
     assert [tool.name for tool in factory.providers[1].received_tools[0]] == [
-        "word_count",
         "read",
-        "ls",
-        "find",
-        "grep",
+        "write",
+        "edit",
+        "bash",
     ]
     assert factory.providers[1].received_messages[1] == (
         AgentMessage(role="user", content="first task"),
@@ -259,6 +265,7 @@ def test_tui_configures_provider_and_keeps_context_between_tasks() -> None:
 def test_tui_executes_native_word_count_and_renders_final_response() -> None:
     factory = ToolCallingFactory()
     config_store = MemoryConfigStore()
+    config_store.save_ui(UiConfig(enabled_tools=("read", "word_count")))
     output = StringIO()
 
     result = run_tui(
@@ -280,6 +287,10 @@ def test_tui_executes_native_word_count_and_renders_final_response() -> None:
     assert result == 0
     assert "There are three words." in output.getvalue()
     assert "unhandled tool" not in output.getvalue()
+    assert [tool.name for tool in factory.providers[1].received_tools[0]] == [
+        "word_count",
+        "read",
+    ]
     assert factory.providers[1].received_messages[1][-2:] == (
         AgentMessage(
             role="assistant",
@@ -319,6 +330,87 @@ def test_tui_starts_a_fresh_session_without_implicit_resume() -> None:
         AgentMessage(role="user", content="new task"),
     )
     assert len(session_store.order) == 2
+
+
+def test_tui_can_name_and_open_an_exact_session() -> None:
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+    config_store = MemoryConfigStore(config)
+    session_store = MemorySessionStore()
+    named = session_store.create(name="release")
+    session_store.append(named.session_id, AgentMessage(role="user", content="old"))
+
+    factory = ProviderFactory()
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(["new task", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=config_store,
+        session_store=session_store,
+        session_target="release",
+    )
+
+    assert result == 0
+    assert factory.providers[0].received_messages[0] == (
+        AgentMessage(role="user", content="old"),
+        AgentMessage(role="user", content="new task"),
+    )
+    assert session_store.load(named.session_id).messages[-1] == AgentMessage(
+        role="assistant",
+        content="first response",
+    )
+
+
+def test_tui_fork_preserves_source_and_records_parent() -> None:
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+    config_store = MemoryConfigStore(config)
+    session_store = MemorySessionStore()
+
+    result = run_tui(
+        provider_factory=ProviderFactory(),
+        input_fn=scripted_input(["task", "/fork branch", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=config_store,
+        session_store=session_store,
+    )
+
+    assert result == 0
+    assert len(session_store.order) == 2
+    source = session_store.load(session_store.order[0])
+    child = session_store.load(session_store.order[1])
+    assert child.parent_id == source.session_id
+    assert child.name == "branch"
+    assert child.messages == source.messages
+
+
+def test_tui_session_picker_can_be_cancelled() -> None:
+    output = StringIO()
+    result = run_tui(
+        provider_factory=ProviderFactory(),
+        input_fn=scripted_input(["/session", "", "task", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=output,
+        config_store=MemoryConfigStore(
+            ProviderConfig(
+                name="openai-compatible",
+                model="first-model",
+                base_url="https://example.test/v1",
+            )
+        ),
+        session_store=MemorySessionStore(),
+    )
+
+    assert result == 0
+    assert "Session selection cancelled." in output.getvalue()
 
 
 def test_tui_no_session_mode_does_not_write_durable_sessions(tmp_path) -> None:
@@ -451,6 +543,7 @@ def test_tui_resumes_jsonl_session_after_process_restart(tmp_path) -> None:
         output=StringIO(),
         config_store=config_store,
         session_store=JsonlSessionStore(tmp_path / "sessions"),
+        continue_session=True,
     )
 
     assert second_factory.providers[0].received_messages[0] == (
@@ -574,12 +667,42 @@ def test_tui_supports_help_tools_and_clear_commands() -> None:
 
     assert result == 0
     rendered = output.getvalue()
-    assert "- word_count: Count the whitespace-separated words in a text value." in rendered
+    assert "- word_count (disabled): Count the whitespace-separated words in a text value." in rendered
     assert "/provider  configure a provider" in rendered
     assert "Conversation cleared." in rendered
     assert factory.providers[1].received_messages[1] == (
         AgentMessage(role="user", content="second task"),
     )
+
+
+def test_tui_tool_settings_enable_registered_tool_for_provider(tmp_path) -> None:
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+    config_store = JsonProviderConfigStore(tmp_path / "provider.json")
+    config_store.save(config)
+    factory = ProviderFactory()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(
+            ["/settings", "5", "word_count", "true", "", "", "task", "/quit"]
+        ),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=config_store,
+    )
+
+    assert result == 0
+    assert [tool.name for tool in factory.providers[0].received_tools[0]] == [
+        "word_count",
+        "read",
+        "write",
+        "edit",
+        "bash",
+    ]
 
 
 def test_tui_auto_discovers_and_selects_openai_compatible_model() -> None:
@@ -747,6 +870,31 @@ def test_tui_changes_active_provider_config_with_slash_commands() -> None:
     assert config_store.configuration.reasoning_effort == "high"
     assert config_store.configuration.supports_tools is True
     assert factory.configurations[-1] == config_store.configuration
+
+
+def test_tui_reasoning_command_cycles_the_active_effort() -> None:
+    factory = ProviderFactory()
+    config_store = MemoryConfigStore(
+        configuration=ProviderConfig(
+            name="Corporate",
+            provider_type="custom",
+            model="chat-model",
+            base_url="http://localhost:8080",
+            reasoning_effort="low",
+        )
+    )
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(["/reasoning", "/reasoning", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=config_store,
+    )
+
+    assert result == 0
+    assert config_store.configuration is not None
+    assert config_store.configuration.reasoning_effort == "high"
 
 
 def test_tui_lists_and_switches_saved_models() -> None:

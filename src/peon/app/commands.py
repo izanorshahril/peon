@@ -310,6 +310,14 @@ _COMMAND_DEFINITIONS.extend(
             search_terms=("configuration", "preferences"),
         ),
         _command(
+            "reasoning",
+            "/reasoning",
+            "change active model reasoning effort",
+            candidate_names=("effort", "thinking"),
+            search_terms=("reasoning level", "thinking", "thinking budget"),
+            setting_key="reasoning",
+        ),
+        _command(
             "tools",
             "/tools",
             "list registered tools",
@@ -340,7 +348,6 @@ _COMMAND_DEFINITIONS.extend(
             "/session",
             "list or resume conversations",
             candidate_names=("sessions", "resume", "continue"),
-            availability="reserved",
             search_terms=("history", "resume", "continue"),
         ),
         _command(
@@ -387,14 +394,6 @@ _COMMAND_DEFINITIONS.extend(
             availability="reserved",
         ),
         _command(
-            "thinking",
-            "/thinking",
-            "configure reasoning controls",
-            candidate_names=("reasoning",),
-            search_terms=("effort", "reasoning level"),
-            availability="reserved",
-        ),
-        _command(
             "theme",
             "/theme",
             "select a visual theme",
@@ -428,7 +427,6 @@ _COMMAND_DEFINITIONS.extend(
             "/fork",
             "fork the current conversation",
             search_terms=("branch session", "fork conversation"),
-            availability="reserved",
         ),
         _command(
             "tree",
@@ -464,7 +462,6 @@ _COMMAND_DEFINITIONS.extend(
 
 for _setting_name, _description in (
     ("temperature", "change active provider temperature"),
-    ("reasoning", "change active provider reasoning effort"),
     ("max-completion-tokens", "change active provider completion limit"),
     ("max-output-tokens", "change active provider output limit"),
     ("max-tokens", "change active provider token limit"),

@@ -1,14 +1,22 @@
 import asyncio
 import threading
+from pathlib import Path
 
 from rich.color import Color
-from peon.agent import AgentMessage, ModelResponse
-from peon.app import ProviderConfig
-from peon.app.sessions import MemorySessionStore
-from peon.app.textual_tui import ChatMessage, TextualPeonApp
+from rich.console import Console
+from peon.agent import AgentMessage, ModelResponse, ToolCall
+from peon.app import ProviderConfig, UiConfig
+from peon.app.sessions import JsonlSessionStore, MemorySessionStore
+from peon.app.textual_tui import (
+    ChatMessage,
+    PeonInput,
+    TextualPeonApp,
+    _format_tool_call,
+)
 from peon.extensions import ExtensionRegistry
 from textual.document._document import Selection
 from textual.events import MouseDown
+from textual.geometry import Region
 from textual.widgets import Input, Static
 
 
@@ -28,9 +36,28 @@ class BlockingProvider(FakeProvider):
         return ModelResponse(content="done")
 
 
+class ToolProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.responses = [
+            ModelResponse(
+                thinking="I should inspect the workspace first.",
+                tool_call=ToolCall(
+                    name="lookup",
+                    arguments={"detail": "full", "key": "owner"},
+                    call_id="call-1",
+                ),
+            ),
+            ModelResponse(content="The owner is Peon."),
+        ]
+
+    def complete(self, *, messages, tools=(), model=None):
+        return self.responses.pop(0)
+
+
 class MemoryConfigStore:
     def __init__(self, configurations: tuple[ProviderConfig, ...]) -> None:
         self.configurations = list(configurations)
+        self.ui_configuration = UiConfig()
 
     def load(self) -> ProviderConfig | None:
         return self.configurations[-1] if self.configurations else None
@@ -51,6 +78,12 @@ class MemoryConfigStore:
             for existing in self.configurations
             if existing != config
         ]
+
+    def load_ui(self) -> UiConfig:
+        return self.ui_configuration
+
+    def save_ui(self, config: UiConfig) -> None:
+        self.ui_configuration = config
 
 
 def provider_factory(config: ProviderConfig) -> FakeProvider:
@@ -165,7 +198,7 @@ def test_textual_picker_search_and_focus_loss_keep_selection_safe() -> None:
             await pilot.pause()
 
             assert app.choice_kind == "settings-ui"
-            assert str(app.query_one("#choice-count").renderable) == "(1/10)"
+            assert str(app.query_one("#choice-count").renderable) == "(1/12)"
             assert "Type to search" in str(app.query_one("#choice-hint").renderable)
             assert str(app.query_one("#choices").renderable).startswith("> User top spacing")
 
@@ -186,6 +219,285 @@ def test_textual_picker_search_and_focus_loss_keep_selection_safe() -> None:
             await pilot.press("enter")
             await pilot.pause()
             assert app.choice_kind is None
+
+    asyncio.run(exercise())
+
+
+def test_textual_escape_backtracks_when_picker_has_lost_focus() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/settings"
+            await pilot.press("enter", "1")
+            await pilot.pause()
+            assert app.choice_kind == "settings-ui"
+
+            prompt.focus()
+            await pilot.press("escape")
+            assert app.choice_kind == "settings-root"
+
+    asyncio.run(exercise())
+
+
+def test_textual_shortcuts_toggle_thinking_and_cycle_reasoning_separately() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+            reasoning_effort="low",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+t")
+            assert app.ui_config.hide_thinking
+            await pilot.press("shift+tab", "shift+tab", "shift+tab")
+            assert app.config is not None
+            assert app.config.reasoning_effort is None
+            assert "effort none" in str(
+                app.query_one("#status-context", Static).renderable
+            )
+
+    asyncio.run(exercise())
+
+
+def test_textual_general_settings_toggle_thinking() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/settings"
+            await pilot.press("enter", "4")
+            await pilot.pause()
+            assert app.choice_kind == "settings-general"
+            await pilot.press("enter")
+            assert app.ui_config.hide_thinking
+
+    asyncio.run(exercise())
+
+
+def test_textual_renders_tool_blocks_and_collapses_output() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        registry = ExtensionRegistry()
+        registry.register_tool(
+            name="lookup",
+            description="Look up a value.",
+            parameters={"type": "object"},
+            handler=lambda arguments: f"**value:{arguments['key']}**",
+        )
+        app = TextualPeonApp(
+            provider_factory=lambda _config: ToolProvider(),
+            config_store=MemoryConfigStore((config,)),
+            registry=registry,
+        )
+        app.ui_config = UiConfig(enabled_tools=("lookup",))
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt")
+            prompt.value = "inspect"
+            await pilot.press("enter")
+            for _ in range(20):
+                await pilot.pause()
+                if not app.query_one("#processing").display:
+                    break
+            transcript = app.query_one("#transcript", ChatMessage)
+            assert "I should inspect the workspace first." in transcript.text
+            assert 'lookup: key="owner"' in transcript.text
+            assert "Tool call:" not in transcript.text
+            assert "lookup({" not in transcript.text
+            assert "\n\n" in transcript.text
+            assert "[tool output collapsed]" not in transcript.text
+            assert "**value:owner**" not in transcript.text
+            assert "The owner is Peon." in transcript.text
+            assert "detail" not in transcript.text
+            assert transcript._line_roles.count("tool-message-call") == 1
+            assert transcript._line_roles.count("tool-message-output") == 0
+            assert transcript._line_roles.count("tool-message-padding") == 2
+            await pilot.press("ctrl+t")
+            assert "I should inspect the workspace first." not in transcript.text
+            await pilot.press("ctrl+t")
+            assert "I should inspect the workspace first." in transcript.text
+            await pilot.press("ctrl+o")
+            assert "**value:owner**" in transcript.text
+
+            app.ui_config = UiConfig(
+                enabled_tools=("lookup",),
+                render_tool_markdown=True,
+                tool_message_background="#282832",
+            )
+            app._apply_ui_config()
+            assert transcript.tool_message_background == "#282832"
+            assert "value:owner" in transcript.text
+            assert "**value:owner**" not in transcript.text
+
+            tool_rows = []
+            for y in range(transcript.size.height):
+                document_offset = y + transcript.scroll_offset.y
+                if document_offset >= transcript.wrapped_document.height:
+                    continue
+                line_info = transcript.wrapped_document._offset_to_line_info[
+                    document_offset
+                ]
+                if line_info is None:
+                    continue
+                line_index, _section_offset = line_info
+                if transcript._line_roles[line_index] == "tool-message-call":
+                    tool_rows.append(transcript.render_line(y))
+            assert tool_rows
+            assert all(
+                segment.style is not None
+                and segment.style.bgcolor
+                == Color.parse(transcript.tool_message_background)
+                for row in tool_rows
+                for segment in row
+                if segment.cell_length
+            )
+
+    asyncio.run(exercise())
+
+
+def test_textual_tool_call_has_semantic_path_and_parameter_styles() -> None:
+    rendered = _format_tool_call(
+        ToolCall(
+            name="read",
+            arguments={"path": "src/main.py", "offset": 3, "limit": 2},
+            call_id="call-1",
+        )
+    )
+
+    assert rendered.plain == "read src/main.py limit=2 offset=3"
+    segments = list(rendered.render(Console()))
+    path_segments = [
+        segment
+        for segment in segments
+        if segment.text == "src/main.py"
+    ]
+    assert path_segments
+    assert path_segments[0].style is not None
+    assert path_segments[0].style.link is not None
+    assert path_segments[0].style.color is not None
+    assert any(segment.text == "limit=2" for segment in segments)
+    assert any(segment.text == "offset=3" for segment in segments)
+
+
+def test_textual_message_background_and_padding_fill_role_rows() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+            user_top_blank_lines=0,
+            user_bottom_blank_lines=0,
+            message_left_padding=2,
+        )
+
+        async with app.run_test(size=(40, 20)) as pilot:
+            app._write("hello", role="user")
+            await pilot.pause()
+            transcript = app.query_one("#transcript", ChatMessage)
+            row = transcript.render_line(0)
+            background = Color.parse(transcript.user_message_background)
+            colored_cells = sum(
+                segment.cell_length
+                for segment in row
+                if segment.style is not None and segment.style.bgcolor == background
+            )
+            assert colored_cells == transcript.size.width
+            assert "".join(segment.text for segment in row).startswith("  hello")
+
+            transcript.focus()
+            prompt = app.query_one("#prompt")
+            await pilot.press("x")
+            assert app.focused is prompt
+            assert prompt.value == "x"
+
+    asyncio.run(exercise())
+
+
+def test_textual_restarts_with_a_separate_jsonl_store_and_restores_blocks(tmp_path) -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        registry = ExtensionRegistry()
+        registry.register_tool(
+            name="lookup",
+            description="Look up a value.",
+            parameters={"type": "object"},
+            handler=lambda arguments: f"value:{arguments['key']}",
+        )
+        first_app = TextualPeonApp(
+            provider_factory=lambda _config: ToolProvider(),
+            config_store=MemoryConfigStore((config,)),
+            registry=registry,
+            session_store=JsonlSessionStore(tmp_path / "sessions"),
+        )
+        first_app.ui_config = UiConfig(enabled_tools=("lookup",))
+
+        async with first_app.run_test() as pilot:
+            prompt = first_app.query_one("#prompt")
+            prompt.value = "inspect"
+            await pilot.press("enter")
+            for _ in range(20):
+                await pilot.pause()
+                if not first_app.query_one("#processing").display:
+                    break
+            assert len(first_app.context.messages) == 4
+
+        second_app = TextualPeonApp(
+            provider_factory=lambda _config: ToolProvider(),
+            config_store=MemoryConfigStore((config,)),
+            registry=registry,
+            session_store=JsonlSessionStore(tmp_path / "sessions"),
+            continue_session=True,
+        )
+        second_app.ui_config = UiConfig(enabled_tools=("lookup",))
+
+        async with second_app.run_test():
+            assert len(second_app.context.messages) == 4
+            transcript = second_app.query_one("#transcript", ChatMessage)
+            assert 'lookup: key="owner"' in transcript.text
+            assert "[tool output collapsed]" not in transcript.text
+            assert "value:owner" not in transcript.text
+            assert "The owner is Peon." in transcript.text
 
     asyncio.run(exercise())
 
@@ -438,6 +750,40 @@ def test_textual_right_click_copies_message_text() -> None:
     asyncio.run(exercise())
 
 
+def test_textual_prompt_selection_is_visible_and_right_click_copies() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+        copied: list[str] = []
+
+        async with app.run_test() as pilot:
+            app.copy_to_clipboard = copied.append
+            prompt = app.query_one("#prompt", PeonInput)
+            prompt.value = "copy from prompt"
+            prompt.select_range(5, 9)
+            rendered = prompt._value
+            assert any(
+                span.style == prompt.get_component_rich_style("input--selection")
+                for span in rendered.spans
+            )
+            await pilot._post_mouse_events(
+                [MouseDown],
+                widget=prompt,
+                button=3,
+            )
+            assert copied == ["from"]
+
+    asyncio.run(exercise())
+
+
 def test_textual_selection_spans_messages_and_snaps_to_lines() -> None:
     async def exercise() -> None:
         config = ProviderConfig(
@@ -457,10 +803,10 @@ def test_textual_selection_spans_messages_and_snaps_to_lines() -> None:
             app._write("hello peon", role="user")
             app._write("hello user", role="assistant")
             transcript = app.query_one("#transcript", ChatMessage)
-            transcript.selection = Selection((0, 3), (1, 4))
+            transcript.selection = Selection((0, 3), (2, 4))
             await pilot.pause()
-            assert transcript.selection == Selection((0, 0), (1, len("hello user")))
-            assert transcript.selected_text == "hello peon\nhello user"
+            assert transcript.selection == Selection((0, 0), (2, len("hello user")))
+            assert transcript.selected_text == "hello peon\n\nhello user"
 
     asyncio.run(exercise())
 
@@ -508,13 +854,13 @@ def test_textual_renders_response_immediately_after_user_message() -> None:
             app._write("response one", role="assistant")
             transcript = app.query_one("#transcript", ChatMessage)
             await pilot.pause()
-            rendered = transcript.render_line(4)
+            rendered = transcript.render_line(5)
             assert "response one" in "".join(segment.text for segment in rendered)
 
     asyncio.run(exercise())
 
 
-def test_textual_user_background_fills_the_rendered_row() -> None:
+def test_textual_user_background_fills_message_row() -> None:
     async def exercise() -> None:
         config = ProviderConfig(
             name="openai-compatible",
@@ -533,14 +879,33 @@ def test_textual_user_background_fills_the_rendered_row() -> None:
             app._write("second user", role="user")
             transcript = app.query_one("#transcript", ChatMessage)
             await pilot.pause()
-            rendered = transcript.render_line(2)
-            non_empty_segments = [segment for segment in rendered if segment.cell_length]
-            assert rendered.cell_length == transcript.size.width
+            background = Color.parse(transcript.user_message_background)
+            user_rows = []
+            for y in range(transcript.size.height):
+                document_offset = y + transcript.scroll_offset.y
+                if document_offset >= transcript.wrapped_document.height:
+                    continue
+                line_info = transcript.wrapped_document._offset_to_line_info[
+                    document_offset
+                ]
+                if line_info is None:
+                    continue
+                line_index, _section_offset = line_info
+                if line_index >= len(transcript._line_roles):
+                    continue
+                if transcript._line_roles[line_index] == "user":
+                    user_rows.append(transcript.render_line(y))
+            assert user_rows
+            assert all(row.cell_length == transcript.size.width for row in user_rows)
             assert all(
-                segment.style is not None
-                and segment.style.bgcolor is not None
-                and segment.style.bgcolor == Color.parse(ChatMessage.USER_BACKGROUND)
-                for segment in non_empty_segments
+                sum(
+                    segment.cell_length
+                    for segment in row
+                    if segment.style is not None
+                    and segment.style.bgcolor == background
+                )
+                == transcript.size.width
+                for row in user_rows
             )
 
     asyncio.run(exercise())
@@ -601,6 +966,32 @@ def test_textual_assistant_background_matches_transcript_at_narrow_width() -> No
     asyncio.run(exercise())
 
 
+def test_textual_render_lines_accepts_chat_message_segment_styles() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            app._write("render this user message", role="user")
+            app._write("render this assistant message", role="assistant")
+            await pilot.pause()
+            transcript = app.query_one("#transcript", ChatMessage)
+            strips = transcript.render_lines(
+                Region(0, 0, transcript.size.width, transcript.size.height)
+            )
+            assert len(strips) == transcript.size.height
+
+    asyncio.run(exercise())
+
+
 def test_textual_clear_shows_new_session_success_message() -> None:
     async def exercise() -> None:
         config = ProviderConfig(
@@ -656,13 +1047,14 @@ def test_textual_user_blocks_have_configurable_spacing_and_left_inset() -> None:
             transcript = app.query_one("#transcript", ChatMessage)
             await pilot.pause()
             assert transcript.styles.background == app.screen.styles.background
-            assert transcript.text == "\n\nhello\n\n\n\n\nanswer\n\n"
+            assert transcript.text == "\n\nhello\n\n\n\n\n\nanswer\n\n"
             assert transcript._line_roles == [
                 "user",
                 "user",
                 "user",
                 "user",
                 "user",
+                "spacer",
                 "assistant",
                 "assistant",
                 "assistant",
@@ -685,6 +1077,64 @@ def test_textual_user_blocks_have_configurable_spacing_and_left_inset() -> None:
                 for segment in transcript.render_line(7)
                 if segment.cell_length
             )
+
+    asyncio.run(exercise())
+
+
+def test_textual_collapsed_tool_output_shows_tail_preview_and_hint() -> None:
+    transcript = ChatMessage(
+        user_top_blank_lines=0,
+        user_bottom_blank_lines=0,
+    )
+    transcript.append_message(
+        _format_tool_call(
+            ToolCall(
+                name="bash",
+                arguments={"command": "pytest", "timeout": 10},
+                call_id="call-1",
+            )
+        ),
+        role="tool-call",
+        tool_call_id="call-1",
+    )
+    transcript.append_message(
+        "one\ntwo\nthree\nfour\nfive\nsix",
+        role="tool",
+        tool_call_id="call-1",
+    )
+
+    assert "one" not in transcript.text
+    assert "two\nthree\nfour\nfive\nsix" in transcript.text
+    assert "... (1 earlier lines, ctrl+o to expand)" in transcript.text
+    hint_index = transcript.text.splitlines().index(
+        "... (1 earlier lines, ctrl+o to expand)"
+    )
+    assert transcript._line_roles[hint_index] == "tool-message-hint"
+
+
+def test_textual_footer_has_cwd_and_split_context_provider_rows() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+            reasoning_effort="high",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test(size=(100, 30)):
+            cwd = str(app.query_one("#status", Static).renderable)
+            context = str(app.query_one("#status-context", Static).renderable)
+            provider = str(app.query_one("#status-provider", Static).renderable)
+            assert cwd == str(Path.cwd())
+            assert "context 0" in context
+            assert "effort high" in context
+            assert "openai-compatible" in provider
+            assert "alpha" in provider
 
     asyncio.run(exercise())
 
@@ -829,6 +1279,114 @@ def test_textual_resumes_persistent_session() -> None:
     asyncio.run(exercise())
 
 
+def test_textual_session_picker_opens_named_session_and_fork_records_parent() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        config_store = MemoryConfigStore((config,))
+        session_store = MemorySessionStore()
+        source = session_store.create(name="source")
+        session_store.append(
+            source.session_id,
+            AgentMessage(role="user", content="old task"),
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=config_store,
+            registry=ExtensionRegistry(),
+            session_store=session_store,
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/session"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.choice_kind == "session"
+            await pilot.press("down", "enter")
+            assert app.session_id == source.session_id
+            assert app.context.messages == [
+                AgentMessage(role="user", content="old task")
+            ]
+
+            prompt.value = "/fork branch"
+            await pilot.press("enter")
+            children = [
+                session
+                for session in session_store.list_sessions()
+                if session.parent_id == source.session_id
+            ]
+            assert len(children) == 1
+            assert children[0].parent_id == source.session_id
+            assert children[0].name == "branch"
+            assert session_store.load(source.session_id).messages == (
+                AgentMessage(role="user", content="old task")
+            ,)
+
+    asyncio.run(exercise())
+
+
+def test_textual_quit_displays_resume_command_for_durable_session(tmp_path) -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+            session_store=JsonlSessionStore(tmp_path / "sessions"),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/quit"
+            await pilot.press("enter")
+            transcript = app.query_one("#transcript", ChatMessage)
+            assert f"Resume with: peon --session {app.session_id}" in transcript.text
+
+    asyncio.run(exercise())
+
+
+def test_textual_tool_settings_enable_registered_tool() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        config_store = MemoryConfigStore((config,))
+        registry = ExtensionRegistry()
+        registry.register_tool(
+            name="word_count",
+            description="Count words.",
+            parameters={"type": "object"},
+            handler=lambda _arguments: "count",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=config_store,
+            registry=registry,
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/settings"
+            await pilot.press("enter", "6")
+            await pilot.pause()
+            assert app.choice_kind == "settings-tools"
+            assert "word_count" in str(app.query_one("#choices").renderable)
+            await pilot.press("down", "down", "down", "down", "enter")
+            assert "word_count" in app.ui_config.enabled_tools
+
+    asyncio.run(exercise())
+
+
 def test_textual_escape_cancels_model_and_provider_selection() -> None:
     async def exercise() -> None:
         config = ProviderConfig(
@@ -965,7 +1523,9 @@ def test_textual_model_switch_updates_status_without_transcript_trace() -> None:
             await pilot.pause()
             assert app.config is not None
             assert app.config.model == "beta"
-            assert "beta" in str(app.query_one("#status", Static).renderable)
+            assert "beta" in str(
+                app.query_one("#status-provider", Static).renderable
+            )
             assert all(
                 "Using provider" not in message.text
                 for message in app.query("#conversation ChatMessage")

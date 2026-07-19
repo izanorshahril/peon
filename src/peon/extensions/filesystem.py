@@ -1,10 +1,12 @@
-"""Read-only, cwd-bound filesystem tools for the application registry."""
+"""Cwd-bound filesystem and shell tools for the application registry."""
 
 from collections.abc import Iterator, Mapping
 from fnmatch import fnmatch
 import os
 from pathlib import Path
 import re
+import subprocess
+import time
 
 from .registry import ExtensionRegistry
 
@@ -34,7 +36,7 @@ def register_filesystem_tools(
     max_results: int = 100,
     max_output_chars: int = 12000,
 ) -> None:
-    """Register read-only tools rooted at one working directory."""
+    """Register cwd-bound filesystem and shell tools."""
     workspace = (root or Path.cwd()).resolve()
     if max_lines < 1 or max_results < 1 or max_output_chars < 1:
         raise ValueError("filesystem output limits must be positive")
@@ -56,6 +58,50 @@ def register_filesystem_tools(
             workspace,
             arguments,
             max_lines=max_lines,
+            max_output_chars=max_output_chars,
+        ),
+    )
+    registry.register_tool(
+        name="write",
+        description="Create or replace a UTF-8 text file within the workspace.",
+        parameters={
+            "type": "object",
+            "required": ["path", "content"],
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+        },
+        handler=lambda arguments: _write(workspace, arguments),
+    )
+    registry.register_tool(
+        name="edit",
+        description="Replace one exact text match in a workspace file.",
+        parameters={
+            "type": "object",
+            "required": ["path", "old_text", "new_text"],
+            "properties": {
+                "path": {"type": "string"},
+                "old_text": {"type": "string"},
+                "new_text": {"type": "string"},
+            },
+        },
+        handler=lambda arguments: _edit(workspace, arguments),
+    )
+    registry.register_tool(
+        name="bash",
+        description="Run a command in the workspace with bounded output.",
+        parameters={
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+                "command": {"type": "string"},
+                "timeout": {"type": "number", "minimum": 1},
+            },
+        },
+        handler=lambda arguments: _bash(
+            workspace,
+            arguments,
             max_output_chars=max_output_chars,
         ),
     )
@@ -120,6 +166,120 @@ def register_filesystem_tools(
             max_output_chars=max_output_chars,
         ),
     )
+
+
+def _write(root: Path, arguments: Mapping[str, object]) -> str:
+    path, error = _resolve_mutation_path(root, arguments, operation="write")
+    if error is not None:
+        return error
+    content = arguments.get("content")
+    if not isinstance(content, str):
+        return "write error: content must be a string"
+    assert path is not None
+    if _is_excluded_path(root, path):
+        return f"write error: '{_display_path(root, path)}' is excluded"
+    if path.exists() and path.is_dir():
+        return f"write error: '{_display_path(root, path)}' is a directory"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    except OSError as error:
+        return f"write error: could not write '{_display_path(root, path)}': {error}"
+    line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+    byte_count = len(content.encode("utf-8"))
+    return f"write: wrote {byte_count} bytes and {line_count} lines to {_display_path(root, path)}"
+
+
+def _edit(root: Path, arguments: Mapping[str, object]) -> str:
+    path, error = _resolve_mutation_path(root, arguments, operation="edit")
+    if error is not None:
+        return error
+    old_text = arguments.get("old_text")
+    new_text = arguments.get("new_text")
+    if not isinstance(old_text, str) or not isinstance(new_text, str):
+        return "edit error: old_text and new_text must be strings"
+    assert path is not None
+    if _is_excluded_path(root, path):
+        return f"edit error: '{_display_path(root, path)}' is excluded"
+    if not path.is_file():
+        return f"edit error: '{_display_path(root, path)}' is not a file"
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        return f"edit error: could not read '{_display_path(root, path)}': {error}"
+    matches = content.count(old_text) if old_text else 0
+    if matches == 0:
+        return "edit error: old_text was not found"
+    if matches > 1:
+        return f"edit error: old_text matched {matches} times"
+    updated = content.replace(old_text, new_text, 1)
+    if updated == content:
+        return f"edit: no changes to {_display_path(root, path)}"
+    try:
+        path.write_text(updated, encoding="utf-8")
+    except OSError as error:
+        return f"edit error: could not write '{_display_path(root, path)}': {error}"
+    return f"edit: updated {_display_path(root, path)}"
+
+
+def _bash(
+    root: Path,
+    arguments: Mapping[str, object],
+    *,
+    max_output_chars: int,
+) -> str:
+    command = arguments.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return "bash error: command must be a non-empty string"
+    timeout = arguments.get("timeout", 30)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        return "bash error: timeout must be a positive number"
+    started_at = time.perf_counter()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=root,
+            shell=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        elapsed = time.perf_counter() - started_at
+        output = _process_output(error.stdout, error.stderr, max_output_chars)
+        result = f"bash error: command timed out after {timeout} seconds"
+        if output:
+            result += f"\n{output}"
+        return f"{result}\nTook {elapsed:.1f}s"
+    elapsed = time.perf_counter() - started_at
+    output = _process_output(
+        completed.stdout,
+        completed.stderr,
+        max_output_chars,
+    )
+    prefix = f"bash: exit code {completed.returncode}"
+    result = f"{prefix}\n{output}" if output else prefix
+    return f"{result}\nTook {elapsed:.1f}s"
+
+
+def _process_output(
+    stdout: str | bytes | None,
+    stderr: str | bytes | None,
+    max_output_chars: int,
+) -> str:
+    parts: list[str] = []
+    for label, value in (("stdout", stdout), ("stderr", stderr)):
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if isinstance(value, str) and value:
+            parts.append(f"{label}:\n{value}")
+    rendered = "\n".join(parts)
+    if len(rendered) <= max_output_chars:
+        return rendered
+    return rendered[:max_output_chars] + "\n[truncated]"
 
 
 def _read(
@@ -359,6 +519,21 @@ def _resolve_argument_path(
     if not _inside(root, candidate):
         return None, f"{operation} error: path escapes the working directory"
     return candidate, None
+
+
+def _resolve_mutation_path(
+    root: Path,
+    arguments: Mapping[str, object],
+    *,
+    operation: str,
+) -> tuple[Path | None, str | None]:
+    path, error = _resolve_argument_path(root, arguments, operation=operation)
+    if error is not None:
+        return None, error
+    assert path is not None
+    if _is_excluded_path(root, path):
+        return None, f"{operation} error: '{_display_path(root, path)}' is excluded"
+    return path, None
 
 
 def _inside(root: Path, candidate: Path) -> bool:

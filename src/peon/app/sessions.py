@@ -24,10 +24,16 @@ class SessionRecord:
     cwd: str | None = None
     created_at: str | None = None
     parent_id: str | None = None
+    name: str | None = None
 
 
 class SessionStore(Protocol):
-    def create(self, *, parent_id: str | None = None) -> SessionRecord:
+    def create(
+        self,
+        *,
+        parent_id: str | None = None,
+        name: str | None = None,
+    ) -> SessionRecord:
         """Create and select a fresh conversation session."""
 
     def append(self, session_id: str, message: AgentMessage) -> None:
@@ -39,25 +45,70 @@ class SessionStore(Protocol):
     def load_latest(self) -> SessionRecord | None:
         """Load the most recently modified session, if one exists."""
 
+    def list_sessions(self) -> tuple[SessionRecord, ...]:
+        """List valid sessions for the current working directory."""
+
+    def load_current(self, session_id: str) -> SessionRecord:
+        """Load one session after checking its working directory."""
+
+    def load_path(self, path: Path) -> SessionRecord:
+        """Load one explicitly selected session file."""
+
+
+def select_session(store: SessionStore, target: str) -> SessionRecord:
+    """Resolve an exact session path, current-directory ID, or unique name."""
+    normalized_target = target.strip()
+    if not normalized_target:
+        raise SessionStoreError("session target cannot be blank")
+    target_path = Path(normalized_target).expanduser()
+    if target_path.suffix == ".jsonl" or target_path.parent != Path("."):
+        load_path = getattr(store, "load_path", None)
+        if load_path is not None:
+            return load_path(target_path)
+    try:
+        return store.load_current(normalized_target)
+    except SessionStoreError as direct_error:
+        try:
+            sessions = store.list_sessions()
+        except AttributeError:
+            raise direct_error
+        matches = tuple(
+            session
+            for session in sessions
+            if session.name == normalized_target
+        )
+        if not matches:
+            raise direct_error
+        if len(matches) > 1:
+            raise SessionStoreError(
+                f"session name '{normalized_target}' is ambiguous"
+            )
+        return store.load_current(matches[0].session_id)
+
 
 def create_session(
     store: SessionStore,
     *,
     parent_id: str | None = None,
+    name: str | None = None,
 ) -> SessionRecord:
     """Create a session while accepting stores from the v1 API."""
-    if parent_id is None:
+    if parent_id is None and name is None:
         return store.create()
     try:
         parameters = inspect.signature(store.create).parameters
     except (TypeError, ValueError):
         return store.create()
-    if "parent_id" in parameters or any(
+    accepts_kwargs = any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters.values()
-    ):
-        return store.create(parent_id=parent_id)
-    return store.create()
+    )
+    keyword_arguments = {}
+    if parent_id is not None and (accepts_kwargs or "parent_id" in parameters):
+        keyword_arguments["parent_id"] = parent_id
+    if name is not None and (accepts_kwargs or "name" in parameters):
+        keyword_arguments["name"] = name
+    return store.create(**keyword_arguments)
 
 
 class JsonlSessionStore:
@@ -74,7 +125,12 @@ class JsonlSessionStore:
             (working_directory or Path.cwd()).resolve()
         )
 
-    def create(self, *, parent_id: str | None = None) -> SessionRecord:
+    def create(
+        self,
+        *,
+        parent_id: str | None = None,
+        name: str | None = None,
+    ) -> SessionRecord:
         self.directory.mkdir(parents=True, exist_ok=True)
         session_id = uuid4().hex
         created_at = _utc_timestamp()
@@ -86,6 +142,7 @@ class JsonlSessionStore:
             "cwd": self.working_directory,
             "created_at": created_at,
             "parent_id": parent_id,
+            "name": name,
         }
         path.write_text(json.dumps(header, separators=(",", ":")) + "\n", encoding="utf-8")
         return SessionRecord(
@@ -93,6 +150,7 @@ class JsonlSessionStore:
             cwd=self.working_directory,
             created_at=created_at,
             parent_id=parent_id,
+            name=name,
         )
 
     def append(self, session_id: str, message: AgentMessage) -> None:
@@ -156,6 +214,43 @@ class JsonlSessionStore:
             raise first_error
         return None
 
+    def list_sessions(self) -> tuple[SessionRecord, ...]:
+        try:
+            paths = sorted(
+                self.directory.glob("*.jsonl"),
+                key=lambda path: (path.stat().st_mtime_ns, path.name),
+                reverse=True,
+            )
+        except OSError as error:
+            raise SessionStoreError("could not inspect session storage") from error
+        sessions: list[SessionRecord] = []
+        for path in paths:
+            try:
+                record = _decode_session(path, path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, SessionStoreError):
+                continue
+            if record.cwd == self.working_directory:
+                sessions.append(record)
+        return tuple(sessions)
+
+    def load_current(self, session_id: str) -> SessionRecord:
+        record = self.load(session_id)
+        if record.cwd is not None and record.cwd != self.working_directory:
+            raise SessionStoreError(
+                f"session '{session_id}' belongs to another working directory"
+            )
+        return record
+
+    def load_path(self, path: Path) -> SessionRecord:
+        try:
+            resolved_path = path.resolve()
+            text = resolved_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise SessionStoreError(
+                f"could not open session file '{path}'"
+            ) from error
+        return _decode_session(resolved_path, text)
+
     def _path_for(self, session_id: str) -> Path:
         if not session_id or Path(session_id).name != session_id:
             raise SessionStoreError("invalid session ID")
@@ -173,7 +268,12 @@ class MemorySessionStore:
         default_factory=lambda: str(Path.cwd().resolve())
     )
 
-    def create(self, *, parent_id: str | None = None) -> SessionRecord:
+    def create(
+        self,
+        *,
+        parent_id: str | None = None,
+        name: str | None = None,
+    ) -> SessionRecord:
         session_id = uuid4().hex
         self.records[session_id] = []
         self.order.append(session_id)
@@ -182,6 +282,7 @@ class MemorySessionStore:
             cwd=self.working_directory,
             created_at=_utc_timestamp(),
             parent_id=parent_id,
+            name=name,
         )
         self.metadata[session_id] = session
         return session
@@ -197,12 +298,34 @@ class MemorySessionStore:
             messages = self.records[session_id]
         except KeyError as error:
             raise SessionStoreError(f"session '{session_id}' does not exist") from error
-        return SessionRecord(session_id=session_id, messages=tuple(messages))
+        metadata = self.metadata.get(session_id)
+        return SessionRecord(
+            session_id=session_id,
+            messages=tuple(messages),
+            cwd=metadata.cwd if metadata is not None else self.working_directory,
+            created_at=metadata.created_at if metadata is not None else None,
+            parent_id=metadata.parent_id if metadata is not None else None,
+            name=metadata.name if metadata is not None else None,
+        )
 
     def load_latest(self) -> SessionRecord | None:
         if not self.order:
             return None
         return self.load(self.order[-1])
+
+    def list_sessions(self) -> tuple[SessionRecord, ...]:
+        return tuple(
+            self.load(session_id)
+            for session_id in reversed(self.order)
+        )
+
+    def load_current(self, session_id: str) -> SessionRecord:
+        return self.load(session_id)
+
+    def load_path(self, path: Path) -> SessionRecord:
+        raise SessionStoreError(
+            f"session file paths are unavailable for in-memory sessions: '{path}'"
+        )
 
 
 def default_session_directory() -> Path:
@@ -221,6 +344,8 @@ def _serialize_message(message: AgentMessage) -> dict[str, object]:
         "role": message.role,
         "content": message.content,
     }
+    if message.thinking is not None:
+        raw["thinking"] = message.thinking
     if message.tool_call is not None:
         raw["tool_call"] = {
             "name": message.tool_call.name,
@@ -289,6 +414,9 @@ def _decode_session(path: Path, text: str) -> SessionRecord:
     parent_id = header.get("parent_id")
     if parent_id is not None and not isinstance(parent_id, str):
         raise SessionStoreError(f"session '{path.name}' has an invalid parent ID")
+    name = header.get("name")
+    if name is not None and not isinstance(name, str):
+        raise SessionStoreError(f"session '{path.name}' has an invalid name")
 
     messages: list[AgentMessage] = []
     for line_number, line in enumerate(lines[1:], start=2):
@@ -316,6 +444,7 @@ def _decode_session(path: Path, text: str) -> SessionRecord:
         cwd=cwd,
         created_at=created_at,
         parent_id=parent_id,
+        name=name,
     )
 
 
@@ -328,6 +457,9 @@ def _deserialize_message(raw: object) -> AgentMessage:
     content = raw.get("content")
     if not isinstance(content, str):
         raise ValueError("invalid message content")
+    thinking = raw.get("thinking")
+    if thinking is not None and not isinstance(thinking, str):
+        raise ValueError("invalid thinking content")
     tool_call = _deserialize_tool_call(raw.get("tool_call"))
     tool_call_id = raw.get("tool_call_id")
     if tool_call_id is not None and not isinstance(tool_call_id, str):
@@ -335,6 +467,7 @@ def _deserialize_message(raw: object) -> AgentMessage:
     return AgentMessage(
         role=role,
         content=content,
+        thinking=thinking,
         tool_call=tool_call,
         tool_call_id=tool_call_id,
     )

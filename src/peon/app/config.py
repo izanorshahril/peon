@@ -1,13 +1,18 @@
 """Persistent provider configuration for the interactive application."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import json
 import os
 from pathlib import Path
 from dataclasses import asdict, dataclass, replace
 from typing import Protocol
 
+from peon.agent import ToolDefinition, ToolExecutor
+
 from .cli import ProviderConfig
+
+
+DEFAULT_ENABLED_TOOLS = ("read", "write", "edit", "bash")
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,8 +25,16 @@ class UiConfig:
     user_message_color: str = "#c4c4c4"
     user_message_background: str = "#3a3a44"
     assistant_message_color: str = "#e0e0e0"
+    tool_message_background: str = "#283228"
+    tool_output_color: str = "#808080"
     command_selected_color: str = "#000000"
     text_format: str = "normal"
+    hide_thinking: bool = False
+    render_tool_markdown: bool = False
+    reasoning_shortcut: str = "shift+tab"
+    thinking_shortcut: str = "ctrl+t"
+    tools_shortcut: str = "ctrl+o"
+    enabled_tools: tuple[str, ...] = DEFAULT_ENABLED_TOOLS
 
 
 UI_SETTING_SPECS = (
@@ -42,11 +55,33 @@ UI_SETTING_SPECS = (
         "assistant_message_color",
     ),
     (
+        "tool-message-background",
+        "Tool message background",
+        "tool_message_background",
+    ),
+    ("tool-output-color", "Tool output color", "tool_output_color"),
+    (
         "command-selected-color",
         "Command selected color",
         "command_selected_color",
     ),
     ("text-format", "Text format", "text_format"),
+)
+
+GENERAL_SETTING_SPECS = (
+    ("hide-thinking", "Hide thinking blocks", "hide_thinking"),
+    (
+        "render-tool-markdown",
+        "Render tool output as Markdown",
+        "render_tool_markdown",
+    ),
+    ("reserved-auto-compaction", "Auto-compaction", None),
+)
+
+SHORTCUT_SETTING_SPECS = (
+    ("reasoning", "Cycle reasoning effort", "reasoning_shortcut"),
+    ("thinking", "Show or hide thinking", "thinking_shortcut"),
+    ("tools", "Expand or collapse tools", "tools_shortcut"),
 )
 
 
@@ -98,7 +133,111 @@ def update_ui_setting(config: UiConfig, setting: str, value: str) -> UiConfig:
         return replace(config, user_message_background=value)
     if field_name == "assistant_message_color":
         return replace(config, assistant_message_color=value)
+    if field_name == "tool_message_background":
+        return replace(config, tool_message_background=value)
+    if field_name == "tool_output_color":
+        return replace(config, tool_output_color=value)
     return replace(config, command_selected_color=value)
+
+
+def update_general_setting(config: UiConfig, setting: str, value: str) -> UiConfig:
+    field_name = next(
+        (
+            field
+            for key, _label, field in GENERAL_SETTING_SPECS
+            if key == setting
+        ),
+        None,
+    )
+    if field_name is None:
+        raise ValueError(f"setting '{setting}' is reserved")
+    lowered_value = value.lower()
+    if lowered_value not in {"true", "false"}:
+        raise ValueError("general setting must be true or false")
+    if field_name == "hide_thinking":
+        return replace(config, hide_thinking=lowered_value == "true")
+    return replace(config, render_tool_markdown=lowered_value == "true")
+
+
+def update_shortcut_setting(config: UiConfig, setting: str, value: str) -> UiConfig:
+    field_name = next(
+        (
+            field
+            for key, _label, field in SHORTCUT_SETTING_SPECS
+            if key == setting
+        ),
+        None,
+    )
+    if field_name is None:
+        raise ValueError(f"unknown shortcut setting '{setting}'")
+    normalized_value = value.strip().lower()
+    if not normalized_value or any(character.isspace() for character in normalized_value):
+        raise ValueError("shortcut cannot be blank or contain spaces")
+    if any(
+        other_field != field_name
+        and normalized_value == str(getattr(config, other_field)).casefold()
+        for _key, _label, other_field in SHORTCUT_SETTING_SPECS
+    ):
+        raise ValueError("shortcut is already assigned")
+    if field_name == "reasoning_shortcut":
+        return replace(config, reasoning_shortcut=normalized_value)
+    if field_name == "thinking_shortcut":
+        return replace(config, thinking_shortcut=normalized_value)
+    return replace(config, tools_shortcut=normalized_value)
+
+
+def enabled_tool_names(config: UiConfig) -> tuple[str, ...]:
+    """Return the configured model-facing tools in stable order."""
+    return config.enabled_tools
+
+
+def update_tool_setting(config: UiConfig, tool_name: str, value: str) -> UiConfig:
+    normalized_name = tool_name.strip()
+    if not normalized_name:
+        raise ValueError("tool name cannot be blank")
+    lowered_value = value.strip().lower()
+    if lowered_value not in {"true", "false"}:
+        raise ValueError("tool availability must be true or false")
+    enabled = list(config.enabled_tools)
+    if lowered_value == "true" and normalized_name not in enabled:
+        enabled.append(normalized_name)
+    elif lowered_value == "false":
+        enabled = [name for name in enabled if name != normalized_name]
+    return replace(config, enabled_tools=tuple(enabled))
+
+
+def filter_enabled_tools(
+    config: UiConfig,
+    tools: Sequence[ToolDefinition],
+) -> tuple[ToolDefinition, ...]:
+    """Return registered definitions allowed in provider requests."""
+    enabled = set(enabled_tool_names(config))
+    return tuple(tool for tool in tools if tool.name in enabled)
+
+
+class FilteredToolExecutor:
+    """Expose only configured tool definitions and invocations."""
+
+    def __init__(self, executor: ToolExecutor, config: UiConfig) -> None:
+        self._executor = executor
+        self._tools = filter_enabled_tools(config, executor.tools)
+        self._enabled_names = {tool.name for tool in self._tools}
+
+    @property
+    def tools(self) -> tuple[ToolDefinition, ...]:
+        return self._tools
+
+    def invoke(self, name: str, arguments: Mapping[str, object]) -> str:
+        if name not in self._enabled_names:
+            raise ValueError(f"tool '{name}' is disabled")
+        return self._executor.invoke(name, arguments)
+
+
+def filter_tool_executor(
+    config: UiConfig,
+    executor: ToolExecutor,
+) -> FilteredToolExecutor:
+    return FilteredToolExecutor(executor, config)
 
 
 class ProviderConfigStore(Protocol):
@@ -204,6 +343,9 @@ class JsonProviderConfigStore:
         for field_name in asdict(defaults):
             value = raw_ui.get(field_name, getattr(defaults, field_name))
             default = getattr(defaults, field_name)
+            if field_name == "enabled_tools" and isinstance(value, list):
+                if all(isinstance(tool_name, str) for tool_name in value):
+                    value = tuple(value)
             if type(value) is not type(default):
                 return defaults
             values[field_name] = value
@@ -308,6 +450,7 @@ def _parse_provider_config(raw_config: object) -> ProviderConfig | None:
         "response_format_field",
         "response_format",
         "response_content_field",
+        "response_thinking_field",
         "tool_prompt_role",
     ):
         value = raw_config.get(field_name)
@@ -388,6 +531,8 @@ def _parse_provider_config(raw_config: object) -> ProviderConfig | None:
         ),
         response_content_field=optional_values.pop("response_content_field")
         or "completion",
+        response_thinking_field=optional_values.pop("response_thinking_field")
+        or "thinking",
         tool_prompt_role=tool_prompt_role or "developer",
         supports_tools=boolean_values["supports_tools"],
         supports_stream=boolean_values["supports_stream"],
@@ -417,6 +562,7 @@ def _serialize_provider_config(config: ProviderConfig) -> dict[str, object]:
         "response_format_field": config.response_format_field,
         "response_format": config.response_format,
         "response_content_field": config.response_content_field,
+        "response_thinking_field": config.response_thinking_field,
         "tool_prompt_role": config.tool_prompt_role,
         "supports_tools": config.supports_tools,
         "supports_stream": config.supports_stream,

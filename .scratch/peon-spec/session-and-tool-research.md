@@ -116,3 +116,99 @@ and append its result.
 - Branching parent IDs, session selection commands, fenced fallback JSON, and
   image-aware reads remain future extensions beyond the first linear session
   and text-file tool slice.
+
+## Pi parity research for the next implementation spec
+
+**Research date:** 2026-07-18
+
+The current Peon startup policy is not Pi-compatible. Peon resumes the newest
+JSONL file on ordinary interactive startup. Pi creates a new session by
+default; `-c`/`--continue` explicitly continues the most recent current-
+project session, `-r`/`--resume` opens a session picker, and `--session`
+opens a specific path or session ID. Pi also supports `--fork`, `--no-session`,
+`--session-dir`, and `--name`. Print mode is explicit with `-p`/`--print` and
+does not implicitly continue the newest durable session.
+
+Relevant Pi sources:
+
+- [CLI usage](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/usage.md)
+- [Session guide](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sessions.md)
+- [CLI argument parser](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/cli/args.ts)
+- [Session manager](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/session-manager.ts)
+- [Print mode](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/print-mode.ts)
+- [Interactive mode](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/interactive/interactive-mode.ts)
+
+Pi's print mode has separate text and JSON output contracts. Text mode emits
+the final assistant response for a single-shot prompt. JSON mode emits
+normalized lifecycle and agent events, including tool activity, so callers do
+not need to parse interactive terminal decoration. Piped stdin is merged into
+the initial prompt.
+
+Pi's interactive renderer uses tool-specific renderers rather than exposing
+raw function-call envelopes. Collapsed tool calls retain a compact action
+label and useful target, while collapsed results hide full output and expose a
+bounded preview or expansion hint. Tool output is separated from neighboring
+assistant/thinking blocks with deliberate blank-line padding. Semantic theme
+tokens distinguish thinking text, tool titles, paths/accents, tool output,
+muted hints, success, and errors. `Ctrl+T` (or its configured equivalent)
+rebuilds the transcript and shows `Thinking blocks: hidden` or
+`Thinking blocks: visible` as a status notice. Global tool expansion updates
+the startup header, loaded resources, and existing chat entries.
+
+Relevant Pi rendering sources:
+
+- [Tool execution component](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts)
+- [Read renderer](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/read.ts)
+- [Bash execution component](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/interactive/components/bash-execution.ts)
+- [Interactive toggle/status handlers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/interactive/interactive-mode.ts)
+
+Pi's built-in coding tool contracts are:
+
+- `read`: cwd-aware bounded reads with offsets/limits and continuation hints.
+- `write`: cwd-contained create/overwrite with parent-directory creation.
+- `edit`: exact unique replacement with diff-oriented rendering.
+- `bash`: cwd-bound command execution with streamed output, timeout,
+  cancellation, bounded/truncatable results, and exit status.
+
+Peon should register the latter three through `extensions`, reuse the existing
+cwd/exclusion policy, and keep process execution behind an injected
+cancellable operation boundary so the agent loop remains provider-neutral.
+
+Pi loads resources through a dedicated resource loader before constructing the
+effective system prompt. It discovers user and project skills, keeps skill
+metadata visible in a compact structured block, and relies on the model's
+`read` tool to load full skill content progressively. It also discovers
+`AGENTS.md`/`CLAUDE.md` context files from the global and applicable parent
+directories, supports project/global `SYSTEM.md` and `APPEND_SYSTEM.md`, and
+reports resource diagnostics. Project resources are subject to trust and can
+be disabled with `--no-context-files` or `--no-skills`; explicit resource paths
+remain separately configurable.
+
+Relevant Pi resource sources:
+
+- [Resource loader](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/resource-loader.ts)
+- [System prompt builder](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/system-prompt.ts)
+- [Skills loader](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/skills.ts)
+- [Context-file documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/usage.md)
+- [Skills documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md)
+
+Resolved decisions for Peon:
+
+1. Ordinary launch will eventually create a new session; continuation will be
+  explicit. Existing automatic-resume tests describe legacy behavior and must
+  be updated when the session slice is implemented.
+2. Session selection, print behavior, and resume-command formatting belong in
+  `app`; session entries remain append-only and provider-neutral.
+3. Tool presentation should hide raw function-call JSON when collapsed and use
+  compact tool-specific remarks plus bounded output expansion.
+4. Thinking visibility changes must emit a visible status notice and refresh
+  both restored and streaming transcript blocks.
+5. Write/edit/bash belong in `extensions`; cwd containment, excluded paths,
+  timeout/cancellation, and bounded output are mandatory first contracts.
+6. Skill/context/system-prompt discovery belongs in an application resource
+  loader. The agent loop consumes the resulting effective system prompt and
+  does not discover files itself.
+
+The implementation-ready requirements and test seams are captured in
+[Pi parity spec](pi-parity-spec.md). No implementation was made during this
+research pass.

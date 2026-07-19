@@ -4,7 +4,12 @@ import os
 import pytest
 
 from peon.agent import AgentMessage, ToolCall
-from peon.app.sessions import JsonlSessionStore, SessionStoreError
+from peon.app.sessions import (
+    JsonlSessionStore,
+    MemorySessionStore,
+    SessionStoreError,
+    select_session,
+)
 
 
 def test_jsonl_session_store_round_trips_tool_messages(tmp_path) -> None:
@@ -80,6 +85,82 @@ def test_jsonl_session_store_writes_metadata_and_reads_legacy_sessions(tmp_path)
     assert loaded.messages == (AgentMessage(role="user", content="legacy task"),)
 
 
+def test_jsonl_session_store_round_trips_name_and_lists_current_sessions(tmp_path) -> None:
+    directory = tmp_path / "sessions"
+    current_store = JsonlSessionStore(
+        directory,
+        working_directory=tmp_path / "project",
+    )
+    named = current_store.create(name="release work")
+    current_store.create(name="scratch")
+    foreign_store = JsonlSessionStore(
+        directory,
+        working_directory=tmp_path / "other",
+    )
+    foreign = foreign_store.create(name="foreign")
+
+    assert current_store.load(named.session_id).name == "release work"
+    assert [session.name for session in current_store.list_sessions()] == [
+        "scratch",
+        "release work",
+    ]
+    assert foreign.session_id not in {
+        session.session_id for session in current_store.list_sessions()
+    }
+
+
+def test_jsonl_session_store_load_current_rejects_foreign_cwd(tmp_path) -> None:
+    directory = tmp_path / "sessions"
+    foreign_store = JsonlSessionStore(
+        directory,
+        working_directory=tmp_path / "other",
+    )
+    foreign = foreign_store.create()
+    current_store = JsonlSessionStore(
+        directory,
+        working_directory=tmp_path / "project",
+    )
+
+    with pytest.raises(SessionStoreError, match="another working directory"):
+        current_store.load_current(foreign.session_id)
+
+
+def test_memory_session_store_lists_named_sessions() -> None:
+    store = MemorySessionStore()
+    first = store.create(name="first")
+    second = store.create(name="second")
+
+    assert store.list_sessions() == (second, first)
+    assert store.load_current(first.session_id).name == "first"
+
+
+def test_select_session_resolves_unique_name_and_rejects_missing_target() -> None:
+    store = MemorySessionStore()
+    named = store.create(name="release")
+
+    assert select_session(store, "release") == named
+    with pytest.raises(SessionStoreError, match="does not exist"):
+        select_session(store, "missing")
+
+
+def test_select_session_rejects_ambiguous_name() -> None:
+    store = MemorySessionStore()
+    store.create(name="duplicate")
+    store.create(name="duplicate")
+
+    with pytest.raises(SessionStoreError, match="ambiguous"):
+        select_session(store, "duplicate")
+
+
+def test_select_session_opens_an_explicit_jsonl_path(tmp_path) -> None:
+    directory = tmp_path / "sessions"
+    store = JsonlSessionStore(directory, working_directory=tmp_path / "project")
+    session = store.create(name="release")
+    path = directory / f"{session.session_id}.jsonl"
+
+    assert select_session(store, str(path)) == session
+
+
 def test_jsonl_session_store_does_not_continue_legacy_session_without_cwd(
     tmp_path,
 ) -> None:
@@ -130,6 +211,22 @@ def test_jsonl_store_ignores_corrupt_session_from_another_directory(tmp_path) ->
 
     assert loaded is not None
     assert loaded.session_id == valid.session_id
+
+
+def test_jsonl_store_round_trips_thinking_metadata(tmp_path) -> None:
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    message = AgentMessage(
+        role="assistant",
+        content="The answer.",
+        thinking="I checked the available context.",
+    )
+
+    store.append(session.session_id, message)
+
+    loaded = store.load(session.session_id)
+    assert loaded is not None
+    assert loaded.messages == (message,)
 
 
 def test_jsonl_session_store_creates_new_session_without_rewriting_previous(tmp_path) -> None:

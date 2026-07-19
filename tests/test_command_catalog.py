@@ -19,6 +19,21 @@ def test_catalog_supports_migration_vocabulary() -> None:
     assert DEFAULT_COMMAND_CATALOG.search("config")[0].command.id == "settings"
 
 
+def test_catalog_exposes_reasoning_as_an_available_setting_command() -> None:
+    invocation = DEFAULT_COMMAND_CATALOG.resolve("/reasoning high")
+
+    assert invocation is not None
+    assert invocation.command.id == "reasoning"
+    assert invocation.command.setting_key == "reasoning"
+    assert invocation.argument == "high"
+    assert any(
+        match.command.id == "reasoning"
+        for match in DEFAULT_COMMAND_CATALOG.search("/")
+    )
+    assert DEFAULT_COMMAND_CATALOG.resolve("/thinking") is None
+    assert DEFAULT_COMMAND_CATALOG.search("thinking")[0].command.id == "reasoning"
+
+
 def test_catalog_normalizes_separators_and_marks_reserved_commands() -> None:
     matches = DEFAULT_COMMAND_CATALOG.search("SWITCH_model")
 
@@ -67,6 +82,7 @@ def test_catalog_help_separates_available_and_reserved_commands() -> None:
     assert "/model     switch the active model" in help_text
     assert "/compact   compact conversation context" in help_text
     assert "(also: connect, login)" in help_text
+    assert "(also: effort, thinking)" in help_text
 
 
 def test_skills_is_an_available_discoverable_command() -> None:

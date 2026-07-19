@@ -23,7 +23,6 @@ from peon.extensions import (
 )
 
 from .cli import (
-    CONFIG_SETTING_SPECS,
     CommandError,
     ProviderConfig,
     ProviderFactory,
@@ -32,26 +31,35 @@ from .cli import (
     RESPONSE_FIELD_SETTING_SPECS,
     SavedModel,
     create_provider,
+    cycle_reasoning_effort,
+    provider_config_setting_specs,
     saved_model_choices,
     select_saved_model,
     update_provider_setting,
 )
 from .config import (
+    GENERAL_SETTING_SPECS,
     UI_SETTING_SPECS,
     JsonProviderConfigStore,
     ProviderConfigStore,
+    filter_enabled_tools,
+    filter_tool_executor,
     load_ui_config,
     save_ui_config,
     update_saved_provider,
+    update_general_setting,
+    update_tool_setting,
     update_ui_setting,
 )
 from .commands import DEFAULT_COMMAND_CATALOG, CommandDefinition
 from .sessions import (
     JsonlSessionStore,
     MemorySessionStore,
+    SessionRecord,
     SessionStore,
     SessionStoreError,
     create_session,
+    select_session,
 )
 
 InputFunction = Callable[[str], str]
@@ -173,6 +181,8 @@ def run_tui(
     message_left_padding: int = 1,
     continue_session: bool = False,
     no_session: bool = False,
+    session_target: str | None = None,
+    session_name: str | None = None,
 ) -> int:
     """Run an interactive Peon conversation until the user exits."""
     output = output or sys.stdout
@@ -202,14 +212,21 @@ def run_tui(
             message_left_padding=message_left_padding,
             continue_session=continue_session,
             no_session=no_session,
+            session_target=session_target,
+            session_name=session_name,
         )
 
     _print_header(output=output)
-    active_session_store, session_id, context = _load_starting_session(
-        active_session_store,
-        error=error,
-        continue_session=continue_session,
-    )
+    try:
+        active_session_store, session_id, context = _load_starting_session(
+            active_session_store,
+            error=error,
+            continue_session=continue_session,
+            session_target=session_target,
+            session_name=session_name,
+        )
+    except SessionStoreError:
+        return 1
     session = _restore_session(
         provider_factory=provider_factory,
         config_store=active_config_store,
@@ -244,8 +261,10 @@ def run_tui(
             config_store=active_config_store,
         )
         _print_footer(session, output=output)
+        _print_resume_command(session, output=output)
         return result
     except (EOFError, KeyboardInterrupt):
+        _print_resume_command(session, output=output)
         print("\nGoodbye.", file=output)
         return 0
 
@@ -261,7 +280,20 @@ def _load_starting_session(
     *,
     error: TextIO,
     continue_session: bool = False,
+    session_target: str | None = None,
+    session_name: str | None = None,
 ) -> tuple[SessionStore, str, AgentContext]:
+    if session_target is not None:
+        try:
+            selected = select_session(store, session_target)
+        except SessionStoreError as caught:
+            print(f"peon: could not open saved session: {caught}", file=error)
+            raise
+        return (
+            store,
+            selected.session_id,
+            AgentContext(messages=list(selected.messages)),
+        )
     if continue_session:
         try:
             latest = store.load_latest()
@@ -271,13 +303,94 @@ def _load_starting_session(
         if latest is not None:
             return store, latest.session_id, AgentContext(messages=list(latest.messages))
     try:
-        created = store.create()
+        created = create_session(store, name=session_name)
     except (OSError, SessionStoreError) as caught:
         print(f"peon: could not create saved session: {caught}", file=error)
         fallback = MemorySessionStore()
-        created = fallback.create()
+        created = fallback.create(name=session_name)
         return fallback, created.session_id, AgentContext()
     return store, created.session_id, AgentContext()
+
+
+def _session_label(session: SessionRecord) -> str:
+    name = f" · {session.name}" if session.name else ""
+    timestamp = session.created_at or "unknown time"
+    return f"{session.session_id} · {timestamp}{name}"
+
+
+def _select_session_for_tui(
+    store: SessionStore,
+    *,
+    argument: str,
+    input_fn: InputFunction,
+    output: TextIO,
+    error: TextIO,
+) -> SessionRecord | None:
+    if argument:
+        try:
+            return select_session(store, argument)
+        except SessionStoreError as caught:
+            print(f"peon: could not open saved session: {caught}", file=error)
+            return None
+    try:
+        sessions = store.list_sessions()
+    except (OSError, SessionStoreError) as caught:
+        print(f"peon: could not list saved sessions: {caught}", file=error)
+        return None
+    if not sessions:
+        print("No saved sessions.", file=output)
+        return None
+    print("Saved sessions:", file=output)
+    for index, saved in enumerate(sessions, 1):
+        print(f"  {index}. {_session_label(saved)}", file=output)
+    selection = input_fn("Session (blank to cancel): ").strip()
+    if not selection:
+        print("Session selection cancelled.", file=output)
+        return None
+    if selection.isdigit() and 1 <= int(selection) <= len(sessions):
+        return sessions[int(selection) - 1]
+    try:
+        return select_session(store, selection)
+    except SessionStoreError as caught:
+        print(f"peon: could not open saved session: {caught}", file=error)
+        return None
+
+
+def _open_session(session: TuiSession, selected: SessionRecord) -> TuiSession:
+    return replace(
+        session,
+        context=AgentContext(messages=list(selected.messages)),
+        session_id=selected.session_id,
+        persisted_message_count=len(selected.messages),
+    )
+
+
+def _fork_session(
+    session: TuiSession,
+    *,
+    name: str | None,
+) -> TuiSession:
+    created = create_session(
+        session.session_store,
+        parent_id=session.session_id,
+        name=name or None,
+    )
+    for message in session.context.messages:
+        session.session_store.append(created.session_id, message)
+    return replace(
+        session,
+        context=AgentContext(messages=list(session.context.messages)),
+        session_id=created.session_id,
+        persisted_message_count=len(session.context.messages),
+    )
+
+
+def _print_resume_command(session: TuiSession, *, output: TextIO) -> None:
+    if isinstance(session.session_store, JsonlSessionStore):
+        print(
+            f"Resume with: peon --session {session.session_id}",
+            file=output,
+        )
 
 
 def _configure_session(
@@ -591,6 +704,95 @@ def _configure_ui_settings(
         print(f"Updated {label}. The fullscreen UI applies it immediately.", file=output)
 
 
+def _configure_tool_settings(
+    *,
+    registry: ExtensionRegistry,
+    input_fn: InputFunction,
+    output: TextIO,
+    error: TextIO,
+    config_store: ProviderConfigStore,
+) -> None:
+    ui_config = load_ui_config(config_store)
+    tool_names = tuple(
+        dict.fromkeys(
+            (
+                *ui_config.enabled_tools,
+                *(tool.name for tool in registry.tools),
+            )
+        )
+    )
+    while True:
+        print("Tool availability:", file=output)
+        for index, name in enumerate(tool_names, 1):
+            state = "true" if name in ui_config.enabled_tools else "false"
+            print(f"  {index}. {name}: {state}", file=output)
+        selection = input_fn("Tool (blank to go back): ").strip()
+        if not selection:
+            return
+        if selection.isdigit() and 1 <= int(selection) <= len(tool_names):
+            tool_name = tool_names[int(selection) - 1]
+        else:
+            selected_tool_name = next(
+                (name for name in tool_names if name == selection),
+                None,
+            )
+            if selected_tool_name is None:
+                print("peon: select a tool by number or exact name", file=error)
+                continue
+            tool_name = selected_tool_name
+        current = tool_name in ui_config.enabled_tools
+        value = input_fn(
+            f"Enable {tool_name} [{str(not current).lower()} to toggle]: "
+        ).strip() or str(not current).lower()
+        try:
+            ui_config = update_tool_setting(ui_config, tool_name, value)
+            save_ui_config(config_store, ui_config)
+        except (OSError, ValueError) as caught:
+            print(f"peon: tool setting update failed: {caught}", file=error)
+            continue
+        print(f"Updated {tool_name}: {tool_name in ui_config.enabled_tools}.", file=output)
+
+
+def _configure_general_settings(
+    *,
+    input_fn: InputFunction,
+    output: TextIO,
+    error: TextIO,
+    config_store: ProviderConfigStore,
+) -> None:
+    ui_config = load_ui_config(config_store)
+    settings = tuple(
+        spec for spec in GENERAL_SETTING_SPECS if spec[2] is not None
+    )
+    while True:
+        print("General settings:", file=output)
+        for index, (_key, label, field_name) in enumerate(settings, 1):
+            assert field_name is not None
+            print(
+                f"  {index}. {label}: {str(getattr(ui_config, field_name)).lower()}",
+                file=output,
+            )
+        selection = input_fn("General setting (blank to go back): ").strip()
+        if not selection:
+            return
+        if selection.isdigit() and 1 <= int(selection) <= len(settings):
+            key, label, _field_name = settings[int(selection) - 1]
+        else:
+            match = next((spec for spec in settings if spec[0] == selection), None)
+            if match is None:
+                print("peon: select a general setting by number or exact name", file=error)
+                continue
+            key, label, _field_name = match
+        value = input_fn(f"{label} [true/false]: ").strip()
+        try:
+            ui_config = update_general_setting(ui_config, key, value)
+            save_ui_config(config_store, ui_config)
+        except (OSError, ValueError) as caught:
+            print(f"peon: general setting update failed: {caught}", file=error)
+            continue
+        print(f"Updated {label}: {getattr(ui_config, _field_name)}.", file=output)
+
+
 def _provider_types(configs: tuple[ProviderConfig, ...]) -> tuple[tuple[str, str], ...]:
     available = {config.provider_type or config.name for config in configs}
     return tuple(
@@ -667,7 +869,7 @@ def _configure_provider_profile(
         provider_type = config.provider_type or config.name
         sections: list[tuple[str, str, tuple[ProviderSettingSpec, ...]]] = [
             ("name", "Name", (ProviderSettingSpec("name", "Name", "name", "text"),)),
-            ("config", "Config", CONFIG_SETTING_SPECS),
+            ("config", "Config", provider_config_setting_specs(config)),
         ]
         if provider_type == "custom":
             sections.extend(
@@ -719,6 +921,8 @@ def _configure_settings(
         print("  1. UI", file=output)
         print("  2. Saved provider", file=output)
         print("  3. Add provider", file=output)
+        print("  4. General", file=output)
+        print("  5. Tool availability", file=output)
         selection = input_fn("Section (blank to finish): ").strip()
         if not selection:
             return session
@@ -745,6 +949,23 @@ def _configure_settings(
                 persisted_message_count=session.persisted_message_count,
             )
             session = replacement or session
+            continue
+        if selection in {"4", "general"}:
+            _configure_general_settings(
+                input_fn=input_fn,
+                output=output,
+                error=error,
+                config_store=config_store,
+            )
+            continue
+        if selection in {"5", "tools", "tool-availability"}:
+            _configure_tool_settings(
+                registry=session.registry,
+                input_fn=input_fn,
+                output=output,
+                error=error,
+                config_store=config_store,
+            )
             continue
         if selection not in {"2", "saved-provider"}:
             print("peon: select a settings section", file=error)
@@ -816,13 +1037,19 @@ def _update_active_provider_setting(
         return session
     spec = next(
         spec
-        for spec in (*CONFIG_SETTING_SPECS,)
+        for spec in provider_config_setting_specs(session.config)
         if spec.key == setting
     ) if setting != "name" else ProviderSettingSpec("name", "Name", "name", "text")
     current = getattr(session.config, spec.field_name)
     value = argument.strip()
     if not value and spec.value_kind == "toggle":
         value = str(not bool(current)).lower()
+    elif not value and setting == "reasoning":
+        try:
+            value = cycle_reasoning_effort(session.config)
+        except CommandError as caught:
+            print(f"peon: setting update failed: {caught}", file=error)
+            return session
     elif not value:
         choices = f" ({'|'.join(spec.choices)})" if spec.choices else ""
         prompt = f"{spec.label}{choices}: "
@@ -917,7 +1144,10 @@ def _conversation_loop(
                 task,
                 session.provider,
                 context=session.context,
-                executor=session.registry,
+                executor=filter_tool_executor(
+                    load_ui_config(config_store),
+                    session.registry,
+                ),
                 model=session.config.model,
             )
         except AgentError as caught:
@@ -1066,8 +1296,10 @@ def _handle_command(
         if not session.registry.tools:
             print("No tools registered.", file=output)
         else:
+            enabled = set(load_ui_config(config_store).enabled_tools)
             for tool in session.registry.tools:
-                print(f"- {tool.name}: {tool.description}", file=output)
+                state = "enabled" if tool.name in enabled else "disabled"
+                print(f"- {tool.name} ({state}): {tool.description}", file=output)
         return session, False
     if definition.id == "new":
         try:
@@ -1085,6 +1317,28 @@ def _handle_command(
             persisted_message_count=0,
         )
         print("Conversation cleared.", file=output)
+        return session, False
+    if definition.id == "session":
+        selected_session = _select_session_for_tui(
+            session.session_store,
+            argument=invocation.argument,
+            input_fn=input_fn,
+            output=output,
+            error=error,
+        )
+        if selected_session is None:
+            return session, False
+        session = _open_session(session, selected_session)
+        print(f"Resumed session: {_session_label(selected_session)}", file=output)
+        return session, False
+    if definition.id == "fork":
+        name = invocation.argument or input_fn("Fork name (blank for unnamed): ").strip()
+        try:
+            session = _fork_session(session, name=name or None)
+        except (OSError, SessionStoreError) as caught:
+            print(f"peon: could not fork conversation: {caught}", file=error)
+            return session, False
+        print(f"Forked conversation: {session.session_id}", file=output)
         return session, False
     if definition.id == "provider":
         replacement = _configure_session(

@@ -1,3 +1,5 @@
+import re
+
 from peon.extensions import ExtensionRegistry
 from peon.extensions.filesystem import register_filesystem_tools
 
@@ -92,7 +94,58 @@ def test_workspace_tools_are_registered_with_expected_names(tmp_path) -> None:
     registry = ExtensionRegistry()
     register_filesystem_tools(registry, root=tmp_path)
 
-    assert {tool.name for tool in registry.tools} == {"read", "ls", "find", "grep"}
+    assert [tool.name for tool in registry.tools] == [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "ls",
+        "find",
+        "grep",
+    ]
+
+
+def test_write_and_edit_are_cwd_bound_and_exact(tmp_path) -> None:
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+
+    assert registry.invoke(
+        "write",
+        {"path": "src/note.txt", "content": "one\ntwo\n"},
+    ).startswith("write: wrote")
+    assert (tmp_path / "src" / "note.txt").read_text(encoding="utf-8") == (
+        "one\ntwo\n"
+    )
+    assert registry.invoke(
+        "edit",
+        {"path": "src/note.txt", "old_text": "two", "new_text": "three"},
+    ) == "edit: updated src/note.txt"
+    assert (tmp_path / "src" / "note.txt").read_text(encoding="utf-8") == (
+        "one\nthree\n"
+    )
+    assert registry.invoke(
+        "edit",
+        {"path": "src/note.txt", "old_text": "missing", "new_text": "x"},
+    ).startswith("edit error:")
+    assert registry.invoke(
+        "write",
+        {"path": "../outside.txt", "content": "secret"},
+    ).startswith("write error:")
+
+
+def test_bash_runs_in_workspace_and_bounds_output(tmp_path) -> None:
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path, max_output_chars=20)
+
+    result = registry.invoke("bash", {"command": "cd"})
+
+    assert "bash: exit code 0" in result
+    assert "stdout:" in result
+    assert re.search(r"Took \d+\.\ds", result)
+
+    truncated = registry.invoke("bash", {"command": "echo 1234567890123456789012345"})
+    assert "\n[truncated]\n" in truncated
+    assert re.search(r"Took \d+\.\ds$", truncated)
 
 
 def test_discovery_continuation_keeps_result_offset_after_character_limit(tmp_path) -> None:

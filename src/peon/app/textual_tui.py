@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from dataclasses import dataclass, replace
 from typing import Literal, cast
 
+from rich.color import Color as RichColor
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.segment import Segment
@@ -14,9 +16,9 @@ from rich.style import Style
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.document._document import Selection
-from textual.events import Key, MouseDown
+from textual.events import Key, MouseDown, MouseMove, MouseUp
 from textual.strip import Strip
 from textual.worker import Worker, WorkerState
 from textual.widgets import Input, Static, TextArea
@@ -27,7 +29,6 @@ from peon.ai import ProviderError
 from peon.extensions import ExtensionRegistry, discover_skill_names
 
 from .cli import (
-    CONFIG_SETTING_SPECS,
     CommandError,
     ProviderConfig,
     ProviderFactory,
@@ -36,20 +37,37 @@ from .cli import (
     RESPONSE_FIELD_SETTING_SPECS,
     SavedModel,
     create_provider,
+    cycle_reasoning_effort,
+    provider_config_setting_specs,
+    reasoning_effort_choices,
     saved_model_choices,
     select_saved_model,
     update_provider_setting,
 )
 from .config import (
     UI_SETTING_SPECS,
+    GENERAL_SETTING_SPECS,
+    SHORTCUT_SETTING_SPECS,
     ProviderConfigStore,
+    filter_tool_executor,
     load_ui_config,
     provider_id,
     save_ui_config,
     update_saved_provider,
+    update_general_setting,
+    update_shortcut_setting,
+    update_tool_setting,
     update_ui_setting,
 )
-from .sessions import MemorySessionStore, SessionStore, SessionStoreError
+from .sessions import (
+    JsonlSessionStore,
+    MemorySessionStore,
+    SessionRecord,
+    SessionStore,
+    SessionStoreError,
+    create_session,
+    select_session,
+)
 from .commands import (
     DEFAULT_COMMAND_CATALOG,
     CommandDefinition,
@@ -60,6 +78,7 @@ _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _ESCAPE_REPEAT_DELAY = 0.3
 _ESCAPE_REPEAT_WINDOW = 0.75
 _MARKDOWN_CONSOLE = Console(width=4096)
+_COLLAPSED_TOOL_PREVIEW_LINES = 5
 
 
 def _render_markdown_lines(markdown: str) -> list[Text]:
@@ -82,6 +101,86 @@ def _render_markdown_lines(markdown: str) -> list[Text]:
         rendered_line.end = ""
         rendered_lines.append(rendered_line)
     return rendered_lines or [Text(end="")]
+
+
+def _as_rich_style(value: object) -> Style | None:
+    """Normalize Textual and Rich segment styles for Rich composition."""
+    if value is None:
+        return None
+    if isinstance(value, Style):
+        return value
+    if isinstance(value, RichColor):
+        return Style(color=value)
+    rich_color = getattr(value, "rich_color", None)
+    return Style(color=rich_color) if isinstance(rich_color, RichColor) else None
+
+
+def _format_tool_call(tool_call: ToolCall) -> Text:
+    """Render a compact, selectable tool label with semantic styles."""
+    rendered = Text(end="")
+    if tool_call.name == "bash":
+        command = tool_call.arguments.get("command")
+        rendered.append("$ ", style=Style(color="#f0f0f0", bold=True))
+        rendered.append(
+            str(command) if command else "...",
+            style=Style(color="#f0f0f0", bold=True),
+        )
+        timeout = tool_call.arguments.get("timeout")
+        if timeout is not None:
+            rendered.append(f" (timeout {timeout}s)", style=Style(color="#808080"))
+        return rendered
+    rendered.append(
+        tool_call.name,
+        style=Style(color="#f0f0f0", bold=True),
+    )
+    if not tool_call.arguments:
+        return rendered
+
+    arguments = dict(tool_call.arguments)
+    path_value = arguments.pop("path", arguments.pop("file_path", None))
+    if isinstance(path_value, str) and path_value:
+        rendered.append(" ")
+        rendered.append(
+            path_value,
+            style=Style(
+                color="#8bd5ff",
+                link=Path(path_value).expanduser().resolve().as_uri(),
+            ),
+        )
+
+    parameters: list[tuple[str, str]] = []
+    for name in sorted(arguments):
+        if name in {"detail", "details"}:
+            continue
+        try:
+            value = json.dumps(
+                arguments[name],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError):
+            value = str(arguments[name])
+        parameters.append((name, value))
+    if parameters:
+        rendered.append(" " if path_value else ": ")
+        for index, (name, value) in enumerate(parameters):
+            if index:
+                rendered.append(" ")
+            rendered.append(
+                f"{name}={value}",
+                style=Style(color="#d6b37a"),
+            )
+    return rendered
+
+
+@dataclass(frozen=True, slots=True)
+class _TranscriptBlock:
+    role: str
+    text: str
+    call_text: Text | None = None
+    tool_call_id: str | None = None
+
+
 _PROVIDER_OPTIONS = (
     ("openai-compatible", "OpenAI-compatible"),
     ("github-copilot", "GitHub Copilot"),
@@ -122,6 +221,10 @@ SetupStep = Literal[
     "settings-request",
     "settings-response",
     "settings-ui",
+    "settings-general",
+    "settings-shortcuts",
+    "settings-tools",
+    "session",
     "setting-value",
     "base-url",
     "api-key",
@@ -146,9 +249,113 @@ class _ChoiceState:
 class PeonInput(Input):
     """Composer input with live slash-command hints and Escape clearing."""
 
+    COMPONENT_CLASSES = Input.COMPONENT_CLASSES | {"input--selection"}
+    selection_start = 0
+    _selecting = False
+
+    DEFAULT_CSS = """
+    PeonInput > .input--selection {
+        background: $input-selection-background;
+    }
+    """
+
+    @property
+    def selected_text(self) -> str:
+        start, end = sorted((self.selection_start, self.cursor_position))
+        return self.value[start:end]
+
+    def _watch_cursor_position(self) -> None:
+        super()._watch_cursor_position()
+        if not self._selecting:
+            self.selection_start = self.cursor_position
+
+    def select_range(self, start: int, end: int) -> None:
+        self._selecting = True
+        try:
+            self.selection_start = max(0, min(start, len(self.value)))
+            self.cursor_position = max(0, min(end, len(self.value)))
+        finally:
+            self._selecting = False
+        self.refresh()
+
+    @property
+    def _value(self) -> Text:
+        value = super()._value
+        if not self.password and self.selected_text:
+            start, end = sorted((self.selection_start, self.cursor_position))
+            value.stylize(
+                self.get_component_rich_style("input--selection"),
+                start,
+                end,
+            )
+        return value
+
+    def _event_index(self, event: MouseDown | MouseMove) -> int:
+        offset = event.get_content_offset(self)
+        if offset is None:
+            return self.cursor_position
+        target_cell = max(0, offset.x + self.view_position)
+        for index in range(len(self.value)):
+            if self._position_to_cell(index + 1) > target_cell:
+                return index
+        return len(self.value)
+
+    async def _on_mouse_down(self, event: MouseDown) -> None:
+        if event.button == 3:
+            if self.selected_text:
+                cast(TextualPeonApp, self.app).copy_to_clipboard(self.selected_text)
+            event.stop()
+            event.prevent_default()
+            return
+        self.focus()
+        self.cursor_position = self._event_index(event)
+        self.selection_start = self.cursor_position
+        self._selecting = True
+        self.capture_mouse()
+        await super()._on_mouse_down(event)
+
+    async def _on_mouse_move(self, event: MouseMove) -> None:
+        if self._selecting:
+            self.cursor_position = self._event_index(event)
+            self.refresh()
+
+    async def _on_mouse_up(self, event: MouseUp) -> None:
+        if self._selecting:
+            self._selecting = False
+            self.release_mouse()
+        await super()._on_mouse_up(event)
+
+    def insert_text_at_cursor(self, text: str) -> None:
+        if self.selected_text:
+            start, end = sorted((self.selection_start, self.cursor_position))
+            self.value = self.value[:start] + self.value[end:]
+            self.cursor_position = start
+        super().insert_text_at_cursor(text)
+        self.selection_start = self.cursor_position
+
+    def clear(self) -> None:
+        super().clear()
+        self.selection_start = 0
+
     def on_key(self, event: Key) -> None:
         app = cast(TextualPeonApp, self.app)
-        if event.key == "ctrl+c":
+        if event.key == "escape":
+            event.stop()
+            event.prevent_default()
+            app.action_clear_prompt()
+        elif app.shortcut_matches(event.key, "thinking"):
+            event.stop()
+            event.prevent_default()
+            app.action_toggle_thinking()
+        elif app.shortcut_matches(event.key, "reasoning"):
+            event.stop()
+            event.prevent_default()
+            app.action_cycle_reasoning()
+        elif app.shortcut_matches(event.key, "tools"):
+            event.stop()
+            event.prevent_default()
+            app.action_toggle_tools()
+        elif event.key == "ctrl+c":
             event.stop()
             event.prevent_default()
             app.action_confirm_quit()
@@ -184,7 +391,23 @@ class ChoiceSearchInput(Input):
 
     def on_key(self, event: Key) -> None:
         app = cast(TextualPeonApp, self.app)
-        if event.key in {"up", "down"}:
+        if event.key == "escape":
+            event.stop()
+            event.prevent_default()
+            app.action_clear_prompt()
+        elif app.shortcut_matches(event.key, "thinking"):
+            event.stop()
+            event.prevent_default()
+            app.action_toggle_thinking()
+        elif app.shortcut_matches(event.key, "reasoning"):
+            event.stop()
+            event.prevent_default()
+            app.action_cycle_reasoning()
+        elif app.shortcut_matches(event.key, "tools"):
+            event.stop()
+            event.prevent_default()
+            app.action_toggle_tools()
+        elif event.key in {"up", "down"}:
             app.move_choice_selection(1 if event.key == "down" else -1)
             event.stop()
             event.prevent_default()
@@ -205,6 +428,9 @@ class ChatMessage(TextArea):
     USER_FOREGROUND = "#c4c4c4"
     THINKING_FOREGROUND = "#808080"
     SUCCESS_FOREGROUND = "#8bd5ff"
+    TOOL_FOREGROUND = "#d6b37a"
+    TOOL_BACKGROUND = "#283228"
+    TOOL_OUTPUT_FOREGROUND = "#808080"
 
     def __init__(
         self,
@@ -219,6 +445,9 @@ class ChatMessage(TextArea):
         user_message_background: str = USER_BACKGROUND,
         assistant_message_color: str = "#e0e0e0",
         text_format: str = "normal",
+        tool_message_background: str = TOOL_BACKGROUND,
+        tool_output_color: str = TOOL_OUTPUT_FOREGROUND,
+        render_tool_markdown: bool = False,
     ) -> None:
         super().__init__(
             "",
@@ -229,6 +458,9 @@ class ChatMessage(TextArea):
         )
         self._line_roles: list[str] = []
         self._styled_lines: list[Text] = []
+        self._blocks: list[_TranscriptBlock] = []
+        self.thinking_visible = True
+        self.tools_expanded = False
         self._snapping_selection = False
         self.user_top_blank_lines = max(0, user_top_blank_lines)
         self.user_bottom_blank_lines = max(0, user_bottom_blank_lines)
@@ -237,36 +469,166 @@ class ChatMessage(TextArea):
         self.user_message_background = user_message_background
         self.assistant_message_color = assistant_message_color
         self.text_format = text_format
+        self.tool_message_background = tool_message_background
+        self.tool_output_color = tool_output_color
+        self.render_tool_markdown = render_tool_markdown
         self.display = False
         if text:
             self.append_message(text, role=role)
 
-    def append_message(self, text: str, *, role: str) -> None:
-        styled_lines = (
-            [Text(line, end="") for line in text.split("\n") or [""]]
-            if role == "user"
-            else _render_markdown_lines(text)
+    def append_message(
+        self,
+        text: str | Text,
+        *,
+        role: str,
+        tool_call_id: str | None = None,
+    ) -> None:
+        if role == "tool-call" and isinstance(text, Text):
+            self._blocks.append(
+                _TranscriptBlock(
+                    role=role,
+                    text="",
+                    call_text=text.copy(),
+                    tool_call_id=tool_call_id,
+                )
+            )
+            self._refresh_blocks()
+            return
+        plain_text = text.plain if isinstance(text, Text) else text
+        if role == "tool" and self._blocks:
+            previous = self._blocks[-1]
+            if previous.role == "tool-call" and (
+                previous.tool_call_id is None
+                or tool_call_id is None
+                or previous.tool_call_id == tool_call_id
+            ):
+                self._blocks[-1] = _TranscriptBlock(
+                    role="tool-message",
+                    text=plain_text,
+                    call_text=previous.call_text or Text(previous.text, end=""),
+                    tool_call_id=tool_call_id or previous.tool_call_id,
+                )
+                self._refresh_blocks()
+                return
+        self._blocks.append(
+            _TranscriptBlock(role=role, text=plain_text, tool_call_id=tool_call_id)
         )
-        if role == "user":
-            styled_lines = (
-                [Text("", end="")] * self.user_top_blank_lines
-                + styled_lines
-                + [Text("", end="")] * self.user_bottom_blank_lines
-            )
-        elif role == "assistant":
-            styled_lines = (
-                [Text("", end="")] * self.user_top_blank_lines
-                + styled_lines
-                + [Text("", end="")] * self.user_bottom_blank_lines
-            )
-        self._styled_lines.extend(styled_lines)
-        self._line_roles.extend([role] * len(styled_lines))
-        self.text = "\n".join(line.plain for line in self._styled_lines)
-        self.display = True
+        self._refresh_blocks()
+
+    def _refresh_blocks(self) -> None:
+        styled_lines: list[Text] = []
+        line_roles: list[str] = []
+        has_rendered_block = False
+        for block in self._blocks:
+            role = block.role
+            text = block.text
+            if role == "thinking" and not self.thinking_visible:
+                continue
+            if role in {"tool-message", "tool-call", "tool"}:
+                call_text = block.call_text
+                if role == "tool-call":
+                    call_text = call_text or Text(text, end="")
+                is_bash = bool(call_text and call_text.plain.startswith("$ "))
+                displayed_text = text if self.tools_expanded else ""
+                output_lines = []
+                collapsed_hint = False
+                if not self.tools_expanded and is_bash and text:
+                    all_lines = text.split("\n")
+                    output_lines = [
+                        Text(line, end="")
+                        for line in all_lines[-_COLLAPSED_TOOL_PREVIEW_LINES:]
+                    ]
+                    hidden_lines = len(all_lines) - len(output_lines)
+                    if hidden_lines:
+                        hint = Text(end="")
+                        hint.append(
+                            f"... ({hidden_lines} earlier lines, ",
+                            style=Style(color="#707070"),
+                        )
+                        hint.append(
+                            "ctrl+o",
+                            style=Style(color="#a0a0a0", bold=True),
+                        )
+                        hint.append(
+                            " to expand)",
+                            style=Style(color="#707070"),
+                        )
+                        output_lines.insert(
+                            0,
+                            hint,
+                        )
+                        collapsed_hint = True
+                if displayed_text:
+                    output_lines = (
+                        _render_markdown_lines(displayed_text)
+                        if role in {"tool-message", "tool"}
+                        and self.render_tool_markdown
+                        and self.tools_expanded
+                        else [
+                            Text(line, end="")
+                            for line in displayed_text.split("\n")
+                        ]
+                    )
+                if role == "tool-call":
+                    output_lines = []
+                block_lines = [Text("", end="")]
+                if call_text:
+                    block_lines.append(call_text.copy())
+                block_lines.extend(output_lines)
+                block_lines.append(Text("", end=""))
+                block_roles = (
+                    ["tool-message-padding"]
+                    + (["tool-message-call"] if call_text else [])
+                    + (["tool-message-hint"] if collapsed_hint else [])
+                    + ["tool-message-output"]
+                    * (len(output_lines) - int(collapsed_hint))
+                    + ["tool-message-padding"]
+                )
+            else:
+                block_lines = (
+                    [Text(line, end="") for line in text.split("\n") or [""]]
+                    if role == "user"
+                    else _render_markdown_lines(text)
+                )
+                block_roles = [role] * len(block_lines)
+            if role in {"user", "assistant"}:
+                block_lines = (
+                    [Text("", end="")] * self.user_top_blank_lines
+                    + block_lines
+                    + [Text("", end="")] * self.user_bottom_blank_lines
+                )
+                block_roles = (
+                    [role] * self.user_top_blank_lines
+                    + block_roles
+                    + [role] * self.user_bottom_blank_lines
+                )
+            if has_rendered_block:
+                styled_lines.append(Text("", end=""))
+                line_roles.append("spacer")
+            styled_lines.extend(block_lines)
+            line_roles.extend(block_roles)
+            has_rendered_block = True
+        self._styled_lines = styled_lines
+        self._line_roles = line_roles
+        self.text = "\n".join(line.plain for line in styled_lines)
+        self.display = bool(styled_lines)
         self.scroll_end(animate=False)
+
+    def set_thinking_visible(self, visible: bool) -> None:
+        self.thinking_visible = visible
+        self._refresh_blocks()
+
+    def set_tools_expanded(self, expanded: bool) -> None:
+        self.tools_expanded = expanded
+        self._refresh_blocks()
+
+    def set_tool_markdown(self, enabled: bool) -> None:
+        self.render_tool_markdown = enabled
+        self._refresh_blocks()
 
     def clear_transcript(self) -> None:
         self.text = ""
+        self._blocks = []
         self._line_roles = []
         self._styled_lines = []
         self.selection = Selection.cursor((0, 0))
@@ -289,6 +651,21 @@ class ChatMessage(TextArea):
             line.stylize(Style(color=self.assistant_message_color))
         elif role in {"system", "thinking"}:
             line.stylize(Style(color=self.THINKING_FOREGROUND, italic=True))
+        elif role in {
+            "tool-message-call",
+            "tool-message-output",
+            "tool-message-hint",
+            "tool-message-padding",
+        }:
+            line.stylize(
+                Style(
+                    bgcolor=self.tool_message_background,
+                )
+            )
+            if role == "tool-message-output":
+                line.stylize(Style(color=self.tool_output_color))
+            elif role == "tool-message-padding":
+                line.stylize(Style(color=self.TOOL_FOREGROUND))
         elif role == "success":
             line.stylize(Style(color=self.SUCCESS_FOREGROUND))
         if role in {"user", "assistant"} and self.text_format != "normal":
@@ -302,6 +679,13 @@ class ChatMessage(TextArea):
 
     def render_line(self, y: int) -> Strip:
         strip = super().render_line(y)
+        strip = Strip(
+            (
+                Segment(segment.text, _as_rich_style(segment.style), segment.control)
+                for segment in strip
+            ),
+            cell_length=strip.cell_length,
+        )
         if not self.text:
             return Strip.blank(
                 strip.cell_length,
@@ -322,23 +706,77 @@ class ChatMessage(TextArea):
             role_style = Style(bgcolor=self.styles.background.rich_color)
         elif role == "success":
             role_style = Style(color=self.SUCCESS_FOREGROUND)
-        if role_style is not None:
-            strip = Strip(
-                Segment.apply_style(strip, post_style=role_style),
-                cell_length=strip.cell_length,
+        elif role in {
+            "tool-message-call",
+            "tool-message-output",
+            "tool-message-hint",
+            "tool-message-padding",
+        }:
+            role_style = Style(
+                bgcolor=self.tool_message_background,
             )
-        if role in {"user", "assistant"} and self.message_left_padding:
-            padding = min(self.message_left_padding, strip.cell_length)
+        content_width = strip.cell_length
+        for segment in reversed(list(strip)):
+            if not segment.text:
+                continue
+            trimmed = segment.text.rstrip(" ")
+            if trimmed:
+                content_width -= segment.cell_length - len(trimmed)
+                break
+            content_width -= segment.cell_length
+        content_width = max(0, content_width)
+        content = strip.crop(0, content_width)
+        if role_style is not None:
+            content = Strip(
+                Segment.apply_style(content, post_style=role_style),
+                cell_length=content.cell_length,
+            )
+        padded_roles = {
+            "user",
+            "assistant",
+            "system",
+            "thinking",
+            "success",
+            "tool-message-call",
+            "tool-message-output",
+            "tool-message-hint",
+            "tool-message-padding",
+        }
+        if role in padded_roles and self.message_left_padding:
+            padding = self.message_left_padding
             first_style = next(
-                (segment.style for segment in strip if segment.cell_length),
+                (segment.style for segment in content if segment.cell_length),
                 None,
+            )
+            prefix = Strip(
+                [Segment(" " * padding, first_style or role_style)],
+                padding,
+            )
+            content = Strip.join([prefix, content])
+        if content.cell_length < strip.cell_length:
+            fill_style = (
+                role_style
+                if role
+                in {
+                    "user",
+                    "tool-message-call",
+                    "tool-message-output",
+                    "tool-message-hint",
+                    "tool-message-padding",
+                }
+                else Style(bgcolor=self.styles.background.rich_color)
             )
             strip = Strip.join(
                 [
-                    Strip([Segment(" " * padding, first_style)], padding),
-                    strip.crop(0, strip.cell_length - padding),
+                    content,
+                    Strip.blank(
+                        strip.cell_length - content.cell_length,
+                        fill_style,
+                    ),
                 ]
             )
+        else:
+            strip = content
         return strip
 
     def _snap_selection_to_lines(self, selection: Selection) -> Selection:
@@ -373,6 +811,31 @@ class ChatMessage(TextArea):
             cast(TextualPeonApp, self.app).copy_to_clipboard(text)
         event.stop()
         event.prevent_default()
+
+    def on_key(self, event: Key) -> None:
+        app = cast(TextualPeonApp, self.app)
+        if event.key == "escape":
+            event.stop()
+            event.prevent_default()
+            app.action_clear_prompt()
+        elif app.shortcut_matches(event.key, "thinking"):
+            event.stop()
+            event.prevent_default()
+            app.action_toggle_thinking()
+        elif app.shortcut_matches(event.key, "reasoning"):
+            event.stop()
+            event.prevent_default()
+            app.action_cycle_reasoning()
+        elif app.shortcut_matches(event.key, "tools"):
+            event.stop()
+            event.prevent_default()
+            app.action_toggle_tools()
+        elif event.character and event.character.isprintable():
+            prompt = app.query_one("#prompt", PeonInput)
+            prompt.focus()
+            prompt.insert_text_at_cursor(event.character)
+            event.stop()
+            event.prevent_default()
 
 
 class ProcessingStatus(Static):
@@ -490,8 +953,24 @@ class TextualPeonApp(App[int]):
     #status {
         height: 1;
         color: $text-muted;
+        padding: 0 2;
+    }
+
+    #status-details {
+        height: 1;
         background: $panel;
         padding: 0 2;
+    }
+
+    #status-context {
+        width: 1fr;
+        color: $text-muted;
+    }
+
+    #status-provider {
+        width: 1fr;
+        color: $text-muted;
+        text-align: right;
     }
 
     #processing {
@@ -504,8 +983,8 @@ class TextualPeonApp(App[int]):
 
     BINDINGS = [
         Binding("ctrl+c", "confirm_quit", "", show=False, priority=True),
+        Binding("escape", "clear_prompt", "", show=False, priority=True),
         ("ctrl+d", "quit", "Quit"),
-        ("escape", "clear_prompt", "Clear"),
     ]
 
     def __init__(
@@ -517,6 +996,8 @@ class TextualPeonApp(App[int]):
         session_store: SessionStore | None = None,
         continue_session: bool = False,
         no_session: bool = False,
+        session_target: str | None = None,
+        session_name: str | None = None,
         processing_status_text: str | None = None,
         user_top_blank_lines: int = 1,
         user_bottom_blank_lines: int = 1,
@@ -533,6 +1014,8 @@ class TextualPeonApp(App[int]):
         if no_session:
             self.session_store = MemorySessionStore()
         self.continue_session = continue_session
+        self.session_target = session_target
+        self.session_name = session_name
         self.session_id = ""
         self.persisted_message_count = 0
         self.skill_names = tuple(
@@ -541,7 +1024,7 @@ class TextualPeonApp(App[int]):
         self.setup_step: SetupStep | None = None
         self.pending_config: ProviderConfig | None = None
         self.pending_setting_spec: ProviderSettingSpec | None = None
-        self.pending_ui_setting: tuple[str, str, str] | None = None
+        self.pending_ui_setting: tuple[str, str, str | None] | None = None
         self.settings_return_kind: SetupStep | None = None
         self.pending_models: tuple[str, ...] = ()
         self.choice_values: list[object] = []
@@ -561,6 +1044,7 @@ class TextualPeonApp(App[int]):
         self.quit_confirmation_label = ""
         self.quit_confirmation_password = False
         self.quit_confirmation_value = ""
+        self.tools_expanded = False
         self.processing_status_text = (
             processing_status_text or self.PROCESSING_STATUS_TEXT
         )
@@ -606,6 +1090,9 @@ class TextualPeonApp(App[int]):
                 user_message_color=self.ui_config.user_message_color,
                 user_message_background=self.ui_config.user_message_background,
                 assistant_message_color=self.ui_config.assistant_message_color,
+                tool_message_background=self.ui_config.tool_message_background,
+                tool_output_color=self.ui_config.tool_output_color,
+                render_tool_markdown=self.ui_config.render_tool_markdown,
                 text_format=self.ui_config.text_format,
             )
         yield ChoiceSearchInput(placeholder="> ", id="choice-search")
@@ -621,6 +1108,9 @@ class TextualPeonApp(App[int]):
                 id="prompt",
             )
         yield Static("", id="status")
+        with Horizontal(id="status-details"):
+            yield Static("", id="status-context")
+            yield Static("", id="status-provider")
 
     def on_mount(self) -> None:
         self.title = "Peon"
@@ -633,31 +1123,69 @@ class TextualPeonApp(App[int]):
             self._begin_provider_setup()
 
     def _restore_conversation(self) -> None:
+        latest: SessionRecord | None
         try:
-            latest = (
-                self.session_store.load_latest()
-                if self.continue_session
-                else None
-            )
-            if latest is None:
-                latest = self.session_store.create()
+            if self.session_target is not None:
+                latest = select_session(self.session_store, self.session_target)
+            else:
+                latest = (
+                    self.session_store.load_latest()
+                    if self.continue_session
+                    else None
+                )
+                if latest is None:
+                    latest = create_session(
+                        self.session_store,
+                        name=self.session_name,
+                    )
             self.session_id = latest.session_id
             self.context = AgentContext(messages=list(latest.messages))
             self.persisted_message_count = len(self.context.messages)
         except (OSError, SessionStoreError) as caught:
-            self._write(f"Could not resume saved session: {caught}")
+            self._write(f"Could not open saved session: {caught}")
+            if self.session_target is not None:
+                self.exit(1)
+                return
             fallback = MemorySessionStore()
-            latest = fallback.create()
+            latest = fallback.create(name=self.session_name)
             self.session_store = fallback
             self.session_id = latest.session_id
             self.context = AgentContext()
             self.persisted_message_count = 0
         transcript = self.query_one("#transcript", ChatMessage)
         for message in self.context.messages:
-            if message.role == "user":
-                transcript.append_message(message.content, role="user")
-            elif message.role == "assistant" and message.content:
-                transcript.append_message(message.content, role="assistant")
+            self._append_context_message(message)
+
+    def _append_context_message(self, message: object) -> None:
+        if not hasattr(message, "role"):
+            return
+        typed_message = cast(object, message)
+        role = getattr(typed_message, "role")
+        transcript = self.query_one("#transcript", ChatMessage)
+        if role == "user":
+            transcript.append_message(getattr(typed_message, "content"), role="user")
+        elif role == "assistant":
+            thinking = getattr(typed_message, "thinking", None)
+            if thinking:
+                transcript.append_message(thinking, role="thinking")
+            tool_call = getattr(typed_message, "tool_call", None)
+            if tool_call is not None:
+                transcript.append_message(
+                    _format_tool_call(tool_call),
+                    role="tool-call",
+                    tool_call_id=tool_call.call_id,
+                )
+            elif getattr(typed_message, "content"):
+                transcript.append_message(
+                    getattr(typed_message, "content"),
+                    role="assistant",
+                )
+        elif role == "tool":
+            transcript.append_message(
+                getattr(typed_message, "content"),
+                role="tool",
+                tool_call_id=getattr(typed_message, "tool_call_id", None),
+            )
 
     def _apply_ui_config(self) -> None:
         self.screen.styles.background = self.ui_config.background_color
@@ -671,10 +1199,43 @@ class TextualPeonApp(App[int]):
         transcript.user_message_color = self.ui_config.user_message_color
         transcript.user_message_background = self.ui_config.user_message_background
         transcript.assistant_message_color = self.ui_config.assistant_message_color
+        transcript.tool_message_background = self.ui_config.tool_message_background
+        transcript.tool_output_color = self.ui_config.tool_output_color
+        transcript.set_tool_markdown(self.ui_config.render_tool_markdown)
         transcript.text_format = self.ui_config.text_format
+        transcript.set_thinking_visible(not self.ui_config.hide_thinking)
+        transcript.set_tools_expanded(self.tools_expanded)
         transcript.refresh()
 
+    def shortcut_matches(self, key: str, setting: str) -> bool:
+        field_name = {
+            "reasoning": "reasoning_shortcut",
+            "thinking": "thinking_shortcut",
+            "tools": "tools_shortcut",
+        }[setting]
+        return key.casefold() == str(getattr(self.ui_config, field_name)).casefold()
+
     def on_key(self, event: Key) -> None:
+        if event.key == "escape":
+            self.action_clear_prompt()
+            event.stop()
+            event.prevent_default()
+            return
+        if self.shortcut_matches(event.key, "thinking"):
+            self.action_toggle_thinking()
+            event.stop()
+            event.prevent_default()
+            return
+        if self.shortcut_matches(event.key, "reasoning"):
+            self.action_cycle_reasoning()
+            event.stop()
+            event.prevent_default()
+            return
+        if self.shortcut_matches(event.key, "tools"):
+            self.action_toggle_tools()
+            event.stop()
+            event.prevent_default()
+            return
         if event.key == "ctrl+c":
             self._handle_ctrl_c(event)
             return
@@ -717,7 +1278,10 @@ class TextualPeonApp(App[int]):
         if isinstance(self.focused, PeonInput):
             event.stop()
             event.prevent_default()
-            self.action_confirm_quit()
+            if self.focused.selected_text:
+                self.copy_to_clipboard(self.focused.selected_text)
+            else:
+                self.action_confirm_quit()
 
     def _is_non_input_focus(self) -> bool:
         return self.focused is not None and not isinstance(
@@ -973,12 +1537,53 @@ class TextualPeonApp(App[int]):
         self._last_escape_at = None
         self.query_one("#prompt", PeonInput).action_clear()
 
+    def action_cycle_reasoning(self) -> None:
+        if self.config is not None:
+            self._cycle_active_reasoning()
+
+    def action_toggle_thinking(self) -> None:
+        self.ui_config = replace(
+            self.ui_config,
+            hide_thinking=not self.ui_config.hide_thinking,
+        )
+        try:
+            save_ui_config(self.config_store, self.ui_config)
+        except OSError as caught:
+            self._write(f"Thinking setting could not be saved: {caught}")
+        transcript = self.query_one("#transcript", ChatMessage)
+        transcript.set_thinking_visible(not self.ui_config.hide_thinking)
+        self._set_status()
+
+    def action_toggle_tools(self) -> None:
+        self.tools_expanded = not self.tools_expanded
+        self.query_one("#transcript", ChatMessage).set_tools_expanded(
+            self.tools_expanded
+        )
+
+    def _append_runtime_message(self, message: object) -> None:
+        if getattr(message, "role", None) == "user":
+            return
+        self._append_context_message(message)
+        self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
+
     def action_confirm_quit(self) -> None:
         if isinstance(self.focused, ChatMessage) and self.focused.selected_text:
             self.copy_to_clipboard(self.focused.selected_text)
             return
         if isinstance(self.focused, PeonInput):
-            self._begin_quit_confirmation()
+            if self.focused.selected_text:
+                self.copy_to_clipboard(self.focused.selected_text)
+            else:
+                self._begin_quit_confirmation()
+
+    def _quit_with_resume(self) -> None:
+        resume_command = self._resume_command()
+        if resume_command is not None:
+            self._write(resume_command)
+        self.exit(0)
+
+    async def action_quit(self) -> None:
+        self._quit_with_resume()
 
     def _write(self, text: str, *, role: str = "system") -> None:
         transcript = self.query_one("#transcript", ChatMessage)
@@ -988,7 +1593,10 @@ class TextualPeonApp(App[int]):
 
     def _set_processing(self, active: bool) -> None:
         self.query_one("#processing", ProcessingStatus).display = active
-        self.query_one("#prompt", PeonInput).disabled = active
+        prompt = self.query_one("#prompt", PeonInput)
+        prompt.disabled = active
+        if not active:
+            prompt.focus()
 
     def _run_task(self, task: str) -> str | ToolCall:
         assert self.provider is not None
@@ -998,8 +1606,12 @@ class TextualPeonApp(App[int]):
                 task,
                 self.provider,
                 context=self.context,
-                executor=self.registry,
+                executor=filter_tool_executor(self.ui_config, self.registry),
                 model=self.config.model,
+                on_message=lambda message: self.call_from_thread(
+                    self._append_runtime_message,
+                    message,
+                ),
             )
         finally:
             self._persist_new_messages()
@@ -1049,8 +1661,6 @@ class TextualPeonApp(App[int]):
                     f"provider requested unhandled tool '{result.name}'",
                     role="system",
                 )
-            elif result is not None:
-                self._write(result, role="assistant")
         elif event.state == WorkerState.ERROR:
             error = event.worker.error
             self._write(str(error or "task failed"), role="system")
@@ -1060,13 +1670,19 @@ class TextualPeonApp(App[int]):
 
     def _set_status(self) -> None:
         if self.config is None:
-            status = f"{Path.cwd()}  ·  setup required"
+            context_status = "setup required"
+            provider_status = ""
         else:
-            status = (
-                f"{Path.cwd()}  ·  {self.config.name}  ·  {self.config.model or 'no model'}"
-                f"  ·  context {len(self.context.messages)}  ·  effort n/a  ·  tokens n/a"
+            context_status = (
+                f"context {len(self.context.messages)}  ·  "
+                f"effort {self.config.reasoning_effort or 'none'}  ·  tokens n/a"
             )
-        self.query_one("#status", Static).update(status)
+            provider_status = (
+                f"{self.config.name}  ·  {self.config.model or 'no model'}"
+            )
+        self.query_one("#status", Static).update(str(Path.cwd()))
+        self.query_one("#status-context", Static).update(context_status)
+        self.query_one("#status-provider", Static).update(provider_status)
 
     def _show_choices(
         self,
@@ -1218,6 +1834,8 @@ class TextualPeonApp(App[int]):
             self._start_provider_inputs(str(value))
         elif kind == "saved-provider":
             self._activate(value)  # type: ignore[arg-type]
+        elif kind == "session":
+            self._open_selected_session(cast(SessionRecord, value))
         elif kind == "logout-provider":
             self._remove_provider(value)  # type: ignore[arg-type]
         elif kind == "model":
@@ -1231,6 +1849,12 @@ class TextualPeonApp(App[int]):
             self._show_settings_profile()
         elif kind == "settings-profile":
             self._select_settings_profile(str(value))
+        elif kind == "settings-general":
+            self._select_general_setting(cast(tuple[str, str, str | None], value))
+        elif kind == "settings-shortcuts":
+            self._select_shortcut_setting(cast(tuple[str, str, str], value))
+        elif kind == "settings-tools":
+            self._select_tool_setting(str(value))
         elif kind in {"settings-config", "settings-request", "settings-response"}:
             self._select_provider_setting(cast(ProviderSettingSpec, value), kind)
         elif kind == "settings-ui":
@@ -1244,6 +1868,9 @@ class TextualPeonApp(App[int]):
                 ("ui", "1. UI"),
                 ("saved-provider", "2. Saved provider"),
                 ("add-provider", "3. Add provider"),
+                ("general", "4. General"),
+                ("shortcuts", "5. Shortcuts"),
+                ("tools", "6. Tool availability"),
             ],
         )
 
@@ -1252,6 +1879,12 @@ class TextualPeonApp(App[int]):
             self._show_ui_settings()
         elif section == "add-provider":
             self._begin_provider_setup()
+        elif section == "general":
+            self._show_general_settings()
+        elif section == "shortcuts":
+            self._show_shortcut_settings()
+        elif section == "tools":
+            self._show_tool_settings()
         else:
             configs = self.config_store.load_all()
             available = {config.provider_type or config.name for config in configs}
@@ -1324,7 +1957,8 @@ class TextualPeonApp(App[int]):
 
     def _settings_specs(self, kind: SetupStep) -> tuple[ProviderSettingSpec, ...]:
         if kind == "settings-config":
-            return CONFIG_SETTING_SPECS
+            config = self.pending_config or self.config
+            return provider_config_setting_specs(config) if config else ()
         if kind == "settings-request":
             return REQUEST_FIELD_SETTING_SPECS
         return RESPONSE_FIELD_SETTING_SPECS
@@ -1418,6 +2052,164 @@ class TextualPeonApp(App[int]):
             self.choice_selected_index = focused_index
             self._render_choices()
 
+    def _show_general_settings(self, *, focus_key: str | None = None) -> None:
+        self._show_choices(
+            "settings-general",
+            "General settings:",
+            [
+                (
+                    spec,
+                    f"{index}. {label:<28} "
+                    + (
+                        "[reserved]"
+                        if field_name is None
+                        else _format_setting_value(getattr(self.ui_config, field_name))
+                    ),
+                )
+                for index, spec in enumerate(GENERAL_SETTING_SPECS, 1)
+                for _key, label, field_name in (spec,)
+            ],
+        )
+        if focus_key is not None:
+            self.choice_selected_index = next(
+                (
+                    index
+                    for index, spec in enumerate(GENERAL_SETTING_SPECS)
+                    if spec[0] == focus_key
+                ),
+                0,
+            )
+            self._render_choices()
+
+    def _show_shortcut_settings(self, *, focus_key: str | None = None) -> None:
+        self._show_choices(
+            "settings-shortcuts",
+            "Shortcut settings:",
+            [
+                (
+                    spec,
+                    f"{index}. {label:<28} {getattr(self.ui_config, field_name)}",
+                )
+                for index, spec in enumerate(SHORTCUT_SETTING_SPECS, 1)
+                for _key, label, field_name in (spec,)
+            ],
+        )
+        if focus_key is not None:
+            self.choice_selected_index = next(
+                (
+                    index
+                    for index, spec in enumerate(SHORTCUT_SETTING_SPECS)
+                    if spec[0] == focus_key
+                ),
+                0,
+            )
+            self._render_choices()
+
+    def _show_tool_settings(self, *, focus_name: str | None = None) -> None:
+        tool_names = tuple(
+            dict.fromkeys(
+                (
+                    *self.ui_config.enabled_tools,
+                    *(tool.name for tool in self.registry.tools),
+                )
+            )
+        )
+        enabled = set(self.ui_config.enabled_tools)
+        self._show_choices(
+            "settings-tools",
+            "Tool availability:",
+            [
+                (
+                    name,
+                    f"{index}. {name:<24} {'true' if name in enabled else 'false'}",
+                )
+                for index, name in enumerate(tool_names, 1)
+            ],
+        )
+        if focus_name is not None:
+            self.choice_selected_index = next(
+                (index for index, name in enumerate(tool_names) if name == focus_name),
+                0,
+            )
+            self._render_choices()
+
+    def _select_tool_setting(self, tool_name: str) -> None:
+        enabled = tool_name in self.ui_config.enabled_tools
+        try:
+            self.ui_config = update_tool_setting(
+                self.ui_config,
+                tool_name,
+                str(not enabled).lower(),
+            )
+            save_ui_config(self.config_store, self.ui_config)
+        except (OSError, ValueError) as caught:
+            self._write(f"Tool setting update failed: {caught}")
+        self._show_tool_settings(focus_name=tool_name)
+
+    def _session_label(self, session: SessionRecord) -> str:
+        name = f" · {session.name}" if session.name else ""
+        timestamp = session.created_at or "unknown time"
+        return f"{session.session_id} · {timestamp}{name}"
+
+    def _show_session_picker(self, argument: str) -> None:
+        if argument:
+            try:
+                selected = select_session(self.session_store, argument)
+            except SessionStoreError as caught:
+                self._write(f"Could not open saved session: {caught}")
+                return
+            self._open_selected_session(selected)
+            return
+        try:
+            sessions = self.session_store.list_sessions()
+        except (OSError, SessionStoreError) as caught:
+            self._write(f"Could not list saved sessions: {caught}")
+            return
+        if not sessions:
+            self._write("No saved sessions.")
+            return
+        self._show_choices(
+            "session",
+            "Select session:",
+            [
+                (session, f"{index}. {self._session_label(session)}")
+                for index, session in enumerate(sessions, 1)
+            ],
+        )
+
+    def _open_selected_session(self, selected: SessionRecord) -> None:
+        self.session_id = selected.session_id
+        self.context = AgentContext(messages=list(selected.messages))
+        self.persisted_message_count = len(selected.messages)
+        transcript = self.query_one("#transcript", ChatMessage)
+        transcript.clear_transcript()
+        for message in self.context.messages:
+            self._append_context_message(message)
+        self._write(f"Resumed session: {self._session_label(selected)}")
+        self._set_status()
+
+    def _fork_current_session(self, name: str) -> None:
+        try:
+            created = create_session(
+                self.session_store,
+                parent_id=self.session_id,
+                name=name or None,
+            )
+            for message in self.context.messages:
+                self.session_store.append(created.session_id, message)
+        except (OSError, SessionStoreError) as caught:
+            self._write(f"Could not fork conversation: {caught}")
+            return
+        self.session_id = created.session_id
+        self.persisted_message_count = len(self.context.messages)
+        self._write(f"Forked conversation: {self.session_id}")
+        self._set_status()
+
+    def _resume_command(self) -> str | None:
+        if not isinstance(self.session_store, JsonlSessionStore):
+            return None
+        return f"Resume with: peon --session {self.session_id}"
+
     def _select_ui_setting(self, spec: tuple[str, str, str]) -> None:
         key, label, field_name = spec
         current = getattr(self.ui_config, field_name)
@@ -1432,6 +2224,25 @@ class TextualPeonApp(App[int]):
         self.settings_return_kind = "settings-ui"
         self.setup_step = "setting-value"
         self._show_input_prompt(f"{label}:")
+
+    def _select_general_setting(
+        self,
+        spec: tuple[str, str, str | None],
+    ) -> None:
+        key, _label, field_name = spec
+        if field_name is None:
+            self._write(f"/{key} is reserved and is not available yet.")
+            self._show_general_settings(focus_key=key)
+            return
+        current = getattr(self.ui_config, field_name)
+        self._apply_general_setting(key, str(not bool(current)).lower())
+
+    def _select_shortcut_setting(self, spec: tuple[str, str, str]) -> None:
+        self.pending_setting_spec = None
+        self.pending_ui_setting = spec
+        self.settings_return_kind = "settings-shortcuts"
+        self.setup_step = "setting-value"
+        self._show_input_prompt(f"{spec[1]}:")
 
     def _apply_provider_setting(
         self,
@@ -1483,6 +2294,23 @@ class TextualPeonApp(App[int]):
         self._apply_ui_config()
         self._show_ui_settings(focus_key=setting)
 
+    def _apply_general_setting(self, setting: str, value: str) -> None:
+        try:
+            self.ui_config = update_general_setting(self.ui_config, setting, value)
+            save_ui_config(self.config_store, self.ui_config)
+        except (OSError, ValueError) as caught:
+            self._write(f"General setting update failed: {caught}")
+        self._apply_ui_config()
+        self._show_general_settings(focus_key=setting)
+
+    def _apply_shortcut_setting(self, setting: str, value: str) -> None:
+        try:
+            self.ui_config = update_shortcut_setting(self.ui_config, setting, value)
+            save_ui_config(self.config_store, self.ui_config)
+        except (OSError, ValueError) as caught:
+            self._write(f"Shortcut update failed: {caught}")
+        self._show_shortcut_settings(focus_key=setting)
+
     def _adjust_selected_setting(self, direction: int) -> bool:
         kind = self.choice_kind
         if kind not in {
@@ -1490,6 +2318,7 @@ class TextualPeonApp(App[int]):
             "settings-request",
             "settings-response",
             "settings-ui",
+            "settings-general",
         }:
             return False
         index = self.choice_selected_index
@@ -1509,6 +2338,19 @@ class TextualPeonApp(App[int]):
             else:
                 return False
             self._apply_ui_setting(key, value)
+            return True
+        if kind == "settings-general":
+            general_key, _label, general_field_name = cast(
+                tuple[str, str, str | None],
+                self.choice_values[index],
+            )
+            if general_field_name is None:
+                return False
+            general_current = getattr(self.ui_config, general_field_name)
+            self._apply_general_setting(
+                general_key,
+                str(not bool(general_current)).lower(),
+            )
             return True
         spec = cast(ProviderSettingSpec, self.choice_values[index])
         if self.pending_config is None:
@@ -1609,7 +2451,12 @@ class TextualPeonApp(App[int]):
         if self.setup_step == "setting-value":
             self.query_one("#prompt", PeonInput).password = False
             if self.pending_ui_setting is not None:
-                self._apply_ui_setting(self.pending_ui_setting[0], value)
+                if self.settings_return_kind == "settings-shortcuts":
+                    self._apply_shortcut_setting(self.pending_ui_setting[0], value)
+                elif self.settings_return_kind == "settings-general":
+                    self._apply_general_setting(self.pending_ui_setting[0], value)
+                else:
+                    self._apply_ui_setting(self.pending_ui_setting[0], value)
             elif self.pending_setting_spec is not None and self.pending_config is not None:
                 self._apply_provider_setting(
                     self.pending_setting_spec,
@@ -1827,7 +2674,7 @@ class TextualPeonApp(App[int]):
         elif definition.availability == "reserved":
             self._write(f"{definition.name} is reserved and is not available yet.")
         elif definition.id == "quit":
-            self.exit(0)
+            self._quit_with_resume()
         elif definition.id == "logout":
             self._show_logout_picker()
         elif definition.id == "help":
@@ -1841,6 +2688,10 @@ class TextualPeonApp(App[int]):
             self._begin_provider_setup()
         elif definition.id == "settings":
             self._show_settings()
+        elif definition.id == "session":
+            self._show_session_picker(invocation.argument)
+        elif definition.id == "fork":
+            self._fork_current_session(invocation.argument)
         elif definition.id == "new":
             try:
                 created = create_session(
@@ -1857,7 +2708,14 @@ class TextualPeonApp(App[int]):
             self._write("✓ New session started", role="success")
             self._set_status()
         elif definition.id == "tools":
-            self._write("Tools: " + ", ".join(tool.name for tool in self.registry.tools))
+            enabled = set(self.ui_config.enabled_tools)
+            self._write(
+                "Tools: "
+                + ", ".join(
+                    f"{tool.name} ({'enabled' if tool.name in enabled else 'disabled'})"
+                    for tool in self.registry.tools
+                )
+            )
         elif definition.id == "skills":
             skills = self.skill_names
             self._write("Skills: " + ", ".join(skills) if skills else "Skills: none")
@@ -1866,15 +2724,25 @@ class TextualPeonApp(App[int]):
         if self.config is None:
             self._write("No active provider.")
             return
+        if setting == "reasoning" and not reasoning_effort_choices(self.config):
+            self._write("Reasoning effort is not supported by this provider.")
+            return
         spec = (
             ProviderSettingSpec("name", "Name", "name", "text")
             if setting == "name"
-            else next(spec for spec in CONFIG_SETTING_SPECS if spec.key == setting)
+            else next(
+                spec
+                for spec in provider_config_setting_specs(self.config)
+                if spec.key == setting
+            )
         )
         self.pending_config = self.config
         current = getattr(self.config, spec.field_name)
         if not value and spec.value_kind == "toggle":
             value = str(not bool(current)).lower()
+        elif not value and setting == "reasoning":
+            self._cycle_active_reasoning()
+            return
         elif not value and spec.value_kind == "choice":
             value = _cycle_choice(
                 _format_setting_value(current),
@@ -1885,6 +2753,25 @@ class TextualPeonApp(App[int]):
             self._apply_provider_setting(spec, value, None)
         else:
             self._start_provider_setting_input(spec, None)
+
+    def _cycle_active_reasoning(self) -> None:
+        if self.config is None:
+            return
+        if not reasoning_effort_choices(self.config):
+            self._write("Reasoning effort is not supported by this provider.")
+            return
+        try:
+            value = cycle_reasoning_effort(self.config)
+            config = update_provider_setting(self.config, "reasoning", value)
+            provider = (self.provider_factory or create_provider)(config)
+            update_saved_provider(self.config_store, self.config, config)
+        except (CommandError, ProviderError, OSError, ValueError) as caught:
+            self._write(f"Reasoning update failed: {caught}")
+            return
+        self.pending_config = config
+        self.provider = provider
+        self.config = config
+        self._set_status()
 
     def _show_model_picker(self, argument: str) -> None:
         choices = saved_model_choices(self.config_store.load_all())
@@ -1947,6 +2834,8 @@ def run_textual_tui(
     session_store: SessionStore | None = None,
     continue_session: bool = False,
     no_session: bool = False,
+    session_target: str | None = None,
+    session_name: str | None = None,
     user_top_blank_lines: int = 1,
     user_bottom_blank_lines: int = 1,
     message_left_padding: int = 1,
@@ -1963,6 +2852,8 @@ def run_textual_tui(
         session_store=session_store,
         continue_session=continue_session,
         no_session=no_session,
+        session_target=session_target,
+        session_name=session_name,
     )
     app.run()
     return int(app.return_code or 0)

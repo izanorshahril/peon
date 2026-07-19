@@ -1,7 +1,22 @@
 import json
+from collections.abc import Mapping
+
+import pytest
 
 from peon.app import JsonProviderConfigStore, ProviderConfig, UiConfig
-from peon.app.cli import update_provider_setting
+from peon.app.cli import (
+    provider_config_setting_specs,
+    reasoning_effort_choices,
+    update_provider_setting,
+)
+from peon.app.config import (
+    filter_enabled_tools,
+    filter_tool_executor,
+    update_general_setting,
+    update_shortcut_setting,
+    update_tool_setting,
+)
+from peon.agent import ToolDefinition
 
 
 def test_json_store_round_trips_multiple_profiles_and_active_provider(tmp_path) -> None:
@@ -58,6 +73,7 @@ def test_json_store_round_trips_custom_provider_settings(tmp_path) -> None:
         max_response_tokens=2048,
         response_format_field="response_format",
         response_format="json_object",
+        response_thinking_field="analysis",
     )
 
     store.save(config)
@@ -126,8 +142,15 @@ def test_json_store_round_trips_expanded_provider_and_ui_settings(tmp_path) -> N
         user_top_blank_lines=2,
         chat_area_color="#202020",
         assistant_message_color="#f0f0f0",
+        tool_message_background="#282832",
+        tool_output_color="#ffffff",
         command_selected_color="#00ff00",
         text_format="italic",
+        hide_thinking=True,
+        render_tool_markdown=True,
+        reasoning_shortcut="alt+r",
+        thinking_shortcut="alt+t",
+        tools_shortcut="alt+o",
     )
 
     store.save(provider)
@@ -135,6 +158,7 @@ def test_json_store_round_trips_expanded_provider_and_ui_settings(tmp_path) -> N
 
     assert store.load() == provider
     assert store.load_ui() == ui
+    assert store.load_ui().tool_output_color == "#ffffff"
 
 
 def test_json_store_updates_provider_identity_without_duplicate(tmp_path) -> None:
@@ -167,6 +191,92 @@ def test_provider_setting_can_switch_tool_prompt_role() -> None:
     updated = update_provider_setting(config, "tool-prompt-role", "system")
 
     assert updated.tool_prompt_role == "system"
+
+
+def test_provider_setting_can_switch_custom_thinking_response_field() -> None:
+    config = ProviderConfig(name="custom", provider_type="custom")
+
+    updated = update_provider_setting(config, "response-thinking-field", "analysis")
+
+    assert updated.response_thinking_field == "analysis"
+
+
+def test_reasoning_capability_is_limited_to_openai_and_custom_profiles() -> None:
+    openai = ProviderConfig(name="openai-compatible")
+    custom = ProviderConfig(name="proxy", provider_type="custom")
+    copilot = ProviderConfig(name="github-copilot")
+
+    assert reasoning_effort_choices(openai) == ("none", "low", "medium", "high")
+    assert reasoning_effort_choices(custom) == ("none", "low", "medium", "high")
+    assert reasoning_effort_choices(copilot) == ()
+    assert any(spec.key == "reasoning" for spec in provider_config_setting_specs(openai))
+    assert any(spec.key == "reasoning" for spec in provider_config_setting_specs(custom))
+    assert not any(spec.key == "reasoning" for spec in provider_config_setting_specs(copilot))
+
+
+def test_none_reasoning_setting_omits_the_provider_value() -> None:
+    config = ProviderConfig(name="openai-compatible", reasoning_effort="high")
+
+    updated = update_provider_setting(config, "reasoning", "none")
+
+    assert updated.reasoning_effort is None
+
+
+def test_general_and_shortcut_settings_validate_and_update() -> None:
+    config = UiConfig()
+
+    hidden = update_general_setting(config, "hide-thinking", "true")
+    markdown = update_general_setting(hidden, "render-tool-markdown", "true")
+    updated = update_shortcut_setting(markdown, "tools", "Alt+O")
+
+    assert updated.hide_thinking is True
+    assert updated.render_tool_markdown is True
+    assert updated.tools_shortcut == "alt+o"
+
+    with pytest.raises(ValueError, match="reserved"):
+        update_general_setting(config, "reserved-auto-compaction", "true")
+    with pytest.raises(ValueError, match="blank"):
+        update_shortcut_setting(config, "thinking", " ")
+    with pytest.raises(ValueError, match="already assigned"):
+        update_shortcut_setting(config, "thinking", config.tools_shortcut)
+
+
+def test_tool_settings_update_and_filter_provider_definitions() -> None:
+    config = UiConfig()
+    tools = (
+        ToolDefinition(name="read", description="Read", parameters={}),
+        ToolDefinition(name="word_count", description="Count", parameters={}),
+    )
+
+    assert [tool.name for tool in filter_enabled_tools(config, tools)] == ["read"]
+    enabled = update_tool_setting(config, "word_count", "true")
+    assert enabled.enabled_tools == (*config.enabled_tools, "word_count")
+    assert [tool.name for tool in filter_enabled_tools(enabled, tools)] == [
+        "read",
+        "word_count",
+    ]
+    disabled = update_tool_setting(enabled, "read", "false")
+    assert [tool.name for tool in filter_enabled_tools(disabled, tools)] == [
+        "word_count"
+    ]
+
+    filtered = filter_tool_executor(disabled, _ToolExecutor(tools))
+    assert filtered.tools == (tools[1],)
+    with pytest.raises(ValueError, match="disabled"):
+        filtered.invoke("read", {})
+
+
+class _ToolExecutor:
+    def __init__(self, tools: tuple[ToolDefinition, ...]) -> None:
+        self._tools = tools
+
+    @property
+    def tools(self) -> tuple[ToolDefinition, ...]:
+        return self._tools
+
+    def invoke(self, name: str, arguments: Mapping[str, object]) -> str:
+        del arguments
+        return name
 
 
 def test_json_store_keeps_ui_settings_after_last_provider_is_deleted(tmp_path) -> None:

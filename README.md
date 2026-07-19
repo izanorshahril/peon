@@ -229,8 +229,10 @@ without clearing conversation context. `/logout` removes only the selected
 provider. If the active provider is removed, Peon switches to another saved
 profile or starts provider setup when none remain.
 
-`/settings` opens a retained hierarchy: `UI`, `Saved provider`, or `Add
-provider`. Saved providers are grouped by adapter type and profile name. An
+`/settings` opens a retained hierarchy: `UI`, `Saved provider`, `Add provider`,
+`General`, or `Shortcuts`. General settings include the persisted thinking
+visibility toggle; rows for features that are not implemented yet are marked
+reserved. Saved providers are grouped by adapter type and profile name. An
 OpenAI-compatible profile exposes its name and config; a custom profile also
 exposes request- and response-field mappings. Request rows use canonical
 OpenAI names such as `reasoning_effort` and `max_completion_tokens` on the left
@@ -240,8 +242,20 @@ format in place; Enter cycles choices or toggles booleans. Values that require
 typing return to the same list after they are saved. Every Textual picker has a
 search line, unnumbered arrow-led rows, a current/total count, and a keyboard
 hint footer. Up/Down and Enter remain owned by the active picker even if focus
-has moved away from its search field, so navigation cannot accidentally edit a
-setting before Enter is pressed.
+has moved away from its search field, and Escape still backtracks immediately.
+Reasoning cycling defaults to `Shift+Tab`; thinking visibility defaults to
+`Ctrl+T`; and tool output expansion defaults to `Ctrl+O`. These shortcuts can
+be changed in `Settings > Shortcuts` and apply to the transcript globally.
+
+Textual renders assistant thinking separately, while each tool call and its
+result share one padded transcript block. Tool blocks use a dark Pi-like
+success-green background by default (`#283228`); `Settings > UI > Tool message
+background` accepts any `#RGB` or `#RRGGBB` value, so the block can be changed
+to a blue or another terminal color. Thinking follows the General visibility
+setting. Tool results start collapsed and the tools shortcut expands or
+collapses every rendered result, including blocks restored from a persisted
+session. Expanded tool output is plain text by default; `Settings > General >
+Render tool output as Markdown` persists an opt-in Markdown renderer.
 
 Skill metadata discovered from `.agents/skills` and skills registered by
 extensions appear in the same command surface. `/skills` lists both kinds, and
@@ -250,16 +264,25 @@ owned by the extension registry; discovered workspace skills remain visible but
 are not automatically loaded or executed.
 
 The footer currently shows the working directory, provider, model, context
-message count, and `n/a` for effort and token usage. The provider-neutral
+message count, active reasoning effort, and `n/a` for token usage. OpenAI-
+compatible and custom providers currently expose `none`, `low`, `medium`, and
+`high`; `xhigh` and `max` are not offered yet. The provider-neutral
 `ModelResponse` contract does not expose usage metadata yet. Session context is
 stored as append-only JSONL files under `~/.peon/sessions` by default; set
 `PEON_SESSION_DIR` to choose another directory. Each ordinary interactive
 startup creates a fresh durable session. Use `--continue` (or `-c`) to load
 the newest valid session for the current working directory; use `--no-session`
 for an ephemeral conversation that writes nothing. `/new` starts another fresh
-session without rewriting previous history.
-The default registry also includes cwd-bound, read-only `read`, `ls`, `find`,
-and `grep` tools with bounded output and continuation offsets.
+session without rewriting previous history. Use `--session` with a session ID,
+unique name, or explicit JSONL path to open an exact conversation, and
+`--session-name` to name a new one. `/session` opens the current-project
+session picker and `/fork [name]` copies the active transcript into a new child
+session with parent metadata. Durable shutdown displays a `peon --session ...`
+resume command.
+The default registry includes cwd-bound `read`, `write`, `edit`, and `bash`
+tools, plus `ls`, `find`, and `grep`. Provider requests send only the enabled
+tools; the default availability setting enables `read`, `write`, `edit`, and
+`bash`, and `Settings > Tool availability` controls the persisted list.
 
 Interactive commands:
 
@@ -269,6 +292,9 @@ Interactive commands:
 /model     list and switch model and provider
 /provider  configure another provider profile
 /settings  configure UI and saved provider profiles
+/reasoning cycle or set the active model reasoning effort
+/session   list or resume a current-project session
+/fork      fork the current conversation
 /tools     list registered tools
 /skills    list discovered and registered skills
 /logout    remove one saved provider
@@ -276,7 +302,8 @@ Interactive commands:
 
 Provider-field commands remain available as hidden compatibility aliases and
 are managed through `/settings`. Reserved future commands appear in `/help`
-with honest unavailable feedback.
+with honest unavailable feedback. `/thinking` is no longer a command; use
+`/reasoning` for effort levels and the General setting for block visibility.
 ```
 
 One-shot requests remain available for scripts and automation:

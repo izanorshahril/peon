@@ -15,6 +15,7 @@ class AgentMessage:
     content: str
     tool_call: ToolCall | None = None
     tool_call_id: str | None = None
+    thinking: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,7 @@ class ToolCall:
 class ModelResponse:
     content: str = ""
     tool_call: ToolCall | None = None
+    thinking: str = ""
 
 
 @dataclass(slots=True)

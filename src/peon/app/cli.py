@@ -17,6 +17,13 @@ from peon.ai import (
 )
 
 
+REASONING_EFFORTS = ("none", "low", "medium", "high")
+PROVIDER_REASONING_CAPABILITIES = {
+    "openai-compatible": REASONING_EFFORTS,
+    "custom": REASONING_EFFORTS,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderConfig:
     name: str
@@ -39,6 +46,7 @@ class ProviderConfig:
     response_format_field: str = "responseFormat"
     response_format: str | None = "text"
     response_content_field: str = "completion"
+    response_thinking_field: str = "thinking"
     tool_prompt_role: str = "developer"
     supports_tools: bool | None = None
     supports_stream: bool = False
@@ -48,6 +56,23 @@ class ProviderConfig:
         if self.supports_tools is None:
             provider_type = self.provider_type or self.name
             object.__setattr__(self, "supports_tools", provider_type != "custom")
+
+
+def reasoning_effort_choices(config: ProviderConfig) -> tuple[str, ...]:
+    provider_type = config.provider_type or config.name
+    return PROVIDER_REASONING_CAPABILITIES.get(provider_type, ())
+
+
+def cycle_reasoning_effort(config: ProviderConfig, direction: int = 1) -> str:
+    choices = reasoning_effort_choices(config)
+    if not choices:
+        raise CommandError("reasoning effort is not supported by this provider")
+    current = config.reasoning_effort or "none"
+    try:
+        index = choices.index(current)
+    except ValueError:
+        index = -1 if direction > 0 else 0
+    return choices[(index + direction) % len(choices)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +127,16 @@ CONFIG_SETTING_SPECS = (
     ProviderSettingSpec("temperature", "Temperature", "temperature", "temperature"),
     ProviderSettingSpec("response-format", "Response format", "response_format", "text"),
 )
+
+
+def provider_config_setting_specs(
+    config: ProviderConfig,
+) -> tuple[ProviderSettingSpec, ...]:
+    if reasoning_effort_choices(config):
+        return CONFIG_SETTING_SPECS
+    return tuple(spec for spec in CONFIG_SETTING_SPECS if spec.key != "reasoning")
+
+
 REQUEST_FIELD_SETTING_SPECS = (
     ProviderSettingSpec(
         "reasoning-effort-field",
@@ -137,6 +172,12 @@ RESPONSE_FIELD_SETTING_SPECS = (
         "response-content-field",
         "choices[0].message.content",
         "response_content_field",
+        "text",
+    ),
+    ProviderSettingSpec(
+        "response-thinking-field",
+        "thinking",
+        "response_thinking_field",
         "text",
     ),
 )
@@ -194,11 +235,15 @@ def update_provider_setting(
             return replace(config, response_format_field=value)
         if field_name == "response_content_field":
             return replace(config, response_content_field=value)
+        if field_name == "response_thinking_field":
+            return replace(config, response_thinking_field=value)
         return replace(config, response_format=value)
     if spec.value_kind == "choice":
         lowered_value = value.lower()
         if lowered_value not in spec.choices:
             raise CommandError(f"{setting} must be one of: {', '.join(spec.choices)}")
+        if spec.key == "reasoning" and not reasoning_effort_choices(config):
+            raise CommandError("reasoning effort is not supported by this provider")
         if field_name == "tool_prompt_role":
             return replace(config, tool_prompt_role=lowered_value)
         return replace(
@@ -305,6 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--reasoning-effort",
+        choices=REASONING_EFFORTS,
         default="low",
         help="Custom provider reasoning effort value",
     )
@@ -331,6 +377,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="no_session",
         action="store_true",
         help="Keep the conversation in memory without saving a session",
+    )
+    parser.add_argument(
+        "--session",
+        dest="session_target",
+        help="Open an exact current-directory session ID or unique name",
+    )
+    parser.add_argument(
+        "--session-name",
+        dest="session_name",
+        help="Name a newly created interactive session",
     )
     parser.add_argument(
         "--mode",
@@ -373,11 +429,26 @@ def main(
         args = parser.parse_args(argv)
         if args.continue_session and args.no_session:
             raise CommandError("--continue and --no-session cannot be combined")
+        if args.no_session and (args.session_target or args.session_name):
+            raise CommandError(
+                "--no-session cannot be combined with --session or --session-name"
+            )
+        if args.continue_session and args.session_target:
+            raise CommandError("--continue and --session cannot be combined")
+        if args.session_target and args.session_name:
+            raise CommandError("--session and --session-name cannot be combined")
+        if args.continue_session and args.session_name:
+            raise CommandError("--continue and --session-name cannot be combined")
         task = " ".join(args.task).strip()
         mode: InteractionMode = args.mode or (
             "minimal" if args.tui or not task else "non-interactive"
         )
-        if mode != "minimal" and (args.continue_session or args.no_session):
+        if mode != "minimal" and (
+            args.continue_session
+            or args.no_session
+            or args.session_target
+            or args.session_name
+        ):
             raise CommandError(
                 "session lifecycle options require interactive mode"
             )
@@ -396,6 +467,10 @@ def main(
                 user_top_blank_lines=args.user_top_blank_lines,
                 user_bottom_blank_lines=args.user_bottom_blank_lines,
                 message_left_padding=args.message_left_padding,
+                continue_session=args.continue_session,
+                no_session=args.no_session,
+                session_target=args.session_target,
+                session_name=args.session_name,
             )
         else:
             raise CommandError(f"{mode} mode is not available yet")
@@ -410,7 +485,9 @@ def main(
             api_key=args.api_key,
             copilot_token=args.copilot_token,
             reasoning_effort_field=args.reasoning_effort_field,
-            reasoning_effort=args.reasoning_effort,
+            reasoning_effort=(
+                None if args.reasoning_effort == "none" else args.reasoning_effort
+            ),
             tool_prompt_role=args.tool_prompt_role,
         )
         provider = (provider_factory or create_provider)(config)
@@ -471,6 +548,7 @@ def create_provider(config: ProviderConfig) -> ModelProvider:
             ),
             response_fields=CustomResponseFields(
                 content=config.response_content_field,
+                thinking=config.response_thinking_field,
             ),
             reasoning_effort=config.reasoning_effort,
             temperature=config.temperature,

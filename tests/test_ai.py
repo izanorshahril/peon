@@ -119,11 +119,18 @@ def test_openai_compatible_provider_normalizes_request_and_text_response() -> No
 
 def test_custom_provider_matches_corporate_chat_payload(monkeypatch) -> None:
     monkeypatch.setattr("peon.ai.providers.time.time", lambda: 1784295526)
-    transport = StubTransport({"service": "chat", "completion": "Corporate response."})
+    transport = StubTransport(
+        {
+            "service": "chat",
+            "completion": "Corporate response.",
+            "analysis": "The response is straightforward.",
+        }
+    )
     provider = CustomProvider(
         base_url="https://proxy.test/api/client-apps",
         api_key=None,
         model="corporate-model",
+        response_fields=CustomResponseFields(thinking="analysis"),
         transport=transport,
     )
 
@@ -138,7 +145,10 @@ def test_custom_provider_matches_corporate_chat_payload(monkeypatch) -> None:
         ],
     )
 
-    assert response == ModelResponse(content="Corporate response.")
+    assert response == ModelResponse(
+        content="Corporate response.",
+        thinking="The response is straightforward.",
+    )
     assert transport.url == "https://proxy.test/api/client-apps"
     assert transport.headers == {
         "Content-Type": "application/json",

@@ -146,6 +146,7 @@ class CustomResponseFields:
     """Response paths used by the custom service proxy."""
 
     content: str = "completion"
+    thinking: str = "thinking"
 
 
 class CustomProvider:
@@ -176,6 +177,8 @@ class CustomProvider:
         resolved_response_fields = response_fields or CustomResponseFields()
         if not resolved_response_fields.content.strip():
             raise ProviderError("custom response content field is invalid")
+        if not resolved_response_fields.thinking.strip():
+            raise ProviderError("custom response thinking field is invalid")
         if fields.reasoning_effort is not None and not fields.reasoning_effort.strip():
             raise ProviderError("custom reasoning effort field is invalid")
         for field_name in (
@@ -491,15 +494,16 @@ class _CustomServiceClient:
         self._add_optional_chat_fields(payload)
 
         result = self._post(payload, chat=True)
+        thinking = _extract_custom_thinking(result, self._response_fields.thinking)
         completion = _extract_response_field(result, self._response_fields.content)
         if isinstance(completion, str) and completion.strip():
             tool_call = _parse_text_tool_call(completion)
             if tool_call is not None:
-                return ModelResponse(tool_call=tool_call)
+                return ModelResponse(tool_call=tool_call, thinking=thinking)
             final = _parse_text_final(completion)
             if final is not None:
-                return ModelResponse(content=final)
-            return ModelResponse(content=completion)
+                return ModelResponse(content=final, thinking=thinking)
+            return ModelResponse(content=completion, thinking=thinking)
         if "choices" in result:
             return _parse_response(result)
         raise ProviderError("provider response did not contain completion")
@@ -719,18 +723,38 @@ def _parse_response(result: JsonObject) -> ModelResponse:
         raise ProviderError("provider response did not contain a chat message")
 
     tool_call = _parse_tool_call(message.get("tool_calls"))
+    thinking = _extract_thinking(message)
     content = message.get("content")
     if tool_call is not None:
-        return ModelResponse(content=content if isinstance(content, str) else "", tool_call=tool_call)
+        return ModelResponse(
+            content=content if isinstance(content, str) else "",
+            thinking=thinking,
+            tool_call=tool_call,
+        )
     if isinstance(content, str) and content.strip():
         fallback_tool_call = _parse_text_tool_call(content)
         if fallback_tool_call is not None:
-            return ModelResponse(tool_call=fallback_tool_call)
+            return ModelResponse(tool_call=fallback_tool_call, thinking=thinking)
         fallback_final = _parse_text_final(content)
         if fallback_final is not None:
-            return ModelResponse(content=fallback_final)
-        return ModelResponse(content=content)
+            return ModelResponse(content=fallback_final, thinking=thinking)
+        return ModelResponse(content=content, thinking=thinking)
     raise ProviderError("provider response did not contain text or a tool call")
+
+
+def _extract_thinking(message: Mapping[str, object]) -> str:
+    for key in ("reasoning_content", "thinking", "reasoning"):
+        value = message.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _extract_custom_thinking(result: JsonObject, path: str) -> str:
+    configured = _extract_response_field(result, path)
+    if isinstance(configured, str) and configured.strip():
+        return configured
+    return _extract_thinking(result)
 
 
 def _parse_tool_call(value: object) -> ToolCall | None:

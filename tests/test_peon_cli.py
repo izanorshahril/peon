@@ -145,6 +145,39 @@ def test_command_forwards_session_lifecycle_options_to_tui() -> None:
     assert calls[1]["continue_session"] is False
     assert calls[1]["no_session"] is True
 
+    result = main(
+        ["--tui", "--session", "release", "--session-name", "ignored"],
+        tui_runner=tui_runner,
+    )
+
+    assert result == 1
+
+
+def test_command_forwards_session_target_and_name_to_tui() -> None:
+    calls: list[dict[str, object]] = []
+
+    def tui_runner(**kwargs) -> int:
+        calls.append(kwargs)
+        return 0
+
+    result = main(
+        ["--tui", "--session-name", "release"],
+        tui_runner=tui_runner,
+    )
+
+    assert result == 0
+    assert calls[0]["session_target"] is None
+    assert calls[0]["session_name"] == "release"
+
+    result = main(
+        ["--tui", "--session", "session-id"],
+        tui_runner=tui_runner,
+    )
+
+    assert result == 0
+    assert calls[1]["session_target"] == "session-id"
+    assert calls[1]["session_name"] is None
+
 
 def test_command_rejects_conflicting_session_lifecycle_options() -> None:
     error = StringIO()

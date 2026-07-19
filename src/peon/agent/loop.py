@@ -1,7 +1,8 @@
 """The minimal bounded agent orchestration boundary."""
 
+from collections.abc import Callable, Mapping, Sequence
+
 from .errors import AgentError
-from collections.abc import Mapping, Sequence
 
 from .executor import ToolExecutor
 from .models import AgentContext, AgentMessage, ToolCall, ToolDefinition
@@ -17,6 +18,7 @@ def run_task(
     executor: ToolExecutor | None = None,
     max_tool_calls: int = 8,
     model: str | None = None,
+    on_message: Callable[[AgentMessage], None] | None = None,
 ) -> str | ToolCall:
     """Run one task against an injected provider and return its response."""
     normalized_task = task.strip()
@@ -26,7 +28,10 @@ def run_task(
         raise AgentError("max_tool_calls must be at least 1")
 
     active_context = context if context is not None else AgentContext()
-    active_context.add(AgentMessage(role="user", content=normalized_task))
+    user_message = AgentMessage(role="user", content=normalized_task)
+    active_context.add(user_message)
+    if on_message is not None:
+        on_message(user_message)
     available_tools = tuple(tools)
     if executor is not None and not available_tools:
         available_tools = tuple(executor.tools)
@@ -47,14 +52,27 @@ def run_task(
             tool_calls += 1
             if tool_calls > max_tool_calls:
                 raise AgentError("maximum tool-call limit exceeded")
-            _continue_with_tool_call(active_context, executor, response.tool_call)
+            _continue_with_tool_call(
+                active_context,
+                executor,
+                response.tool_call,
+                thinking=response.thinking,
+                on_message=on_message,
+            )
             continue
 
         response_text = response.content.strip()
         if not response_text:
             raise AgentError("provider returned an empty response")
 
-        active_context.add(AgentMessage(role="assistant", content=response_text))
+        assistant_message = AgentMessage(
+            role="assistant",
+            content=response_text,
+            thinking=response.thinking or None,
+        )
+        active_context.add(assistant_message)
+        if on_message is not None:
+            on_message(assistant_message)
         return response_text
 
 
@@ -62,44 +80,52 @@ def _continue_with_tool_call(
     context: AgentContext,
     executor: ToolExecutor,
     tool_call: ToolCall,
+    *,
+    thinking: str = "",
+    on_message: Callable[[AgentMessage], None] | None = None,
 ) -> None:
     if not isinstance(tool_call.arguments, Mapping):
         raise AgentError(
             f"tool '{tool_call.name}' arguments must be an object"
         )
-    context.add(
-        AgentMessage(
-            role="assistant",
-            content="",
-            tool_call=tool_call,
-        )
+    assistant_message = AgentMessage(
+        role="assistant",
+        content="",
+        thinking=thinking or None,
+        tool_call=tool_call,
     )
+    context.add(assistant_message)
+    if on_message is not None:
+        on_message(assistant_message)
     try:
         result = executor.invoke(tool_call.name, tool_call.arguments)
     except Exception as error:
-        context.add(
-            AgentMessage(
-                role="tool",
-                content=f"tool error: {error}",
-                tool_call_id=tool_call.call_id,
-            )
+        tool_message = AgentMessage(
+            role="tool",
+            content=f"tool error: {error}",
+            tool_call_id=tool_call.call_id,
         )
+        context.add(tool_message)
+        if on_message is not None:
+            on_message(tool_message)
         raise AgentError(
             f"tool '{tool_call.name}' failed: {error}"
         ) from error
     if not isinstance(result, str):
-        context.add(
-            AgentMessage(
-                role="tool",
-                content=f"tool error: '{tool_call.name}' returned a non-text result",
-                tool_call_id=tool_call.call_id,
-            )
-        )
-        raise AgentError(f"tool '{tool_call.name}' returned a non-text result")
-    context.add(
-        AgentMessage(
+        tool_message = AgentMessage(
             role="tool",
-            content=result,
+            content=f"tool error: '{tool_call.name}' returned a non-text result",
             tool_call_id=tool_call.call_id,
         )
+        context.add(tool_message)
+        if on_message is not None:
+            on_message(tool_message)
+        raise AgentError(f"tool '{tool_call.name}' returned a non-text result")
+    tool_message = AgentMessage(
+        role="tool",
+        content=result,
+        tool_call_id=tool_call.call_id,
     )
+    context.add(tool_message)
+    if on_message is not None:
+        on_message(tool_message)
