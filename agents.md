@@ -73,6 +73,13 @@ a dashboard, enterprise console, or general-purpose assistant.
   generation, fine-tuning, RAG, or communication channels to the core without a
   clear extension boundary and a concrete product need.
 
+### Deferred Worktree Change
+
+- `tests/test_textual_tui.py` contains a separate user/concurrent rewrite that
+  must remain unstaged and uncommitted while parity tickets are in progress.
+- Do not stage, commit, revert, or fold this rewrite into ticket changes.
+- Reconcile and address it only after all parity tickets are closed.
+
 ## Living Research
 
 - Keep session and filesystem-tool findings in

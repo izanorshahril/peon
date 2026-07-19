@@ -52,6 +52,12 @@ from .config import (
     update_ui_setting,
 )
 from .commands import DEFAULT_COMMAND_CATALOG, CommandDefinition
+from .resources import (
+    ResourceInventory,
+    apply_resource_prompt,
+    conversation_messages_without_resource_prompt,
+    load_skill_into_context,
+)
 from .sessions import (
     JsonlSessionStore,
     MemorySessionStore,
@@ -114,6 +120,7 @@ class TuiSession:
     config: ProviderConfig
     context: AgentContext = field(default_factory=AgentContext)
     registry: ExtensionRegistry = field(default_factory=ExtensionRegistry)
+    resources: ResourceInventory | None = None
     session_id: str = ""
     session_store: SessionStore = field(default_factory=MemorySessionStore)
     persisted_message_count: int = 0
@@ -131,6 +138,17 @@ def _print_header(*, output: TextIO) -> None:
         file=output,
     )
     print(" Type /help for commands and /model for saved models.", file=output)
+
+
+def _print_resource_summary(
+    resources: ResourceInventory | None,
+    *,
+    output: TextIO,
+) -> None:
+    if resources is None:
+        return
+    for line in resources.startup_summary():
+        print(line, file=output)
 
 
 def _print_footer(session: TuiSession, *, output: TextIO) -> None:
@@ -183,6 +201,7 @@ def run_tui(
     no_session: bool = False,
     session_target: str | None = None,
     session_name: str | None = None,
+    resources: ResourceInventory | None = None,
 ) -> int:
     """Run an interactive Peon conversation until the user exits."""
     output = output or sys.stdout
@@ -214,6 +233,7 @@ def run_tui(
             no_session=no_session,
             session_target=session_target,
             session_name=session_name,
+            resources=resources,
         )
 
     _print_header(output=output)
@@ -227,6 +247,9 @@ def run_tui(
         )
     except SessionStoreError:
         return 1
+    if resources is not None:
+        apply_resource_prompt(context, resources)
+    _print_resource_summary(resources, output=output)
     session = _restore_session(
         provider_factory=provider_factory,
         config_store=active_config_store,
@@ -234,6 +257,7 @@ def run_tui(
         error=error,
         context=context,
         registry=active_registry,
+        resources=resources,
         session_id=session_id,
         session_store=active_session_store,
     )
@@ -247,6 +271,7 @@ def run_tui(
                 error=error,
                 context=context,
                 registry=active_registry,
+                resources=resources,
                 config_store=active_config_store,
                 session_id=session_id,
                 session_store=active_session_store,
@@ -362,11 +387,14 @@ def _select_session_for_tui(
 
 
 def _open_session(session: TuiSession, selected: SessionRecord) -> TuiSession:
+    context = AgentContext(messages=list(selected.messages))
+    if session.resources is not None:
+        apply_resource_prompt(context, session.resources)
     return replace(
         session,
-        context=AgentContext(messages=list(selected.messages)),
+        context=context,
         session_id=selected.session_id,
-        persisted_message_count=len(selected.messages),
+        persisted_message_count=len(context.messages),
     )
 
 
@@ -380,13 +408,22 @@ def _fork_session(
         parent_id=session.session_id,
         name=name or None,
     )
-    for message in session.context.messages:
+    messages = tuple(
+        conversation_messages_without_resource_prompt(
+            session.context.messages,
+            session.resources,
+        )
+    )
+    for message in messages:
         session.session_store.append(created.session_id, message)
+    context = AgentContext(messages=list(messages))
+    if session.resources is not None:
+        apply_resource_prompt(context, session.resources)
     return replace(
         session,
-        context=AgentContext(messages=list(session.context.messages)),
+        context=context,
         session_id=created.session_id,
-        persisted_message_count=len(session.context.messages),
+        persisted_message_count=len(context.messages),
     )
 
 
@@ -416,6 +453,7 @@ def _configure_session(
     error: TextIO,
     context: AgentContext,
     registry: ExtensionRegistry,
+    resources: ResourceInventory | None,
     config_store: ProviderConfigStore,
     session_id: str,
     session_store: SessionStore,
@@ -501,6 +539,7 @@ def _configure_session(
         config=config,
         context=context,
         registry=registry,
+        resources=resources,
         session_id=session_id,
         session_store=session_store,
         persisted_message_count=(
@@ -519,6 +558,7 @@ def _restore_session(
     error: TextIO,
     context: AgentContext,
     registry: ExtensionRegistry,
+    resources: ResourceInventory | None,
     session_id: str,
     session_store: SessionStore,
 ) -> TuiSession | None:
@@ -544,6 +584,7 @@ def _restore_session(
         config=config,
         context=context,
         registry=registry,
+        resources=resources,
         session_id=session_id,
         session_store=session_store,
         persisted_message_count=len(context.messages),
@@ -861,6 +902,7 @@ def _configure_provider_category(
             config=config,
             context=session.context,
             registry=session.registry,
+            resources=session.resources,
             session_id=session.session_id,
             session_store=session.session_store,
             persisted_message_count=session.persisted_message_count,
@@ -957,6 +999,7 @@ def _configure_settings(
                 error=error,
                 context=session.context,
                 registry=session.registry,
+                resources=session.resources,
                 config_store=config_store,
                 session_id=session.session_id,
                 session_store=session.session_store,
@@ -1085,6 +1128,7 @@ def _update_active_provider_setting(
         config=config,
         context=session.context,
         registry=session.registry,
+        resources=session.resources,
         session_id=session.session_id,
         session_store=session.session_store,
         persisted_message_count=session.persisted_message_count,
@@ -1190,6 +1234,22 @@ def _handle_command(
     config_store: ProviderConfigStore,
     ) -> tuple[TuiSession, bool]:
     command_name = command.split(maxsplit=1)[0].lower()
+    if command_name.startswith("/skill:") and command_name != "/skill:":
+        skill_name = command.split(maxsplit=1)[0].split(":", maxsplit=1)[1]
+        resource = (
+            session.resources.find_skill(skill_name)
+            if session.resources is not None
+            else None
+        )
+        if resource is not None:
+            load_skill_into_context(session.context, resource)
+            print(f"Skill '{resource.name}' ({resource.path}):", file=output)
+            print(resource.content, file=output)
+        elif skill_name in session.registry.skills:
+            print(f"Skill '{skill_name}' is registered.", file=output)
+        else:
+            print(f"Unknown skill: {skill_name}", file=error)
+        return session, False
     invocation = DEFAULT_COMMAND_CATALOG.resolve(command)
     if invocation is None:
         print(f"peon: unknown command '{command_name}'; type /help", file=error)
@@ -1248,6 +1308,7 @@ def _handle_command(
                 error=error,
                 context=session.context,
                 registry=session.registry,
+                resources=session.resources,
                 config_store=config_store,
                 session_id=session.session_id,
                 session_store=session.session_store,
@@ -1273,6 +1334,7 @@ def _handle_command(
             config=replacement_config,
             context=session.context,
             registry=session.registry,
+            resources=session.resources,
             session_id=session.session_id,
             session_store=session.session_store,
             persisted_message_count=session.persisted_message_count,
@@ -1324,11 +1386,14 @@ def _handle_command(
         except (OSError, SessionStoreError) as caught:
             print(f"peon: could not start a new conversation: {caught}", file=error)
             return session, False
+        context = AgentContext()
+        if session.resources is not None:
+            apply_resource_prompt(context, session.resources)
         session = replace(
             session,
-            context=AgentContext(),
+            context=context,
             session_id=created.session_id,
-            persisted_message_count=0,
+            persisted_message_count=len(context.messages),
         )
         print("Conversation cleared.", file=output)
         return session, False
@@ -1363,6 +1428,7 @@ def _handle_command(
             error=error,
             context=session.context,
             registry=session.registry,
+            resources=session.resources,
             config_store=config_store,
             session_id=session.session_id,
             session_store=session.session_store,

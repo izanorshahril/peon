@@ -5,6 +5,7 @@ import json
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Literal, TextIO
 
 from peon.agent import AgentContext, AgentError, AgentMessage, ModelProvider, ToolCall, run_task
@@ -23,6 +24,7 @@ from peon.extensions import (
 )
 
 from .sessions import SessionStore
+from .resources import ResourceInventory, ResourceLoader, apply_resource_prompt
 
 
 REASONING_EFFORTS = ("none", "low", "medium", "high")
@@ -369,6 +371,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Role used for fallback tool instructions",
     )
     parser.add_argument(
+        "--no-context-files",
+        action="store_true",
+        help="Disable discovered context files",
+    )
+    parser.add_argument(
+        "--no-skills",
+        action="store_true",
+        help="Disable discovered skills",
+    )
+    parser.add_argument(
+        "--no-project-context",
+        action="store_true",
+        help="Ignore discovered project skills and context files",
+    )
+    parser.add_argument(
+        "--skill-path",
+        action="append",
+        type=Path,
+        default=[],
+        help="Load an explicit skill directory or SKILL.md path",
+    )
+    parser.add_argument(
+        "--context-file",
+        action="append",
+        type=Path,
+        default=[],
+        help="Load an explicit context file",
+    )
+    parser.add_argument(
+        "--system-prompt",
+        help="Replace discovered system prompt text",
+    )
+    parser.add_argument(
+        "--system-prompt-file",
+        type=Path,
+        help="Replace discovered system prompt with a file",
+    )
+    parser.add_argument(
+        "--append-system-prompt",
+        action="append",
+        default=[],
+        help="Append literal system prompt text",
+    )
+    parser.add_argument(
+        "--append-system-prompt-file",
+        action="append",
+        type=Path,
+        default=[],
+        help="Append system prompt text from a file",
+    )
+    parser.add_argument(
         "--tui",
         action="store_true",
         help="Start an interactive session with in-session provider setup",
@@ -532,6 +585,7 @@ def main(
                 no_session=args.no_session,
                 session_target=args.session_target,
                 session_name=args.session_name,
+                resources=_load_resources(args),
             )
         else:
             raise CommandError(f"{mode} mode is not available yet")
@@ -552,7 +606,9 @@ def main(
             tool_prompt_role=args.tool_prompt_role,
         )
         provider = (provider_factory or create_provider)(config)
-        response = run_task(task, provider, model=config.model)
+        context = AgentContext()
+        apply_resource_prompt(context, _load_resources(args))
+        response = run_task(task, provider, context=context, model=config.model)
         if isinstance(response, ToolCall):
             raise CommandError(
                 f"provider requested tool '{response.name}', but tool execution "
@@ -649,6 +705,7 @@ def _run_print_mode(
     if registry is None:
         register_sample_tools(active_registry)
         register_filesystem_tools(active_registry)
+    apply_resource_prompt(context, _load_resources(args))
 
     def on_message(message: AgentMessage) -> None:
         active_store.append(session_id, message)
@@ -741,6 +798,20 @@ def _print_mode_failure(
     else:
         print(f"peon: {caught}", file=error)
     return 1
+
+
+def _load_resources(args: argparse.Namespace) -> ResourceInventory:
+    return ResourceLoader(
+        include_skills=not args.no_skills,
+        include_context_files=not args.no_context_files,
+        trust_project=not args.no_project_context,
+        skill_paths=tuple(args.skill_path),
+        context_paths=tuple(args.context_file),
+        system_prompt=args.system_prompt,
+        system_prompt_path=args.system_prompt_file,
+        append_system_prompt=tuple(args.append_system_prompt),
+        append_system_prompt_paths=tuple(args.append_system_prompt_file),
+    ).load()
 
 
 class _EventWriter:

@@ -4,6 +4,7 @@ from io import StringIO
 
 from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
 from peon.app import JsonProviderConfigStore, ProviderConfig, UiConfig
+from peon.app.resources import ResourceLoader
 from peon.app.tui import SlashCommandCompleter, run_tui
 from peon.app.sessions import JsonlSessionStore, MemorySessionStore
 from prompt_toolkit.completion import CompleteEvent
@@ -482,6 +483,163 @@ def test_tui_new_supports_legacy_session_store_create_api() -> None:
 
     assert result == 0
     assert len(store.delegate.order) == 2
+
+
+def test_tui_new_reapplies_resource_prompt_without_persisting_it(tmp_path) -> None:
+    prompt_path = tmp_path / "SYSTEM.md"
+    prompt_path.write_text("current project rules", encoding="utf-8")
+    resources = ResourceLoader(
+        tmp_path,
+        global_root=tmp_path / "missing-global",
+    ).load()
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+    config_store = MemoryConfigStore(config)
+    session_store = MemorySessionStore()
+    factory = ProviderFactory()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(["first task", "/new", "second task", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=config_store,
+        session_store=session_store,
+        resources=resources,
+    )
+
+    assert result == 0
+    assert factory.providers[0].received_messages[0][0] == AgentMessage(
+        role="system",
+        content="current project rules",
+    )
+    assert factory.providers[0].received_messages[1][0] == AgentMessage(
+        role="system",
+        content="current project rules",
+    )
+    assert all(
+        message.role != "system"
+        for message in session_store.load(session_store.order[1]).messages
+    )
+
+
+def test_tui_resume_reapplies_current_resource_prompt(tmp_path) -> None:
+    prompt_path = tmp_path / "SYSTEM.md"
+    prompt_path.write_text("current project rules", encoding="utf-8")
+    resources = ResourceLoader(
+        tmp_path,
+        global_root=tmp_path / "missing-global",
+    ).load()
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+    config_store = MemoryConfigStore(config)
+    session_store = MemorySessionStore()
+    saved = session_store.create(name="release")
+    session_store.append(saved.session_id, AgentMessage(role="user", content="old task"))
+    factory = ProviderFactory()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(["/session release", "new task", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=config_store,
+        session_store=session_store,
+        resources=resources,
+    )
+
+    assert result == 0
+    assert factory.providers[0].received_messages[0] == (
+        AgentMessage(role="system", content="current project rules"),
+        AgentMessage(role="user", content="old task"),
+        AgentMessage(role="user", content="new task"),
+    )
+    assert session_store.load(saved.session_id).messages[0] == AgentMessage(
+        role="user",
+        content="old task",
+    )
+
+
+def test_tui_fork_reapplies_resource_prompt_without_persisting_it(tmp_path) -> None:
+    prompt_path = tmp_path / "SYSTEM.md"
+    prompt_path.write_text("current project rules", encoding="utf-8")
+    resources = ResourceLoader(
+        tmp_path,
+        global_root=tmp_path / "missing-global",
+    ).load()
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+    config_store = MemoryConfigStore(config)
+    session_store = MemorySessionStore()
+    factory = ProviderFactory()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(
+            ["first task", "/fork branch", "second task", "/quit"]
+        ),
+        secret_input=scripted_secret([]),
+        output=StringIO(),
+        config_store=config_store,
+        session_store=session_store,
+        resources=resources,
+    )
+
+    assert result == 0
+    assert factory.providers[0].received_messages[1] == (
+        AgentMessage(role="system", content="current project rules"),
+        AgentMessage(role="user", content="first task"),
+        AgentMessage(role="assistant", content="first response"),
+        AgentMessage(role="user", content="second task"),
+    )
+    child = session_store.load(session_store.order[1])
+    assert all(message.role != "system" for message in child.messages)
+
+
+def test_tui_explicit_skill_command_loads_retained_skill_body(tmp_path) -> None:
+    skill_directory = tmp_path / ".agents" / "skills" / "notes"
+    skill_directory.mkdir(parents=True)
+    (skill_directory / "SKILL.md").write_text(
+        "---\nname: notes\ndescription: Note taking\n---\nUse the notes tool.\n",
+        encoding="utf-8",
+    )
+    resources = ResourceLoader(
+        tmp_path,
+        global_root=tmp_path / "missing-global",
+    ).load()
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+    output = StringIO()
+    factory = ProviderFactory()
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(["/skill:notes", "use the skill", "/quit"]),
+        secret_input=scripted_secret([]),
+        output=output,
+        config_store=MemoryConfigStore(config),
+        session_store=MemorySessionStore(),
+        resources=resources,
+    )
+
+    assert result == 0
+    assert "Use the notes tool." in output.getvalue()
+    assert any(
+        message.role == "system" and "Use the notes tool." in message.content
+        for message in factory.providers[0].received_messages[0]
+    )
 
 
 def test_create_session_supports_uninspectable_legacy_create_api() -> None:

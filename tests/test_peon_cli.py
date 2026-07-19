@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import json
 from io import StringIO
+from pathlib import Path
 from typing import Sequence
 
 import pytest
@@ -61,7 +62,15 @@ def test_command_runs_task_through_injected_provider_factory() -> None:
     error = StringIO()
 
     result = main(
-        ["Summarize the repository.", "--provider", "fake", "--model", "small"],
+        [
+            "Summarize the repository.",
+            "--provider",
+            "fake",
+            "--model",
+            "small",
+            "--no-context-files",
+            "--no-skills",
+        ],
         provider_factory=provider_factory,
         output=output,
         error=error,
@@ -82,7 +91,14 @@ def test_print_mode_writes_only_response_and_includes_piped_input() -> None:
     error = StringIO()
 
     result = main(
-        ["-p", "Summarize this input.", "--provider", "fake"],
+        [
+            "-p",
+            "Summarize this input.",
+            "--provider",
+            "fake",
+            "--no-context-files",
+            "--no-skills",
+        ],
         provider_factory=lambda _config: provider,
         input=StringIO("piped context"),
         output=output,
@@ -104,7 +120,7 @@ def test_print_mode_accepts_piped_input_without_a_prompt() -> None:
     provider = FakeProvider(response="Summarized.")
 
     result = main(
-        ["-p", "--provider", "fake"],
+        ["-p", "--provider", "fake", "--no-context-files", "--no-skills"],
         provider_factory=lambda _config: provider,
         input=StringIO("piped context\n"),
         output=StringIO(),
@@ -169,7 +185,15 @@ def test_print_mode_continues_only_when_explicitly_requested() -> None:
     session_store.append(previous.session_id, AgentMessage(role="user", content="Old."))
 
     result = main(
-        ["-p", "Continue this.", "--provider", "fake", "--continue"],
+        [
+            "-p",
+            "Continue this.",
+            "--provider",
+            "fake",
+            "--continue",
+            "--no-context-files",
+            "--no-skills",
+        ],
         provider_factory=lambda _config: provider,
         session_store=session_store,
         output=StringIO(),
@@ -195,7 +219,16 @@ def test_print_mode_opens_an_explicit_session_target() -> None:
     session_store.append(previous.session_id, AgentMessage(role="user", content="Old."))
 
     result = main(
-        ["-p", "Reopen this.", "--provider", "fake", "--session", "release"],
+        [
+            "-p",
+            "Reopen this.",
+            "--provider",
+            "fake",
+            "--session",
+            "release",
+            "--no-context-files",
+            "--no-skills",
+        ],
         provider_factory=lambda _config: provider,
         session_store=session_store,
         output=StringIO(),
@@ -208,6 +241,58 @@ def test_print_mode_opens_an_explicit_session_target() -> None:
         AgentMessage(role="user", content="Reopen this."),
     )
     assert len(session_store.order) == 1
+
+
+def test_command_forwards_explicit_system_prompt_to_provider() -> None:
+    provider = FakeProvider(response="Ready.")
+
+    result = main(
+        [
+            "Inspect the task.",
+            "--provider",
+            "fake",
+            "--system-prompt",
+            "Use concise answers.",
+            "--no-context-files",
+            "--no-skills",
+        ],
+        provider_factory=lambda _config: provider,
+        output=StringIO(),
+        error=StringIO(),
+    )
+
+    assert result == 0
+    assert provider.received_messages[0] == AgentMessage(
+        role="system",
+        content="Use concise answers.",
+    )
+
+
+def test_command_loads_discovered_resources_before_provider_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "SYSTEM.md").write_text("Project rules", encoding="utf-8")
+    provider = FakeProvider(response="Ready.")
+
+    result = main(
+        [
+            "Inspect the task.",
+            "--provider",
+            "fake",
+            "--no-skills",
+        ],
+        provider_factory=lambda _config: provider,
+        output=StringIO(),
+        error=StringIO(),
+    )
+
+    assert result == 0
+    assert provider.received_messages[0] == AgentMessage(
+        role="system",
+        content="Project rules",
+    )
 
 
 def test_print_event_mode_emits_ordered_json_lines() -> None:

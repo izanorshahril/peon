@@ -74,6 +74,12 @@ from .sessions import (
     create_session,
     select_session,
 )
+from .resources import (
+    ResourceInventory,
+    apply_resource_prompt,
+    conversation_messages_without_resource_prompt,
+    load_skill_into_context,
+)
 from .commands import (
     DEFAULT_COMMAND_CATALOG,
     CommandDefinition,
@@ -1041,6 +1047,7 @@ class TextualPeonApp(App[int]):
         no_session: bool = False,
         session_target: str | None = None,
         session_name: str | None = None,
+        resources: ResourceInventory | None = None,
         processing_status_text: str | None = None,
         user_top_blank_lines: int = 1,
         user_bottom_blank_lines: int = 1,
@@ -1059,10 +1066,16 @@ class TextualPeonApp(App[int]):
         self.continue_session = continue_session
         self.session_target = session_target
         self.session_name = session_name
+        self.resources = resources
         self.session_id = ""
         self.persisted_message_count = 0
+        discovered_skill_names = (
+            tuple(skill.name for skill in resources.skills)
+            if resources is not None
+            else discover_skill_names()
+        )
         self.skill_names = tuple(
-            dict.fromkeys((*registry.skills, *discover_skill_names()))
+            dict.fromkeys((*registry.skills, *discovered_skill_names))
         )
         self.setup_step: SetupStep | None = None
         self.pending_config: ProviderConfig | None = None
@@ -1117,11 +1130,17 @@ class TextualPeonApp(App[int]):
         self.execution_context: ToolExecutionContext | None = None
 
     def compose(self) -> ComposeResult:
+        resource_lines = (
+            "\n".join(self.resources.startup_summary())
+            if self.resources is not None
+            else ""
+        )
         yield Static(
             Text.assemble(
                 ("peon", "#8bd5ff"),
                 (" v0.1.0", "#808080"),
                 ("\nescape interrupt · ctrl+c ask before exit · ctrl+d exit · / commands", "#808080"),
+                (f"\n{resource_lines}" if resource_lines else "", "#808080"),
             ),
             id="startup",
         )
@@ -1184,6 +1203,8 @@ class TextualPeonApp(App[int]):
                     )
             self.session_id = latest.session_id
             self.context = AgentContext(messages=list(latest.messages))
+            if self.resources is not None:
+                apply_resource_prompt(self.context, self.resources)
             self.persisted_message_count = len(self.context.messages)
         except (OSError, SessionStoreError) as caught:
             self._write(f"Could not open saved session: {caught}")
@@ -1195,7 +1216,9 @@ class TextualPeonApp(App[int]):
             self.session_store = fallback
             self.session_id = latest.session_id
             self.context = AgentContext()
-            self.persisted_message_count = 0
+            if self.resources is not None:
+                apply_resource_prompt(self.context, self.resources)
+            self.persisted_message_count = len(self.context.messages)
         transcript = self.query_one("#transcript", ChatMessage)
         for message in self.context.messages:
             self._append_context_message(message)
@@ -2261,7 +2284,9 @@ class TextualPeonApp(App[int]):
     def _open_selected_session(self, selected: SessionRecord) -> None:
         self.session_id = selected.session_id
         self.context = AgentContext(messages=list(selected.messages))
-        self.persisted_message_count = len(selected.messages)
+        if self.resources is not None:
+            apply_resource_prompt(self.context, self.resources)
+        self.persisted_message_count = len(self.context.messages)
         transcript = self.query_one("#transcript", ChatMessage)
         transcript.clear_transcript()
         for message in self.context.messages:
@@ -2270,18 +2295,27 @@ class TextualPeonApp(App[int]):
         self._set_status()
 
     def _fork_current_session(self, name: str) -> None:
+        messages = tuple(
+            conversation_messages_without_resource_prompt(
+                self.context.messages,
+                self.resources,
+            )
+        )
         try:
             created = create_session(
                 self.session_store,
                 parent_id=self.session_id,
                 name=name or None,
             )
-            for message in self.context.messages:
+            for message in messages:
                 self.session_store.append(created.session_id, message)
         except (OSError, SessionStoreError) as caught:
             self._write(f"Could not fork conversation: {caught}")
             return
         self.session_id = created.session_id
+        self.context = AgentContext(messages=list(messages))
+        if self.resources is not None:
+            apply_resource_prompt(self.context, self.resources)
         self.persisted_message_count = len(self.context.messages)
         self._write(f"Forked conversation: {self.session_id}")
         self._set_status()
@@ -2726,7 +2760,17 @@ class TextualPeonApp(App[int]):
         normalized_name = name.casefold()
         if normalized_name.startswith("/skill:") and normalized_name != "/skill:":
             skill_name = name.split(":", maxsplit=1)[1]
-            if skill_name in self.registry.skills:
+            resource = (
+                self.resources.find_skill(skill_name)
+                if self.resources is not None
+                else None
+            )
+            if resource is not None:
+                load_skill_into_context(self.context, resource)
+                self._write(
+                    f"Skill '{resource.name}' ({resource.path}):\n{resource.content}"
+                )
+            elif skill_name in self.registry.skills:
                 self._write(f"Skill '{skill_name}' is registered.")
             elif skill_name in self.skill_names:
                 self._write(f"Skill '{skill_name}' is available but not loaded.")
@@ -2784,7 +2828,9 @@ class TextualPeonApp(App[int]):
                 return
             self.session_id = created.session_id
             self.context = AgentContext()
-            self.persisted_message_count = 0
+            if self.resources is not None:
+                apply_resource_prompt(self.context, self.resources)
+            self.persisted_message_count = len(self.context.messages)
             self.query_one("#transcript", ChatMessage).clear_transcript()
             self._write("✓ New session started", role="success")
             self._set_status()
@@ -2917,6 +2963,7 @@ def run_textual_tui(
     no_session: bool = False,
     session_target: str | None = None,
     session_name: str | None = None,
+    resources: ResourceInventory | None = None,
     user_top_blank_lines: int = 1,
     user_bottom_blank_lines: int = 1,
     message_left_padding: int = 1,
@@ -2935,6 +2982,7 @@ def run_textual_tui(
         no_session=no_session,
         session_target=session_target,
         session_name=session_name,
+        resources=resources,
     )
     app.run()
     return int(app.return_code or 0)
