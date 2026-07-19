@@ -4,9 +4,14 @@ from collections.abc import Iterator, Mapping
 from fnmatch import fnmatch
 import os
 from pathlib import Path
+from queue import Empty, Queue
 import re
 import subprocess
+from threading import Thread
 import time
+from typing import IO, Any, cast
+
+from peon.agent import ToolExecutionContext
 
 from .registry import ExtensionRegistry
 
@@ -111,10 +116,11 @@ def register_filesystem_tools(
                 "timeout": {"type": "number", "minimum": 1},
             },
         },
-        handler=lambda arguments: _bash(
+        handler=lambda arguments, context=None: _bash(
             workspace,
             arguments,
             max_output_chars=max_output_chars,
+            context=context,
         ),
     )
     registry.register_tool(
@@ -275,6 +281,7 @@ def _bash(
     arguments: Mapping[str, object],
     *,
     max_output_chars: int,
+    context: ToolExecutionContext | None = None,
 ) -> str:
     command = arguments.get("command")
     if not isinstance(command, str) or not command.strip():
@@ -283,51 +290,153 @@ def _bash(
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         return "bash error: timeout must be a positive number"
     started_at = time.perf_counter()
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=root,
-            shell=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
+    process_kwargs: dict[str, Any] = {
+        "cwd": root,
+        "shell": True,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "bufsize": 1,
+    }
+    if os.name == "nt":
+        process_kwargs["creationflags"] = getattr(
+            subprocess,
+            "CREATE_NEW_PROCESS_GROUP",
+            0,
         )
-    except subprocess.TimeoutExpired as error:
-        elapsed = time.perf_counter() - started_at
-        output = _process_output(error.stdout, error.stderr, max_output_chars)
-        result = f"bash error: command timed out after {timeout} seconds"
-        if output:
-            result += f"\n{output}"
-        return f"{result}\nTook {elapsed:.1f}s"
+    else:
+        process_kwargs["start_new_session"] = True
+    try:
+        process = subprocess.Popen(command, **process_kwargs)
+    except OSError as error:
+        return f"bash error: could not start command: {error}"
+
+    output_queue: Queue[tuple[str, str]] = Queue()
+    reader_threads = [
+        Thread(
+            target=_read_process_stream,
+            args=(label, cast(IO[str], stream), output_queue),
+            daemon=True,
+        )
+        for label, stream in (
+            ("stdout", process.stdout),
+            ("stderr", process.stderr),
+        )
+        if stream is not None
+    ]
+    for reader in reader_threads:
+        reader.start()
+
+    output = _BashOutput(max_output_chars)
+    cancelled = False
+    timed_out = False
+    while True:
+        if process.poll() is None:
+            if context is not None and context.cancelled:
+                cancelled = True
+                _stop_process(process)
+            elif time.perf_counter() - started_at >= timeout:
+                timed_out = True
+                _stop_process(process)
+        try:
+            stream, chunk = output_queue.get(timeout=0.05)
+        except Empty:
+            if process.poll() is not None and not any(
+                reader.is_alive() for reader in reader_threads
+            ):
+                break
+            continue
+        accepted = output.add(stream, chunk)
+        if accepted and context is not None and context.on_output is not None:
+            context.on_output(stream, accepted)
+
+    process.wait()
+    for reader in reader_threads:
+        reader.join(timeout=1)
     elapsed = time.perf_counter() - started_at
-    output = _process_output(
-        completed.stdout,
-        completed.stderr,
-        max_output_chars,
-    )
-    prefix = f"bash: exit code {completed.returncode}"
-    result = f"{prefix}\n{output}" if output else prefix
+    status = "exited"
+    if cancelled:
+        prefix = "bash: cancelled"
+        status = "cancelled"
+    elif timed_out:
+        prefix = f"bash: timed out after {timeout} seconds"
+        status = "timed out"
+    else:
+        prefix = f"bash: exit code {process.returncode}"
+    result = f"{prefix}\nstatus: {status}"
+    rendered = output.render()
+    if rendered:
+        result += f"\n{rendered}"
+    if output.truncated:
+        result += "\n[truncated]"
     return f"{result}\nTook {elapsed:.1f}s"
 
 
-def _process_output(
-    stdout: str | bytes | None,
-    stderr: str | bytes | None,
-    max_output_chars: int,
-) -> str:
-    parts: list[str] = []
-    for label, value in (("stdout", stdout), ("stderr", stderr)):
-        if isinstance(value, bytes):
-            value = value.decode("utf-8", errors="replace")
-        if isinstance(value, str) and value:
-            parts.append(f"{label}:\n{value}")
-    rendered = "\n".join(parts)
-    if len(rendered) <= max_output_chars:
-        return rendered
-    return rendered[:max_output_chars] + "\n[truncated]"
+def _read_process_stream(
+    label: str,
+    stream: IO[str],
+    output_queue: Queue[tuple[str, str]],
+) -> None:
+    while True:
+        chunk = stream.readline()
+        if not chunk:
+            return
+        output_queue.put((label, chunk))
+
+
+def _stop_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            check=False,
+        )
+    else:
+        kill_process_group = getattr(os, "killpg", None)
+        if callable(kill_process_group):
+            kill_process_group(process.pid, 15)
+        else:
+            os.kill(process.pid, 15)
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+class _BashOutput:
+    def __init__(self, max_output_chars: int) -> None:
+        self.max_output_chars = max_output_chars
+        self._parts: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        self._order: list[str] = []
+        self._size = 0
+        self.truncated = False
+
+    def add(self, stream: str, chunk: str) -> str:
+        if stream not in self._order:
+            self._order.append(stream)
+        remaining = self.max_output_chars - self._size
+        if remaining <= 0:
+            self.truncated = True
+            return ""
+        accepted = chunk[:remaining]
+        self._parts.setdefault(stream, []).append(accepted)
+        self._size += len(accepted)
+        if len(accepted) < len(chunk):
+            self.truncated = True
+        return accepted
+
+    def render(self) -> str:
+        parts = []
+        for stream in self._order:
+            value = "".join(self._parts.get(stream, ()))
+            if value:
+                parts.append(f"{stream}:\n{value}")
+        return "\n".join(parts)
 
 
 def _read(

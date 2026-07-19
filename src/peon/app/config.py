@@ -7,7 +7,7 @@ from pathlib import Path
 from dataclasses import asdict, dataclass, replace
 from typing import Protocol
 
-from peon.agent import ToolDefinition, ToolExecutor
+from peon.agent import ToolDefinition, ToolExecutionContext, ToolExecutor
 
 from .cli import ProviderConfig
 
@@ -230,6 +230,19 @@ class FilteredToolExecutor:
     def invoke(self, name: str, arguments: Mapping[str, object]) -> str:
         if name not in self._enabled_names:
             raise ValueError(f"tool '{name}' is disabled")
+        return self._executor.invoke(name, arguments)
+
+    def invoke_with_context(
+        self,
+        name: str,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+    ) -> str:
+        if name not in self._enabled_names:
+            raise ValueError(f"tool '{name}' is disabled")
+        contextual_invoke = getattr(self._executor, "invoke_with_context", None)
+        if callable(contextual_invoke):
+            return contextual_invoke(name, arguments, context)
         return self._executor.invoke(name, arguments)
 
 

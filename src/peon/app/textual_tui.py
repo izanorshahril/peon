@@ -24,7 +24,13 @@ from textual.worker import Worker, WorkerState
 from textual.widgets import Input, Static, TextArea
 from textual.containers import VerticalScroll
 
-from peon.agent import AgentContext, ModelProvider, ToolCall, run_task
+from peon.agent import (
+    AgentContext,
+    ModelProvider,
+    ToolCall,
+    ToolExecutionContext,
+    run_task,
+)
 from peon.ai import ProviderError
 from peon.extensions import ExtensionRegistry, discover_skill_names
 
@@ -510,9 +516,46 @@ class ChatMessage(TextArea):
                 )
                 self._refresh_blocks()
                 return
+            if previous.role == "tool-message" and (
+                previous.tool_call_id is None
+                or tool_call_id is None
+                or previous.tool_call_id == tool_call_id
+            ):
+                self._blocks[-1] = _TranscriptBlock(
+                    role="tool-message",
+                    text=plain_text,
+                    call_text=previous.call_text,
+                    tool_call_id=tool_call_id or previous.tool_call_id,
+                )
+                self._refresh_blocks()
+                return
         self._blocks.append(
             _TranscriptBlock(role=role, text=plain_text, tool_call_id=tool_call_id)
         )
+        self._refresh_blocks()
+
+    def append_tool_output(self, text: str) -> None:
+        """Update the active tool block with non-persisted live output."""
+        if not text:
+            return
+        if self._blocks and self._blocks[-1].role == "tool-call":
+            previous = self._blocks[-1]
+            self._blocks[-1] = _TranscriptBlock(
+                role="tool-message",
+                text=text,
+                call_text=previous.call_text or Text(previous.text, end=""),
+                tool_call_id=previous.tool_call_id,
+            )
+        elif self._blocks and self._blocks[-1].role == "tool-message":
+            previous = self._blocks[-1]
+            self._blocks[-1] = _TranscriptBlock(
+                role="tool-message",
+                text=previous.text + text,
+                call_text=previous.call_text,
+                tool_call_id=previous.tool_call_id,
+            )
+        else:
+            self._blocks.append(_TranscriptBlock(role="tool-message", text=text))
         self._refresh_blocks()
 
     def _refresh_blocks(self) -> None:
@@ -1071,6 +1114,7 @@ class TextualPeonApp(App[int]):
         self.user_bottom_blank_lines = self.ui_config.user_bottom_blank_lines
         self.message_left_padding = self.ui_config.message_left_padding
         self.task_worker: Worker[str | ToolCall] | None = None
+        self.execution_context: ToolExecutionContext | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(
@@ -1535,6 +1579,10 @@ class TextualPeonApp(App[int]):
                 return
             return
         self._last_escape_at = None
+        if self.execution_context is not None and not self.execution_context.cancelled:
+            self.execution_context.cancel()
+            self._write("Task cancellation requested.", role="system")
+            return
         self.query_one("#prompt", PeonInput).action_clear()
 
     def action_cycle_reasoning(self) -> None:
@@ -1606,6 +1654,7 @@ class TextualPeonApp(App[int]):
     def _run_task(self, task: str) -> str | ToolCall:
         assert self.provider is not None
         assert self.config is not None
+        execution_context = self.execution_context
         try:
             return run_task(
                 task,
@@ -1617,6 +1666,7 @@ class TextualPeonApp(App[int]):
                     self._append_runtime_message,
                     message,
                 ),
+                execution_context=execution_context,
             )
         finally:
             self._persist_new_messages()
@@ -1638,6 +1688,15 @@ class TextualPeonApp(App[int]):
 
     def _start_task(self, task: str) -> None:
         self._set_processing(True)
+        execution_context = ToolExecutionContext(
+            on_output=lambda stream, chunk: self.call_from_thread(
+                self._append_bash_output,
+                execution_context,
+                stream,
+                chunk,
+            )
+        )
+        self.execution_context = execution_context
         self.task_worker = cast(
             Worker[str | ToolCall],
             self.run_worker(
@@ -1668,10 +1727,27 @@ class TextualPeonApp(App[int]):
                 )
         elif event.state == WorkerState.ERROR:
             error = event.worker.error
-            self._write(str(error or "task failed"), role="system")
+            if self.execution_context is not None and self.execution_context.cancelled:
+                self._write("Task cancelled.", role="system")
+            else:
+                self._write(str(error or "task failed"), role="system")
         self.task_worker = None
+        self.execution_context = None
         self._set_processing(False)
         self._set_status()
+
+    def _append_bash_output(
+        self,
+        execution_context: ToolExecutionContext,
+        stream: str,
+        chunk: str,
+    ) -> None:
+        if self.execution_context is not execution_context:
+            return
+        del stream
+        transcript = self.query_one("#transcript", ChatMessage)
+        transcript.append_tool_output(chunk)
+        self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
 
     def _set_status(self) -> None:
         if self.config is None:

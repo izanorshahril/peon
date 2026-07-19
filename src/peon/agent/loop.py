@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 from .runtime_errors import AgentError
 
-from .executor import ToolExecutor
+from .executor import ToolExecutionContext, ToolExecutor
 from .models import AgentContext, AgentMessage, ToolCall, ToolDefinition
 from .provider_protocol import ModelProvider
 
@@ -20,6 +20,7 @@ def run_task(
     model: str | None = None,
     on_message: Callable[[AgentMessage], None] | None = None,
     preserve_task_whitespace: bool = False,
+    execution_context: ToolExecutionContext | None = None,
 ) -> str | ToolCall:
     """Run one task against an injected provider and return its response."""
     normalized_task = task if preserve_task_whitespace else task.strip()
@@ -59,7 +60,10 @@ def run_task(
                 response.tool_call,
                 thinking=response.thinking,
                 on_message=on_message,
+                execution_context=execution_context,
             )
+            if execution_context is not None and execution_context.cancelled:
+                raise AgentError("tool execution cancelled")
             continue
 
         response_text = response.content.strip()
@@ -84,6 +88,7 @@ def _continue_with_tool_call(
     *,
     thinking: str = "",
     on_message: Callable[[AgentMessage], None] | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> None:
     if not isinstance(tool_call.arguments, Mapping):
         raise AgentError(
@@ -99,7 +104,15 @@ def _continue_with_tool_call(
     if on_message is not None:
         on_message(assistant_message)
     try:
-        result = executor.invoke(tool_call.name, tool_call.arguments)
+        contextual_invoke = getattr(executor, "invoke_with_context", None)
+        if execution_context is not None and callable(contextual_invoke):
+            result = contextual_invoke(
+                tool_call.name,
+                tool_call.arguments,
+                execution_context,
+            )
+        else:
+            result = executor.invoke(tool_call.name, tool_call.arguments)
     except Exception as error:
         tool_message = AgentMessage(
             role="tool",

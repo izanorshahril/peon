@@ -107,6 +107,39 @@ def test_jsonl_session_store_round_trips_filesystem_mutation_result(tmp_path) ->
     assert loaded.messages == messages
 
 
+def test_jsonl_session_store_round_trips_bash_call_and_result(tmp_path) -> None:
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    messages = (
+        AgentMessage(
+            role="assistant",
+            content="",
+            tool_call=ToolCall(
+                name="bash",
+                arguments={"command": "echo hello", "timeout": 5},
+                call_id="bash-1",
+            ),
+        ),
+        AgentMessage(
+            role="tool",
+            content=(
+                "bash: exit code 0\n"
+                "status: exited\n"
+                "stdout:\nhello\n"
+                "Took 0.0s"
+            ),
+            tool_call_id="bash-1",
+        ),
+    )
+
+    for message in messages:
+        store.append(session.session_id, message)
+
+    loaded = store.load(session.session_id)
+
+    assert loaded.messages == messages
+
+
 def test_jsonl_session_store_persists_run_task_filesystem_sequence(tmp_path) -> None:
     target = tmp_path / "notes.txt"
     target.write_text("before\n", encoding="utf-8")

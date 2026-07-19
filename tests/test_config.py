@@ -16,7 +16,7 @@ from peon.app.config import (
     update_shortcut_setting,
     update_tool_setting,
 )
-from peon.agent import ToolDefinition
+from peon.agent import ToolDefinition, ToolExecutionContext
 
 
 def test_json_store_round_trips_multiple_profiles_and_active_provider(tmp_path) -> None:
@@ -266,6 +266,17 @@ def test_tool_settings_update_and_filter_provider_definitions() -> None:
         filtered.invoke("read", {})
 
 
+def test_filtered_tool_executor_forwards_execution_context() -> None:
+    config = UiConfig()
+    tool = ToolDefinition(name="read", description="Read", parameters={})
+    executor = _ContextualToolExecutor((tool,))
+    filtered = filter_tool_executor(config, executor)
+    execution_context = ToolExecutionContext()
+
+    assert filtered.invoke_with_context("read", {}, execution_context) == "context"
+    assert executor.received_context is execution_context
+
+
 class _ToolExecutor:
     def __init__(self, tools: tuple[ToolDefinition, ...]) -> None:
         self._tools = tools
@@ -277,6 +288,22 @@ class _ToolExecutor:
     def invoke(self, name: str, arguments: Mapping[str, object]) -> str:
         del arguments
         return name
+
+
+class _ContextualToolExecutor(_ToolExecutor):
+    def __init__(self, tools: tuple[ToolDefinition, ...]) -> None:
+        super().__init__(tools)
+        self.received_context: ToolExecutionContext | None = None
+
+    def invoke_with_context(
+        self,
+        name: str,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+    ) -> str:
+        del name, arguments
+        self.received_context = context
+        return "context"
 
 
 def test_json_store_keeps_ui_settings_after_last_provider_is_deleted(tmp_path) -> None:

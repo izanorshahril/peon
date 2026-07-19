@@ -8,6 +8,7 @@ from peon.agent import (
     AgentMessage,
     ModelResponse,
     ToolCall,
+    ToolExecutionContext,
     ToolDefinition,
     run_task,
 )
@@ -282,6 +283,55 @@ def test_run_task_executes_registered_filesystem_write(tmp_path) -> None:
         ),
         AgentMessage(role="assistant", content="Saved the note."),
     ]
+
+
+def test_run_task_propagates_tool_cancellation_context() -> None:
+    registry = ExtensionRegistry()
+
+    def cancel_tool(
+        arguments: dict[str, object],
+        execution_context: ToolExecutionContext,
+    ) -> str:
+        del arguments
+        execution_context.cancel()
+        return "cancelled by tool"
+
+    registry.register_tool(
+        name="cancel",
+        description="Cancel the current operation.",
+        parameters={"type": "object"},
+        handler=cancel_tool,
+    )
+    provider = ScriptedProvider(
+        responses=[
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="cancel",
+                    arguments={},
+                    call_id="cancel-1",
+                )
+            )
+        ],
+        received_messages=[],
+        received_tools=[],
+    )
+    context = AgentContext()
+    execution_context = ToolExecutionContext()
+
+    with pytest.raises(AgentError, match="tool execution cancelled"):
+        run_task(
+            "Stop the operation.",
+            provider,
+            context=context,
+            executor=registry,
+            execution_context=execution_context,
+        )
+
+    assert context.messages[-1] == AgentMessage(
+        role="tool",
+        content="cancelled by tool",
+        tool_call_id="cancel-1",
+    )
 
 
 def test_run_task_forwards_executor_tools_to_provider() -> None:

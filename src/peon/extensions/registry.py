@@ -1,13 +1,14 @@
 """Small in-process registry for tools, skills, and lifecycle hooks."""
 
 from collections.abc import Callable, Mapping, Sequence
+import inspect
 from pathlib import Path
 
-from peon.agent import ToolDefinition
+from peon.agent import ToolDefinition, ToolExecutionContext
 
 from .errors import ExtensionError
 
-ToolHandler = Callable[[Mapping[str, object]], object]
+ToolHandler = Callable[..., object]
 SkillInstaller = Callable[["ExtensionRegistry"], None]
 LifecycleHandler = Callable[[], None]
 
@@ -28,14 +29,20 @@ class ExtensionRegistry:
     """Register and invoke extension capabilities in registration order."""
 
     def __init__(self) -> None:
-        self._tools: dict[str, tuple[ToolDefinition, ToolHandler]] = {}
+        self._tools: dict[
+            str,
+            tuple[ToolDefinition, ToolHandler, bool],
+        ] = {}
         self._skills: list[str] = []
         self._hooks: dict[str, list[LifecycleHandler]] = {}
 
     @property
     def tools(self) -> tuple[ToolDefinition, ...]:
         """Return model-facing tool definitions in registration order."""
-        return tuple(definition for definition, handler in self._tools.values())
+        return tuple(
+            definition
+            for definition, _handler, _accepts_context in self._tools.values()
+        )
 
     @property
     def skills(self) -> tuple[str, ...]:
@@ -62,6 +69,7 @@ class ExtensionRegistry:
                 parameters=parameters,
             ),
             handler,
+            _accepts_context(handler),
         )
 
     def register_skill(self, name: str, installer: SkillInstaller) -> None:
@@ -79,13 +87,32 @@ class ExtensionRegistry:
         self._skills.append(name)
 
     def invoke(self, name: str, arguments: Mapping[str, object]) -> str:
+        return self._invoke(name, arguments, None)
+
+    def invoke_with_context(
+        self,
+        name: str,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+    ) -> str:
+        return self._invoke(name, arguments, context)
+
+    def _invoke(
+        self,
+        name: str,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext | None,
+    ) -> str:
         """Invoke a registered tool with model-supplied arguments."""
         registered = self._tools.get(name)
         if registered is None:
             raise ExtensionError(f"tool '{name}' is not registered")
-        _, handler = registered
+        _, handler, accepts_context = registered
         try:
-            result = handler(arguments)
+            if context is not None and accepts_context:
+                result = handler(arguments, context)
+            else:
+                result = handler(arguments)
         except Exception as error:
             raise ExtensionError(f"tool '{name}' failed: {error}") from error
         if not isinstance(result, str):
@@ -105,3 +132,11 @@ class ExtensionRegistry:
                 handler()
             except Exception as error:
                 raise ExtensionError(f"event '{event}' failed: {error}") from error
+
+
+def _accepts_context(handler: ToolHandler) -> bool:
+    try:
+        inspect.signature(handler).bind({}, ToolExecutionContext())
+    except (TypeError, ValueError):
+        return False
+    return True

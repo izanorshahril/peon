@@ -1,5 +1,8 @@
 import re
+import subprocess
+import sys
 
+from peon.agent import ToolExecutionContext
 from peon.extensions import ExtensionRegistry
 from peon.extensions.filesystem import register_filesystem_tools
 
@@ -304,6 +307,91 @@ def test_bash_runs_in_workspace_and_bounds_output(tmp_path) -> None:
     truncated = registry.invoke("bash", {"command": "echo 1234567890123456789012345"})
     assert "\n[truncated]\n" in truncated
     assert re.search(r"Took \d+\.\ds$", truncated)
+
+
+def test_bash_streams_output_and_reports_cancellation(tmp_path) -> None:
+    streamed: list[tuple[str, str]] = []
+    context = ToolExecutionContext(
+        on_output=lambda stream, chunk: (
+            streamed.append((stream, chunk)),
+            context.cancel(),
+        )[-1]
+    )
+    command = subprocess.list2cmdline(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; print('before-cancel', flush=True); time.sleep(10)",
+        ]
+    )
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+
+    result = registry.invoke_with_context(
+        "bash",
+        {"command": command, "timeout": 30},
+        context,
+    )
+
+    assert "bash: cancelled" in result
+    assert "status: cancelled" in result
+    assert "before-cancel" in result
+    assert streamed
+    assert streamed[0][0] == "stdout"
+
+
+def test_bash_reports_stderr_and_nonzero_exit_status(tmp_path) -> None:
+    command = subprocess.list2cmdline(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)",
+        ]
+    )
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+
+    result = registry.invoke("bash", {"command": command})
+
+    assert "bash: exit code 3" in result
+    assert "status: exited" in result
+    assert "stdout:\nout" in result
+    assert "stderr:\nerr" in result
+
+
+def test_bash_reports_timeout_without_requiring_bash(tmp_path) -> None:
+    command = subprocess.list2cmdline(
+        [sys.executable, "-c", "import time; time.sleep(10)"]
+    )
+    registry = ExtensionRegistry()
+    register_filesystem_tools(registry, root=tmp_path)
+
+    result = registry.invoke("bash", {"command": command, "timeout": 0.2})
+
+    assert "bash: timed out after 0.2 seconds" in result
+    assert "status: timed out" in result
+
+
+def test_bash_marks_truncated_output_and_keeps_workspace_cwd(tmp_path) -> None:
+    command = subprocess.list2cmdline(
+        [
+            sys.executable,
+            "-c",
+            "import os; print(os.getcwd()); print('x' * 200)",
+        ]
+    )
+    registry = ExtensionRegistry()
+    register_filesystem_tools(
+        registry,
+        root=tmp_path,
+        max_output_chars=len(str(tmp_path)) + 20,
+    )
+
+    result = registry.invoke("bash", {"command": command})
+
+    assert str(tmp_path) in result
+    assert "[truncated]" in result
+    assert "status: exited" in result
 
 
 def test_discovery_continuation_keeps_result_offset_after_character_limit(tmp_path) -> None:

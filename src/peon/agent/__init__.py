@@ -1,7 +1,7 @@
 """Portable agent runtime, tools, events, messages, and harness."""
 
 from .runtime_errors import AgentError
-from .executor import ToolExecutor
+from .executor import ToolExecutionContext, ToolExecutor
 from .loop import run_task
 from .models import (
 	AgentContext,
@@ -20,6 +20,7 @@ __all__ = [
 	"ModelResponse",
 	"ToolCall",
 	"ToolDefinition",
+	"ToolExecutionContext",
 	"ToolExecutor",
 	"run_task",
 ]
