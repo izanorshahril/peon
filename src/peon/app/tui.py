@@ -264,7 +264,12 @@ def run_tui(
         _print_resume_command(session, output=output)
         return result
     except (EOFError, KeyboardInterrupt):
-        _print_resume_command(session, output=output)
+        _print_resume_command(
+            session,
+            output=output,
+            session_id=session_id,
+            session_store=active_session_store,
+        )
         print("\nGoodbye.", file=output)
         return 0
 
@@ -385,10 +390,19 @@ def _fork_session(
     )
 
 
-def _print_resume_command(session: TuiSession, *, output: TextIO) -> None:
-    if isinstance(session.session_store, JsonlSessionStore):
+def _print_resume_command(
+    session: TuiSession | None,
+    *,
+    output: TextIO,
+    session_id: str | None = None,
+    session_store: SessionStore | None = None,
+) -> None:
+    if session is not None:
+        session_id = session.session_id
+        session_store = session.session_store
+    if session_id is not None and isinstance(session_store, JsonlSessionStore):
         print(
-            f"Resume with: peon --session {session.session_id}",
+            f"Resume with: peon --session {session_id}",
             file=output,
         )
 

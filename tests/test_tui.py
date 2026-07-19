@@ -413,6 +413,34 @@ def test_tui_session_picker_can_be_cancelled() -> None:
     assert "Session selection cancelled." in output.getvalue()
 
 
+def test_tui_can_exit_before_session_configuration(tmp_path) -> None:
+    output = StringIO()
+    inputs = iter(["1"])
+    session_store = JsonlSessionStore(tmp_path / "sessions")
+
+    def interrupting_input(prompt: str) -> str:
+        del prompt
+        try:
+            return next(inputs)
+        except StopIteration as error:
+            raise KeyboardInterrupt from error
+
+    result = run_tui(
+        provider_factory=ProviderFactory(),
+        input_fn=interrupting_input,
+        secret_input=scripted_secret([]),
+        output=output,
+        config_store=MemoryConfigStore(),
+        session_store=session_store,
+    )
+
+    assert result == 0
+    sessions = session_store.list_sessions()
+    assert len(sessions) == 1
+    assert f"Resume with: peon --session {sessions[0].session_id}" in output.getvalue()
+    assert "Goodbye." in output.getvalue()
+
+
 def test_tui_no_session_mode_does_not_write_durable_sessions(tmp_path) -> None:
     session_store = JsonlSessionStore(tmp_path / "sessions")
     config = ProviderConfig(
