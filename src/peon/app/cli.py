@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TextIO
 
-from peon.agent import AgentContext, AgentError, AgentMessage, ModelProvider, ToolCall, run_task
+from peon.agent import AgentContext, AgentError, ModelProvider, ToolCall, run_task
 from peon.ai import (
     CustomProvider,
     CustomRequestFields,
@@ -23,6 +23,7 @@ from peon.extensions import (
     register_sample_tools,
 )
 
+from .coding_session import CodingSession, MessageEvent, SessionEvent
 from .sessions import SessionStore
 from .resources import ResourceInventory, ResourceLoader, apply_resource_prompt
 
@@ -705,12 +706,12 @@ def _run_print_mode(
     if registry is None:
         register_sample_tools(active_registry)
         register_filesystem_tools(active_registry)
-    apply_resource_prompt(context, _load_resources(args))
+    resources = _load_resources(args)
 
-    def on_message(message: AgentMessage) -> None:
-        active_store.append(session_id, message)
-        if events is None:
+    def on_event(event: SessionEvent) -> None:
+        if events is None or not isinstance(event, MessageEvent):
             return
+        message = event.message
         if message.role == "user":
             events.write("user", content=message.content)
         if message.thinking:
@@ -748,23 +749,32 @@ def _run_print_mode(
         if not args.provider:
             raise CommandError("provider is not configured")
         provider = (provider_factory or create_provider)(config)
-        response = run_task(
-            task,
-            provider,
+        session = CodingSession(
+            provider=provider,
+            session_store=active_store,
+            session_id=session_id,
             context=context,
             executor=active_registry,
             model=config.model,
-            on_message=on_message,
+            resources=resources,
+            on_event=on_event,
+        )
+        result = session.prompt(
+            task,
             preserve_task_whitespace=True,
         )
-        if isinstance(response, ToolCall):
-            raise CommandError(
-                f"provider requested tool '{response.name}', but tool execution "
-                "is not configured"
-            )
     except (AgentError, CommandError, ProviderError, SessionStoreError, ValueError) as caught:
         return _print_mode_failure(
             caught,
+            events=events,
+            error=error,
+            session_started=session_started,
+            session_id=session_id,
+        )
+
+    if result.status != "success":
+        return _print_mode_failure(
+            CommandError(result.error or "task failed"),
             events=events,
             error=error,
             session_started=session_started,
@@ -775,7 +785,7 @@ def _run_print_mode(
         events.write("turn_end", success=True)
         events.write("session_end", session_id=session_id, success=True)
     else:
-        print(response, file=output)
+        print(result.content, file=output)
     return 0
 
 

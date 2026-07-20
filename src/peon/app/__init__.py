@@ -1,6 +1,14 @@
 """Peon application shells, CLI, TUI, and presentation policy."""
 
 from .cli import CommandError, ProviderConfig, build_parser, main
+from .coding_session import (
+	CodingSession,
+	MessageEvent,
+	SessionEvent,
+	TurnFinishedEvent,
+	TurnResult,
+	TurnStartedEvent,
+)
 from .commands import (
 	DEFAULT_COMMAND_CATALOG,
 	CommandCatalog,
@@ -25,15 +33,21 @@ __all__ = [
 	"CommandDefinition",
 	"CommandInvocation",
 	"CommandMatch",
+	"CodingSession",
 	"JsonProviderConfigStore",
 	"JsonlSessionStore",
 	"MemorySessionStore",
+	"MessageEvent",
+	"SessionEvent",
 	"ProviderConfig",
 	"ProviderConfigStore",
 	"SessionRecord",
 	"SessionStore",
 	"SessionStoreError",
 	"TuiSession",
+	"TurnFinishedEvent",
+	"TurnResult",
+	"TurnStartedEvent",
 	"UiConfig",
 	"build_parser",
 	"main",

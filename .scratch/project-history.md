@@ -71,6 +71,9 @@ app -> extensions -> agent
 - `AgentContext`, `AgentMessage`, `ToolCall`, and `ModelResponse` are portable.
 - `run_task` performs provider turns, bounded tool dispatch, result append, and
   continuation until final assistant output.
+- `CodingSession` owns one host-neutral prompt lifecycle around `run_task`,
+  including resource application, message persistence, typed start/message/
+  finish events, structured outcomes, and active tool cancellation.
 - `ToolExecutionContext` supports cancellation and live tool output callbacks.
 - Adapters support OpenAI-compatible, GitHub Copilot, and configurable custom
   proxy profiles. Model discovery uses compatible `GET /models` endpoints.
@@ -84,6 +87,9 @@ app -> extensions -> agent
 - `-p`/`--print`: decoration-free final output; piped stdin supported.
 - `--events`/`--jsonl`/`--json`: JSONL events for session start, user,
   thinking, tool call/result, assistant, turn end, error, and session end.
+- Print mode now composes `CodingSession`; its undecorated output, session
+  lifecycle, resource behavior, persistence, and JSON event translation remain
+  compatible.
 - `fullscreen` and `webapp` modes are reserved and reject honestly.
 
 ### Sessions

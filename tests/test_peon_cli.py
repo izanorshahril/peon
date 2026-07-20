@@ -295,6 +295,44 @@ def test_command_loads_discovered_resources_before_provider_request(
     )
 
 
+def test_print_mode_does_not_persist_generated_resource_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "SYSTEM.md").write_text("Project rules", encoding="utf-8")
+    provider = FakeProvider(response="Saved.")
+    session_store = MemorySessionStore()
+
+    result = main(
+        [
+            "Save this request.",
+            "--print",
+            "--provider",
+            "fake",
+            "--session-name",
+            "release",
+            "--no-skills",
+        ],
+        provider_factory=lambda _config: provider,
+        session_store=session_store,
+        output=StringIO(),
+        error=StringIO(),
+    )
+
+    assert result == 0
+    saved = session_store.load_latest()
+    assert saved is not None
+    assert saved.messages == (
+        AgentMessage(role="user", content="Save this request."),
+        AgentMessage(role="assistant", content="Saved."),
+    )
+    assert provider.received_messages[0] == AgentMessage(
+        role="system",
+        content="Project rules",
+    )
+
+
 def test_print_event_mode_emits_ordered_json_lines() -> None:
     provider = FakeProvider(
         response=ModelResponse(
