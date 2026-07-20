@@ -15,9 +15,7 @@ from peon.agent import (
     AgentError,
     ModelProvider,
     TraceContext,
-    ToolCall,
     Usage,
-    run_task,
 )
 from peon.ai import (
     CustomProvider,
@@ -41,8 +39,8 @@ from .coding_session import (
 )
 from .hosts import HostUnavailableError, resolve_host
 from .observability import JsonlTraceSink
-from .sessions import SessionStore
-from .resources import ResourceInventory, ResourceLoader, apply_resource_prompt
+from .sessions import MemorySessionStore, SessionStore
+from .resources import ResourceInventory, ResourceLoader
 
 
 REASONING_EFFORTS = ("none", "low", "medium", "high")
@@ -658,14 +656,19 @@ def main(
             tool_prompt_role=args.tool_prompt_role,
         )
         provider = (provider_factory or create_provider)(config)
-        context = AgentContext()
-        apply_resource_prompt(context, _load_resources(args))
-        response = run_task(task, provider, context=context, model=config.model)
-        if isinstance(response, ToolCall):
-            raise CommandError(
-                f"provider requested tool '{response.name}', but tool execution "
-                "is not configured"
-            )
+        active_store = MemorySessionStore()
+        session_record = active_store.create()
+        session = CodingSession(
+            provider=provider,
+            session_store=active_store,
+            session_id=session_record.session_id,
+            model=config.model,
+            resources=_load_resources(args),
+        )
+        result = session.prompt(task)
+        if result.status != "success":
+            raise CommandError(result.error or "task failed")
+        response = result.content or ""
     except (AgentError, CommandError, ProviderError, ValueError) as caught:
         print(f"{parser.prog}: {caught}", file=error)
         return 1

@@ -247,7 +247,7 @@ def test_tui_configures_provider_and_keeps_context_between_tasks() -> None:
             api_key="api-key",
         ),
     ]
-    assert " peon v0.1.0" in output.getvalue()
+    assert " peon v0.2.0" in output.getvalue()
     assert "minimal" in output.getvalue()
     assert output.getvalue().count("─") >= 2
     assert output.getvalue().count("first response") == 1

@@ -98,7 +98,7 @@ _STARTUP_TEXT_COLOR = "#808080"
 def _render_startup(resources: ResourceInventory | None) -> Text:
     rendered = Text.assemble(
         ("peon", "#8bd5ff"),
-        (" v0.1.0", _STARTUP_TEXT_COLOR),
+        (" v0.2.0", _STARTUP_TEXT_COLOR),
         (
             "\nescape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash",
             _STARTUP_TEXT_COLOR,

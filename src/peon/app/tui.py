@@ -78,7 +78,7 @@ InputFunction = Callable[[str], str]
 SecretInputFunction = Callable[[str], str]
 
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-_PEON_VERSION = "0.1.0"
+_PEON_VERSION = "0.2.0"
 _PROVIDER_OPTIONS = (
     ("openai-compatible", "OpenAI-compatible"),
     ("github-copilot", "GitHub Copilot"),

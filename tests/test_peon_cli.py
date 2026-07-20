@@ -15,6 +15,8 @@ from peon.agent import (
     Usage,
 )
 from peon.app import ProviderConfig, main
+from peon.app import cli as cli_module
+from peon.app.coding_session import TurnResult
 from peon.app.sessions import MemorySessionStore, SessionStoreError
 from peon.ai import ProviderError
 from peon.extensions import ExtensionRegistry
@@ -85,6 +87,37 @@ def test_command_runs_task_through_injected_provider_factory() -> None:
     assert provider.received_messages == (
         AgentMessage(role="user", content="Summarize the repository."),
     )
+
+
+def test_default_task_uses_coding_session(monkeypatch) -> None:
+    submitted: list[str] = []
+
+    class RecordingSession:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def prompt(self, task: str) -> TurnResult:
+            submitted.append(task)
+            return TurnResult(
+                status="success",
+                session_id="session-1",
+                run_id="run-1",
+                turn_id="turn-1",
+                content="session response",
+            )
+
+    monkeypatch.setattr(cli_module, "CodingSession", RecordingSession)
+    output = StringIO()
+
+    result = main(
+        ["Do work.", "--provider", "fake"],
+        provider_factory=lambda _config: FakeProvider(response="unused"),
+        output=output,
+    )
+
+    assert result == 0
+    assert submitted == ["Do work."]
+    assert output.getvalue() == "session response\n"
 
 
 def test_print_mode_writes_only_response_and_includes_piped_input() -> None:

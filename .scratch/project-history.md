@@ -103,6 +103,9 @@ app -> extensions -> agent
   compatible. JSON records use schema version 1 and carry session, run, and
   turn correlation where a turn exists; terminal turn records come from the
   typed session finish event and include normalized usage when available.
+- The default non-interactive task path also uses an ephemeral
+  `CodingSession`, keeping the direct CLI entry path aligned with print,
+  embedded, Textual, and prompt-toolkit execution semantics.
 - Built-in hosts resolve through stable `print`, `jsonl`, `textual`,
   `prompt-toolkit`, and `embedded` identifiers. Reserved `fullscreen` and
   `webapp` hosts fail before startup session work; CLI mode names remain
@@ -421,6 +424,18 @@ These corrections are permanent unless implementation changes:
   existing `--mode` behavior and injected TUI runners remain compatible.
 - Focused host/CLI/fallback validation passed: `88` tests. Full validation
   passed: `295` tests and `mypy src/peon` with no issues.
+
+### Ticket 09: contract verification and Peon 0.2
+
+- Removed the remaining direct non-interactive CLI `run_task` orchestration;
+  default tasks now use an in-memory `CodingSession` without durable session
+  side effects or an implicit tool executor.
+- Published the 0.2.0 version in package metadata and both interactive host
+  banners. Current ownership, host roles, embedded usage, observability, and
+  remaining Pi gaps are recorded here as project truth.
+- Preserved the linear session format and existing conversation files; no
+  migration is required for the 0.2.0 release.
+- Final validation passed: `296` tests and `mypy src/peon` with no issues.
 
 ## Primary Upstream Sources
 
