@@ -35,6 +35,7 @@ TurnStatus = Literal["success", "error", "cancelled"]
 class TurnResult:
     status: TurnStatus
     session_id: str
+    run_id: str
     turn_id: str
     content: str | None = None
     error: str | None = None
@@ -43,6 +44,7 @@ class TurnResult:
 @dataclass(frozen=True, slots=True)
 class TurnStartedEvent:
     session_id: str
+    run_id: str
     turn_id: str
     started_at: float
 
@@ -50,6 +52,7 @@ class TurnStartedEvent:
 @dataclass(frozen=True, slots=True)
 class MessageEvent:
     session_id: str
+    run_id: str
     turn_id: str
     message: AgentMessage
 
@@ -57,6 +60,7 @@ class MessageEvent:
 @dataclass(frozen=True, slots=True)
 class TurnFinishedEvent:
     session_id: str
+    run_id: str
     turn_id: str
     result: TurnResult
     duration: float
@@ -78,6 +82,7 @@ class CodingSession:
         provider: ModelProvider,
         session_store: SessionStore,
         session_id: str,
+        run_id: str | None = None,
         context: AgentContext | None = None,
         executor: ToolExecutor | None = None,
         model: str | None = None,
@@ -89,6 +94,7 @@ class CodingSession:
         self.provider = provider
         self.session_store = session_store
         self._session_id = session_id
+        self._run_id = run_id or uuid4().hex
         self._context = context or AgentContext()
         self._executor = executor
         self._model = model
@@ -104,6 +110,10 @@ class CodingSession:
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
 
     @property
     def messages(self) -> tuple[AgentMessage, ...]:
@@ -127,6 +137,7 @@ class CodingSession:
                 return TurnResult(
                     status="error",
                     session_id=self._session_id,
+                    run_id=self._run_id,
                     turn_id=turn_id,
                     error="session is already running",
                 )
@@ -137,6 +148,7 @@ class CodingSession:
             self._emit(
                 TurnStartedEvent(
                     session_id=self._session_id,
+                    run_id=self._run_id,
                     turn_id=turn_id,
                     started_at=started_at,
                 )
@@ -163,6 +175,7 @@ class CodingSession:
                         else "error"
                     ),
                     session_id=self._session_id,
+                    run_id=self._run_id,
                     turn_id=turn_id,
                     error=str(error),
                 )
@@ -171,6 +184,7 @@ class CodingSession:
                     result = TurnResult(
                         status="cancelled",
                         session_id=self._session_id,
+                        run_id=self._run_id,
                         turn_id=turn_id,
                         error="task cancelled",
                     )
@@ -178,6 +192,7 @@ class CodingSession:
                     result = TurnResult(
                         status="error",
                         session_id=self._session_id,
+                        run_id=self._run_id,
                         turn_id=turn_id,
                         error=(
                             f"provider requested tool '{response.name}', but "
@@ -188,12 +203,14 @@ class CodingSession:
                     result = TurnResult(
                         status="success",
                         session_id=self._session_id,
+                        run_id=self._run_id,
                         turn_id=turn_id,
                         content=response,
                     )
             self._emit(
                 TurnFinishedEvent(
                     session_id=self._session_id,
+                    run_id=self._run_id,
                     turn_id=turn_id,
                     result=result,
                     duration=self._clock() - started_at,
@@ -218,6 +235,7 @@ class CodingSession:
         self._emit(
             MessageEvent(
                 session_id=self._session_id,
+                run_id=self._run_id,
                 turn_id=turn_id,
                 message=message,
             )

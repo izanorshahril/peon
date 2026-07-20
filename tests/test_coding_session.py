@@ -104,6 +104,7 @@ def test_coding_session_runs_turn_persists_messages_and_applies_resources() -> N
         session_store=store,
         session_id=record.session_id,
         resources=ResourceInventory(effective_system_prompt="Use brief answers."),
+        run_id="run-1",
         on_event=events.append,
         clock=iter((10.0, 12.5)).__next__,
         id_factory=lambda: "turn-1",
@@ -114,6 +115,7 @@ def test_coding_session_runs_turn_persists_messages_and_applies_resources() -> N
     assert result == TurnResult(
         status="success",
         session_id=record.session_id,
+        run_id="run-1",
         turn_id="turn-1",
         content="Done.",
     )
@@ -134,9 +136,11 @@ def test_coding_session_runs_turn_persists_messages_and_applies_resources() -> N
     started = events[0]
     finished = events[-1]
     assert isinstance(started, TurnStartedEvent)
+    assert started.run_id == "run-1"
     assert started.turn_id == "turn-1"
     assert started.started_at == 10.0
     assert isinstance(finished, TurnFinishedEvent)
+    assert finished.run_id == "run-1"
     assert finished.result == result
     assert finished.duration == 2.5
 
@@ -149,6 +153,7 @@ def test_coding_session_returns_provider_failure_as_structured_error() -> None:
         provider=FailingProvider(),
         session_store=store,
         session_id=record.session_id,
+        run_id="run-1",
         on_event=events.append,
         id_factory=lambda: "turn-1",
     )
@@ -157,6 +162,7 @@ def test_coding_session_returns_provider_failure_as_structured_error() -> None:
 
     assert result.status == "error"
     assert result.session_id == record.session_id
+    assert result.run_id == "run-1"
     assert result.turn_id
     assert result.error is not None
     assert "provider request failed: provider unavailable" in result.error
@@ -176,6 +182,7 @@ def test_coding_session_cancels_an_active_tool_turn() -> None:
         provider=ToolProvider(),
         session_store=store,
         session_id=record.session_id,
+        run_id="run-1",
         executor=BlockingExecutor(started),
         id_factory=iter(("turn-1",)).__next__,
         on_event=events.append,
@@ -195,6 +202,7 @@ def test_coding_session_cancels_an_active_tool_turn() -> None:
         TurnResult(
             status="cancelled",
             session_id=record.session_id,
+            run_id="run-1",
             turn_id="turn-1",
             error="tool execution cancelled",
         )
@@ -211,6 +219,7 @@ def test_coding_session_rejects_concurrent_prompt_with_a_correlated_error() -> N
         provider=ToolProvider(),
         session_store=store,
         session_id=record.session_id,
+        run_id="run-1",
         executor=BlockingExecutor(started),
         id_factory=iter(("turn-1", "turn-2")).__next__,
     )
@@ -222,6 +231,7 @@ def test_coding_session_rejects_concurrent_prompt_with_a_correlated_error() -> N
     assert result == TurnResult(
         status="error",
         session_id=record.session_id,
+        run_id="run-1",
         turn_id="turn-2",
         error="session is already running",
     )
@@ -237,10 +247,12 @@ def test_coding_session_returns_persistence_failure_as_structured_error() -> Non
         provider=CapturingProvider(),
         session_store=store,
         session_id=record.session_id,
+        run_id="run-1",
     )
 
     result = session.prompt("Persist this request.")
 
     assert result.status == "error"
+    assert result.run_id == "run-1"
     assert result.error is not None
     assert "persistence unavailable" in result.error

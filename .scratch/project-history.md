@@ -89,7 +89,9 @@ app -> extensions -> agent
   thinking, tool call/result, assistant, turn end, error, and session end.
 - Print mode now composes `CodingSession`; its undecorated output, session
   lifecycle, resource behavior, persistence, and JSON event translation remain
-  compatible.
+  compatible. JSON records use schema version 1 and carry session, run, and
+  turn correlation where a turn exists; terminal turn records come from the
+  typed session finish event.
 - `fullscreen` and `webapp` modes are reserved and reject honestly.
 
 ### Sessions

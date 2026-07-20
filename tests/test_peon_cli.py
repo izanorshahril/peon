@@ -14,8 +14,9 @@ from peon.agent import (
     ToolDefinition,
 )
 from peon.app import ProviderConfig, main
-from peon.app.sessions import MemorySessionStore
+from peon.app.sessions import MemorySessionStore, SessionStoreError
 from peon.ai import ProviderError
+from peon.extensions import ExtensionRegistry
 
 
 @dataclass
@@ -360,9 +361,38 @@ def test_print_event_mode_emits_ordered_json_lines() -> None:
         "turn_end",
         "session_end",
     ]
+    assert all(event["schema_version"] == 1 for event in events)
+    assert events[0]["run_id"]
+    assert events[1]["session_id"] == events[0]["session_id"]
+    assert events[1]["run_id"] == events[0]["run_id"]
+    assert events[1]["turn_id"]
+    assert events[4]["session_id"] == events[1]["session_id"]
+    assert events[4]["run_id"] == events[1]["run_id"]
+    assert events[4]["turn_id"] == events[1]["turn_id"]
+    assert events[4]["status"] == "success"
     assert events[2]["content"] == "I checked the request."
     assert events[3]["content"] == "Done."
     assert error.getvalue() == ""
+
+
+def test_print_event_mode_uses_injected_correlation_ids_and_clock() -> None:
+    output = StringIO()
+
+    result = main(
+        ["-p", "Do work.", "--events", "--provider", "fake"],
+        provider_factory=lambda _config: FakeProvider(response="Done."),
+        run_id_factory=lambda: "run-1",
+        turn_id_factory=lambda: "turn-1",
+        clock=iter((10.0, 12.5)).__next__,
+        output=output,
+        error=StringIO(),
+    )
+
+    assert result == 0
+    events = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert all(event["run_id"] == "run-1" for event in events)
+    assert events[1]["turn_id"] == "turn-1"
+    assert events[3]["duration"] == 2.5
 
 
 def test_print_event_mode_emits_tool_lifecycle_events() -> None:
@@ -398,6 +428,10 @@ def test_print_event_mode_emits_tool_lifecycle_events() -> None:
         "turn_end",
         "session_end",
     ]
+    turn_events = events[1:6]
+    assert all(event["session_id"] == events[0]["session_id"] for event in turn_events)
+    assert all(event["run_id"] == events[0]["run_id"] for event in turn_events)
+    assert len({event["turn_id"] for event in turn_events}) == 1
     assert events[2]["call_id"] == "call-1"
     assert events[3]["content"] == "word count: 2"
 
@@ -439,6 +473,141 @@ def test_print_event_mode_reports_provider_failure_as_json() -> None:
     assert events[1]["message"] == "provider unavailable"
     assert events[2]["session_id"] == events[0]["session_id"]
     assert error.getvalue() == ""
+
+
+def test_print_event_mode_reports_runtime_failure_as_one_correlated_terminal_error() -> None:
+    output = StringIO()
+    provider = FakeProvider(response=ModelResponse())
+
+    result = main(
+        ["-p", "Do work.", "--events", "--provider", "fake"],
+        provider_factory=lambda _config: provider,
+        output=output,
+        error=StringIO(),
+    )
+
+    assert result == 1
+    events = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [event["type"] for event in events] == [
+        "session_start",
+        "user",
+        "error",
+        "session_end",
+    ]
+    assert events[2]["status"] == "error"
+    assert events[2]["message"] == "provider returned an empty response"
+    assert events[2]["session_id"] == events[0]["session_id"]
+    assert events[2]["run_id"] == events[0]["run_id"]
+    assert events[2]["turn_id"]
+    assert events[3]["status"] == "error"
+
+
+def test_print_event_mode_serializes_resource_failure_as_session_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "peon.app.cli._load_resources",
+        lambda _args: (_ for _ in ()).throw(OSError("resource unavailable")),
+    )
+    output = StringIO()
+
+    result = main(
+        ["-p", "Do work.", "--events", "--provider", "fake"],
+        provider_factory=lambda _config: FakeProvider(response="Done."),
+        output=output,
+        error=StringIO(),
+    )
+
+    assert result == 1
+    events = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [event["type"] for event in events] == [
+        "session_start",
+        "error",
+        "session_end",
+    ]
+    assert events[1]["message"] == "resource unavailable"
+    assert events[1]["status"] == "error"
+    assert events[2]["success"] is False
+
+
+def test_print_event_mode_serializes_tool_failure_as_one_terminal_error() -> None:
+    registry = ExtensionRegistry()
+    registry.register_tool(
+        name="fail",
+        description="Fail.",
+        parameters={},
+        handler=lambda _arguments: (_ for _ in ()).throw(ValueError("bad tool")),
+    )
+    provider = ScriptedProvider(
+        responses=[
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="fail",
+                    arguments={},
+                    call_id="call-1",
+                )
+            )
+        ]
+    )
+    output = StringIO()
+
+    result = main(
+        ["-p", "Use the tool.", "--events", "--provider", "fake"],
+        provider_factory=lambda _config: provider,
+        registry=registry,
+        output=output,
+        error=StringIO(),
+    )
+
+    assert result == 1
+    events = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [event["type"] for event in events] == [
+        "session_start",
+        "user",
+        "tool_call",
+        "tool_result",
+        "error",
+        "session_end",
+    ]
+    assert events[4]["status"] == "error"
+    assert "tool 'fail' failed: bad tool" in events[4]["message"]
+    assert events[4]["turn_id"] == events[2]["turn_id"]
+
+
+class FailingAppendStore(MemorySessionStore):
+    def append(self, session_id: str, message: AgentMessage) -> None:
+        raise SessionStoreError("persistence unavailable")
+
+
+def test_print_event_mode_serializes_persistence_failure_as_one_terminal_error() -> None:
+    output = StringIO()
+
+    result = main(
+        [
+            "Persist this.",
+            "--print",
+            "--events",
+            "--provider",
+            "fake",
+            "--session-name",
+            "release",
+        ],
+        provider_factory=lambda _config: FakeProvider(response="Saved."),
+        session_store=FailingAppendStore(),
+        output=output,
+        error=StringIO(),
+    )
+
+    assert result == 1
+    events = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [event["type"] for event in events] == [
+        "session_start",
+        "error",
+        "session_end",
+    ]
+    assert events[1]["status"] == "error"
+    assert "persistence unavailable" in events[1]["message"]
+    assert events[2]["success"] is False
 
 
 def test_events_require_print_mode() -> None:

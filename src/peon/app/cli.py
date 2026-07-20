@@ -3,10 +3,12 @@
 import argparse
 import json
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TextIO
+from uuid import uuid4
 
 from peon.agent import AgentContext, AgentError, ModelProvider, ToolCall, run_task
 from peon.ai import (
@@ -23,7 +25,12 @@ from peon.extensions import (
     register_sample_tools,
 )
 
-from .coding_session import CodingSession, MessageEvent, SessionEvent
+from .coding_session import (
+    CodingSession,
+    MessageEvent,
+    SessionEvent,
+    TurnFinishedEvent,
+)
 from .sessions import SessionStore
 from .resources import ResourceInventory, ResourceLoader, apply_resource_prompt
 
@@ -501,6 +508,9 @@ def main(
     error: TextIO | None = None,
     registry: ExtensionRegistry | None = None,
     session_store: SessionStore | None = None,
+    run_id_factory: Callable[[], str] | None = None,
+    turn_id_factory: Callable[[], str] | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> int:
     input_stream = input or sys.stdin
     output = output or sys.stdout
@@ -542,6 +552,9 @@ def main(
                     registry=registry,
                     session_store=session_store,
                     event_mode=True,
+                    run_id_factory=run_id_factory,
+                    turn_id_factory=turn_id_factory,
+                    clock=clock,
                 )
             return _run_print_mode(
                 task,
@@ -552,6 +565,9 @@ def main(
                 registry=registry,
                 session_store=session_store,
                 event_mode=False,
+                run_id_factory=run_id_factory,
+                turn_id_factory=turn_id_factory,
+                clock=clock,
             )
         if args.event_mode:
             raise CommandError("--events requires --print")
@@ -645,6 +661,9 @@ def _run_print_mode(
     registry: ExtensionRegistry | None,
     session_store: SessionStore | None,
     event_mode: bool,
+    run_id_factory: Callable[[], str] | None,
+    turn_id_factory: Callable[[], str] | None,
+    clock: Callable[[], float] | None,
 ) -> int:
     from .sessions import (
         JsonlSessionStore,
@@ -655,6 +674,7 @@ def _run_print_mode(
     )
 
     events = _EventWriter(output) if event_mode else None
+    run_id = (run_id_factory or (lambda: uuid4().hex))()
     explicit_durable_session = bool(
         args.continue_session or args.session_target or args.session_name
     )
@@ -692,12 +712,14 @@ def _run_print_mode(
             events=events,
             error=error,
             session_started=False,
+            run_id=run_id,
         )
 
     if events is not None:
         events.write(
             "session_start",
             session_id=session_id,
+            run_id=run_id,
             persistent=explicit_durable_session and not args.no_session,
         )
         session_started = True
@@ -706,28 +728,61 @@ def _run_print_mode(
     if registry is None:
         register_sample_tools(active_registry)
         register_filesystem_tools(active_registry)
-    resources = _load_resources(args)
 
     def on_event(event: SessionEvent) -> None:
-        if events is None or not isinstance(event, MessageEvent):
+        if events is None:
+            return
+        if isinstance(event, TurnFinishedEvent):
+            if event.result.status == "success":
+                events.write(
+                    "turn_end",
+                    **_event_correlation(event),
+                    success=True,
+                    status=event.result.status,
+                    duration=event.duration,
+                )
+            else:
+                events.write(
+                    "error",
+                    **_event_correlation(event),
+                    message=event.result.error or "task failed",
+                    status=event.result.status,
+                    duration=event.duration,
+                )
+            return
+        if not isinstance(event, MessageEvent):
             return
         message = event.message
         if message.role == "user":
-            events.write("user", content=message.content)
+            events.write(
+                "user",
+                **_event_correlation(event),
+                content=message.content,
+            )
         if message.thinking:
-            events.write("thinking", content=message.thinking)
+            events.write(
+                "thinking",
+                **_event_correlation(event),
+                content=message.thinking,
+            )
         if message.tool_call is not None:
             events.write(
                 "tool_call",
+                **_event_correlation(event),
                 name=message.tool_call.name,
                 arguments=dict(message.tool_call.arguments),
                 call_id=message.tool_call.call_id,
             )
         elif message.role == "assistant":
-            events.write("assistant", content=message.content)
+            events.write(
+                "assistant",
+                **_event_correlation(event),
+                content=message.content,
+            )
         elif message.role == "tool":
             events.write(
                 "tool_result",
+                **_event_correlation(event),
                 content=message.content,
                 call_id=message.tool_call_id,
             )
@@ -746,6 +801,7 @@ def _run_print_mode(
         tool_prompt_role=args.tool_prompt_role,
     )
     try:
+        resources = _load_resources(args)
         if not args.provider:
             raise CommandError("provider is not configured")
         provider = (provider_factory or create_provider)(config)
@@ -757,33 +813,53 @@ def _run_print_mode(
             executor=active_registry,
             model=config.model,
             resources=resources,
+            run_id=run_id,
+            clock=clock or time.monotonic,
+            id_factory=turn_id_factory or (lambda: uuid4().hex),
             on_event=on_event,
         )
         result = session.prompt(
             task,
             preserve_task_whitespace=True,
         )
-    except (AgentError, CommandError, ProviderError, SessionStoreError, ValueError) as caught:
+    except (
+        AgentError,
+        CommandError,
+        OSError,
+        ProviderError,
+        SessionStoreError,
+        ValueError,
+    ) as caught:
         return _print_mode_failure(
             caught,
             events=events,
             error=error,
             session_started=session_started,
             session_id=session_id,
+            run_id=run_id,
         )
 
     if result.status != "success":
-        return _print_mode_failure(
-            CommandError(result.error or "task failed"),
-            events=events,
-            error=error,
-            session_started=session_started,
-            session_id=session_id,
-        )
+        if events is not None:
+            events.write(
+                "session_end",
+                session_id=session_id,
+                run_id=run_id,
+                success=False,
+                status=result.status,
+            )
+        else:
+            print(f"peon: {result.error or 'task failed'}", file=error)
+        return 1
 
     if events is not None:
-        events.write("turn_end", success=True)
-        events.write("session_end", session_id=session_id, success=True)
+        events.write(
+            "session_end",
+            session_id=session_id,
+            run_id=run_id,
+            success=True,
+            status=result.status,
+        )
     else:
         print(result.content, file=output)
     return 0
@@ -796,18 +872,35 @@ def _print_mode_failure(
     error: TextIO,
     session_started: bool,
     session_id: str = "",
+    run_id: str = "",
 ) -> int:
     if events is not None:
-        events.write("error", message=str(caught))
+        events.write(
+            "error",
+            session_id=session_id,
+            run_id=run_id,
+            message=str(caught),
+            status="error",
+        )
         if session_started:
             events.write(
                 "session_end",
                 session_id=session_id,
+                run_id=run_id,
                 success=False,
+                status="error",
             )
     else:
         print(f"peon: {caught}", file=error)
     return 1
+
+
+def _event_correlation(event: SessionEvent) -> dict[str, str]:
+    return {
+        "session_id": event.session_id,
+        "run_id": event.run_id,
+        "turn_id": event.turn_id,
+    }
 
 
 def _load_resources(args: argparse.Namespace) -> ResourceInventory:
@@ -829,7 +922,7 @@ class _EventWriter:
         self._output = output
 
     def write(self, event_type: str, **fields: object) -> None:
-        payload = {"type": event_type, **fields}
+        payload = {"type": event_type, "schema_version": 1, **fields}
         print(json.dumps(payload, separators=(",", ":"), default=str), file=self._output)
 
 
