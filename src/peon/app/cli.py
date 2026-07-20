@@ -14,6 +14,7 @@ from peon.agent import (
     AgentContext,
     AgentError,
     ModelProvider,
+    TraceContext,
     ToolCall,
     Usage,
     run_task,
@@ -38,6 +39,7 @@ from .coding_session import (
     SessionEvent,
     TurnFinishedEvent,
 )
+from .observability import JsonlTraceSink
 from .sessions import SessionStore
 from .resources import ResourceInventory, ResourceLoader, apply_resource_prompt
 
@@ -457,6 +459,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit one normalized JSON event per line in print mode",
     )
     parser.add_argument(
+        "--trace",
+        type=Path,
+        help="Append metadata-only performance traces as JSONL",
+    )
+    parser.add_argument(
         "-c",
         "--continue",
         dest="continue_session",
@@ -576,6 +583,8 @@ def main(
                 turn_id_factory=turn_id_factory,
                 clock=clock,
             )
+        if args.trace is not None:
+            raise CommandError("--trace requires --print")
         if args.event_mode:
             raise CommandError("--events requires --print")
         mode: InteractionMode = args.mode or (
@@ -682,6 +691,7 @@ def _run_print_mode(
 
     events = _EventWriter(output) if event_mode else None
     run_id = (run_id_factory or (lambda: uuid4().hex))()
+    trace_sink = JsonlTraceSink(args.trace) if args.trace is not None else None
     explicit_durable_session = bool(
         args.continue_session or args.session_target or args.session_name
     )
@@ -731,7 +741,14 @@ def _run_print_mode(
         )
         session_started = True
 
-    active_registry = registry or ExtensionRegistry()
+    active_registry = registry or ExtensionRegistry(
+        trace_sink=trace_sink,
+        trace_context=TraceContext(
+            session_id=session_id,
+            run_id=run_id,
+        ),
+        trace_clock=clock or time.monotonic,
+    )
     if registry is None:
         register_sample_tools(active_registry)
         register_filesystem_tools(active_registry)
@@ -810,7 +827,18 @@ def _run_print_mode(
         tool_prompt_role=args.tool_prompt_role,
     )
     try:
-        resources = _load_resources(args)
+        if trace_sink is None:
+            resources = _load_resources(args)
+        else:
+            resources = _load_resources(
+                args,
+                trace_sink=trace_sink,
+                trace_context=TraceContext(
+                    session_id=session_id,
+                    run_id=run_id,
+                ),
+                trace_clock=clock or time.monotonic,
+            )
         if not args.provider:
             raise CommandError("provider is not configured")
         provider = (provider_factory or create_provider)(config)
@@ -826,6 +854,8 @@ def _run_print_mode(
             clock=clock or time.monotonic,
             id_factory=turn_id_factory or (lambda: uuid4().hex),
             on_event=on_event,
+            trace_sink=trace_sink,
+            trace_provider=args.provider_name or args.provider,
         )
         result = session.prompt(
             task,
@@ -924,7 +954,13 @@ def _serialize_usage(usage: Usage | None) -> dict[str, object] | None:
     }
 
 
-def _load_resources(args: argparse.Namespace) -> ResourceInventory:
+def _load_resources(
+    args: argparse.Namespace,
+    *,
+    trace_sink=None,
+    trace_context: TraceContext | None = None,
+    trace_clock: Callable[[], float] | None = None,
+) -> ResourceInventory:
     return ResourceLoader(
         include_skills=not args.no_skills,
         include_context_files=not args.no_context_files,
@@ -935,6 +971,9 @@ def _load_resources(args: argparse.Namespace) -> ResourceInventory:
         system_prompt_path=args.system_prompt_file,
         append_system_prompt=tuple(args.append_system_prompt),
         append_system_prompt_paths=tuple(args.append_system_prompt_file),
+        trace_sink=trace_sink,
+        trace_context=trace_context,
+        trace_clock=trace_clock,
     ).load()
 
 

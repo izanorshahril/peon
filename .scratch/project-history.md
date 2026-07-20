@@ -76,6 +76,10 @@ app -> extensions -> agent
   including resource application, message persistence, typed start/message/
   finish events, structured outcomes, active tool cancellation, and normalized
   usage aggregation across provider continuations.
+- Metadata-only tracing is disabled by default and can be enabled for print mode
+  with `--trace PATH`; operation owners record provider, tool, resource,
+  persistence, extension-hook, and turn durations as correlated JSONL without
+  conversation content. Trace export failures are isolated from turn state.
 - `ToolExecutionContext` supports cancellation and live tool output callbacks.
 - Adapters support OpenAI-compatible, GitHub Copilot, and configurable custom
   proxy profiles. Model discovery uses compatible `GET /models` endpoints.
@@ -336,6 +340,19 @@ These corrections are permanent unless implementation changes:
   remains response-only.
 - Focused validation: provider, agent, session, and CLI suites passed; edge
   coverage includes unsupported usage payloads and mixed currencies.
+
+### Ticket 04: metadata-only performance traces
+
+- Added provider-neutral trace contracts and an application-owned JSONL sink.
+- Added opt-in tracing for provider requests, tool calls, resource loading,
+  persistence appends, lifecycle hooks, and complete turns, with success,
+  error, and cancellation outcomes.
+- Trace records include schema version, UTC timestamp, monotonic duration,
+  correlation IDs, and safe provider/model/tool/hook names only. Sink failures
+  are logged and isolated from conversation and persistence behavior.
+- Added `--trace PATH` for print mode while preserving ordinary print and JSON
+  event output. Validation passed: `275` tests and `mypy src/peon` with no
+  issues.
 
 ## Primary Upstream Sources
 

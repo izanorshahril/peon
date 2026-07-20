@@ -1,12 +1,14 @@
 """The minimal bounded agent orchestration boundary."""
 
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timezone
 
 from .runtime_errors import AgentError
 
 from .executor import ToolExecutionContext, ToolExecutor
 from .models import AgentContext, AgentMessage, ToolCall, ToolDefinition, Usage
 from .provider_protocol import ModelProvider
+from .tracing import TraceContext, TraceSink, emit_trace
 
 
 def run_task(
@@ -20,6 +22,12 @@ def run_task(
     model: str | None = None,
     on_message: Callable[[AgentMessage], None] | None = None,
     on_usage: Callable[[Usage | None], None] | None = None,
+    trace_sink: TraceSink | None = None,
+    trace_context: TraceContext | None = None,
+    trace_provider: str | None = None,
+    trace_model: str | None = None,
+    trace_clock: Callable[[], float] | None = None,
+    trace_utc_clock: Callable[[], datetime] | None = None,
     preserve_task_whitespace: bool = False,
     execution_context: ToolExecutionContext | None = None,
 ) -> str | ToolCall:
@@ -39,7 +47,15 @@ def run_task(
     if executor is not None and not available_tools:
         available_tools = tuple(executor.tools)
     tool_calls = 0
+    active_trace_clock = (
+        trace_clock
+        if trace_sink is not None and trace_clock is not None
+        else None
+    )
     while True:
+        provider_started_at = (
+            active_trace_clock() if active_trace_clock is not None else 0.0
+        )
         try:
             response = provider.complete(
                 messages=active_context.messages,
@@ -47,7 +63,34 @@ def run_task(
                 model=model,
             )
         except Exception as error:
+            if active_trace_clock is not None:
+                emit_trace(
+                    trace_sink,
+                    started_at=provider_started_at,
+                    ended_at=active_trace_clock(),
+                    operation="provider.request",
+                    outcome="error",
+                    context=trace_context,
+                    utc_clock=trace_utc_clock or _utc_now,
+                    fields=_provider_trace_fields(trace_provider, trace_model),
+                )
             raise AgentError(f"provider request failed: {error}") from error
+        if active_trace_clock is not None:
+            emit_trace(
+                trace_sink,
+                started_at=provider_started_at,
+                ended_at=active_trace_clock(),
+                operation="provider.request",
+                outcome=(
+                    "cancelled"
+                    if execution_context is not None
+                    and execution_context.cancelled
+                    else "success"
+                ),
+                context=trace_context,
+                utc_clock=trace_utc_clock or _utc_now,
+                fields=_provider_trace_fields(trace_provider, trace_model),
+            )
         if on_usage is not None:
             on_usage(response.usage)
 
@@ -64,6 +107,10 @@ def run_task(
                 thinking=response.thinking,
                 on_message=on_message,
                 execution_context=execution_context,
+                trace_sink=trace_sink,
+                trace_context=trace_context,
+                trace_clock=active_trace_clock,
+                trace_utc_clock=trace_utc_clock,
             )
             if execution_context is not None and execution_context.cancelled:
                 raise AgentError("tool execution cancelled")
@@ -92,6 +139,10 @@ def _continue_with_tool_call(
     thinking: str = "",
     on_message: Callable[[AgentMessage], None] | None = None,
     execution_context: ToolExecutionContext | None = None,
+    trace_sink: TraceSink | None = None,
+    trace_context: TraceContext | None = None,
+    trace_clock: Callable[[], float] | None = None,
+    trace_utc_clock: Callable[[], datetime] | None = None,
 ) -> None:
     if not isinstance(tool_call.arguments, Mapping):
         raise AgentError(
@@ -106,6 +157,14 @@ def _continue_with_tool_call(
     context.add(assistant_message)
     if on_message is not None:
         on_message(assistant_message)
+    active_trace_clock = (
+        trace_clock
+        if trace_sink is not None and trace_clock is not None
+        else None
+    )
+    tool_started_at = (
+        active_trace_clock() if active_trace_clock is not None else 0.0
+    )
     try:
         contextual_invoke = getattr(executor, "invoke_with_context", None)
         if execution_context is not None and callable(contextual_invoke):
@@ -117,6 +176,22 @@ def _continue_with_tool_call(
         else:
             result = executor.invoke(tool_call.name, tool_call.arguments)
     except Exception as error:
+        if active_trace_clock is not None:
+            emit_trace(
+                trace_sink,
+                started_at=tool_started_at,
+                ended_at=active_trace_clock(),
+                operation="tool.invoke",
+                outcome=(
+                    "cancelled"
+                    if execution_context is not None
+                    and execution_context.cancelled
+                    else "error"
+                ),
+                context=trace_context,
+                utc_clock=trace_utc_clock or _utc_now,
+                fields={"tool": tool_call.name},
+            )
         tool_message = AgentMessage(
             role="tool",
             content=f"tool error: {error}",
@@ -129,6 +204,17 @@ def _continue_with_tool_call(
             f"tool '{tool_call.name}' failed: {error}"
         ) from error
     if not isinstance(result, str):
+        if active_trace_clock is not None:
+            emit_trace(
+                trace_sink,
+                started_at=tool_started_at,
+                ended_at=active_trace_clock(),
+                operation="tool.invoke",
+                outcome="error",
+                context=trace_context,
+                utc_clock=trace_utc_clock or _utc_now,
+                fields={"tool": tool_call.name},
+            )
         tool_message = AgentMessage(
             role="tool",
             content=f"tool error: '{tool_call.name}' returned a non-text result",
@@ -138,6 +224,22 @@ def _continue_with_tool_call(
         if on_message is not None:
             on_message(tool_message)
         raise AgentError(f"tool '{tool_call.name}' returned a non-text result")
+    if active_trace_clock is not None:
+        emit_trace(
+            trace_sink,
+            started_at=tool_started_at,
+            ended_at=active_trace_clock(),
+            operation="tool.invoke",
+            outcome=(
+                "cancelled"
+                if execution_context is not None
+                and execution_context.cancelled
+                else "success"
+            ),
+            context=trace_context,
+            utc_clock=trace_utc_clock or _utc_now,
+            fields={"tool": tool_call.name},
+        )
     tool_message = AgentMessage(
         role="tool",
         content=result,
@@ -146,3 +248,18 @@ def _continue_with_tool_call(
     context.add(tool_message)
     if on_message is not None:
         on_message(tool_message)
+
+
+def _provider_trace_fields(
+    provider: str | None,
+    model: str | None,
+) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in {"provider": provider, "model": model}.items()
+        if value is not None
+    }
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)

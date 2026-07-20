@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
 from threading import Lock
 import time
@@ -21,6 +22,7 @@ from peon.agent import (
     Usage,
     run_task,
 )
+from peon.agent.tracing import TraceContext, TraceSink, emit_trace
 
 from .resources import (
     ResourceInventory,
@@ -154,6 +156,9 @@ class CodingSession:
         on_event: EventHandler | None = None,
         clock: Callable[[], float] = time.monotonic,
         id_factory: Callable[[], str] = lambda: uuid4().hex,
+        trace_sink: TraceSink | None = None,
+        trace_provider: str | None = None,
+        trace_utc_clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.provider = provider
         self.session_store = session_store
@@ -168,6 +173,9 @@ class CodingSession:
         self._on_event = on_event
         self._clock = clock
         self._id_factory = id_factory
+        self._trace_sink = trace_sink
+        self._trace_provider = trace_provider
+        self._trace_utc_clock = trace_utc_clock
         self._active_execution_context: ToolExecutionContext | None = None
         self._state_lock = Lock()
 
@@ -209,6 +217,11 @@ class CodingSession:
 
         started_at = self._clock()
         usage = _UsageAccumulator()
+        trace_context = TraceContext(
+            session_id=self._session_id,
+            run_id=self._run_id,
+            turn_id=turn_id,
+        )
         try:
             self._emit(
                 TurnStartedEvent(
@@ -232,6 +245,16 @@ class CodingSession:
                     on_usage=usage.add,
                     preserve_task_whitespace=preserve_task_whitespace,
                     execution_context=execution_context,
+                    trace_sink=self._trace_sink,
+                    trace_context=trace_context,
+                    trace_provider=self._trace_provider,
+                    trace_model=self._model,
+                    trace_clock=self._clock if self._trace_sink is not None else None,
+                    trace_utc_clock=(
+                        self._trace_utc_clock
+                        if self._trace_sink is not None
+                        else None
+                    ),
                 )
             except Exception as error:
                 result = TurnResult(
@@ -277,19 +300,30 @@ class CodingSession:
                         content=response,
                         usage=usage.result(),
                     )
+            ended_at = self._clock()
+            emit_trace(
+                self._trace_sink,
+                started_at=started_at,
+                ended_at=ended_at,
+                operation="turn",
+                outcome=result.status,
+                context=trace_context,
+                utc_clock=self._trace_utc_clock or _utc_now,
+            )
             self._emit(
                 TurnFinishedEvent(
                     session_id=self._session_id,
                     run_id=self._run_id,
                     turn_id=turn_id,
                     result=result,
-                    duration=self._clock() - started_at,
+                    duration=ended_at - started_at,
                 )
             )
             return result
         finally:
             with self._state_lock:
                 self._active_execution_context = None
+
 
     def cancel(self) -> bool:
         """Request cancellation of the active provider/tool turn."""
@@ -301,7 +335,41 @@ class CodingSession:
         return True
 
     def _persist_message(self, message: AgentMessage, turn_id: str) -> None:
-        self.session_store.append(self._session_id, message)
+        started_at = (
+            self._clock() if self._trace_sink is not None else None
+        )
+        try:
+            self.session_store.append(self._session_id, message)
+        except Exception:
+            if started_at is not None:
+                emit_trace(
+                    self._trace_sink,
+                    started_at=started_at,
+                    ended_at=self._clock(),
+                    operation="persistence.append",
+                    outcome="error",
+                    context=TraceContext(
+                        session_id=self._session_id,
+                        run_id=self._run_id,
+                        turn_id=turn_id,
+                    ),
+                    utc_clock=self._trace_utc_clock or _utc_now,
+                )
+            raise
+        if started_at is not None:
+            emit_trace(
+                self._trace_sink,
+                started_at=started_at,
+                ended_at=self._clock(),
+                operation="persistence.append",
+                outcome="success",
+                context=TraceContext(
+                    session_id=self._session_id,
+                    run_id=self._run_id,
+                    turn_id=turn_id,
+                ),
+                utc_clock=self._trace_utc_clock or _utc_now,
+            )
         self._emit(
             MessageEvent(
                 session_id=self._session_id,
@@ -318,3 +386,7 @@ class CodingSession:
             except Exception:
                 logger.exception("coding session event handler failed")
                 return
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)

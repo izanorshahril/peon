@@ -118,6 +118,35 @@ def test_print_mode_writes_only_response_and_includes_piped_input() -> None:
     )
 
 
+def test_print_mode_can_write_opt_in_metadata_trace(tmp_path: Path) -> None:
+    provider = FakeProvider(response="Repository summarized.")
+    output = StringIO()
+    trace_path = tmp_path / "trace.jsonl"
+
+    result = main(
+        [
+            "-p",
+            "Do not trace this prompt.",
+            "--provider",
+            "fake",
+            "--trace",
+            str(trace_path),
+            "--no-context-files",
+            "--no-skills",
+        ],
+        provider_factory=lambda _config: provider,
+        output=output,
+        error=StringIO(),
+    )
+
+    assert result == 0
+    assert output.getvalue() == "Repository summarized.\n"
+    trace_text = trace_path.read_text(encoding="utf-8")
+    assert '"operation":"provider.request"' in trace_text
+    assert '"operation":"turn"' in trace_text
+    assert "Do not trace this prompt." not in trace_text
+
+
 def test_print_mode_does_not_decorate_response_with_usage() -> None:
     provider = FakeProvider(
         response=ModelResponse(

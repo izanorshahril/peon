@@ -12,6 +12,7 @@ from .models import (
 	Usage,
 )
 from .provider_protocol import ModelProvider
+from .tracing import TraceContext, TraceSink
 
 __all__ = [
 	"AgentContext",
@@ -22,6 +23,8 @@ __all__ = [
 	"ToolCall",
 	"ToolDefinition",
 	"Usage",
+	"TraceContext",
+	"TraceSink",
 	"ToolExecutionContext",
 	"ToolExecutor",
 	"run_task",

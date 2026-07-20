@@ -1,10 +1,12 @@
 """Small in-process registry for tools, skills, and lifecycle hooks."""
 
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timezone
 import inspect
 from pathlib import Path
 
-from peon.agent import ToolDefinition, ToolExecutionContext
+from peon.agent import ToolDefinition, ToolExecutionContext, TraceContext, TraceSink
+from peon.agent.tracing import emit_trace
 
 from .errors import ExtensionError
 
@@ -28,13 +30,24 @@ def discover_skill_names(root: Path | None = None) -> tuple[str, ...]:
 class ExtensionRegistry:
     """Register and invoke extension capabilities in registration order."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        trace_sink: TraceSink | None = None,
+        trace_context: TraceContext | None = None,
+        trace_clock: Callable[[], float] | None = None,
+        trace_utc_clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._tools: dict[
             str,
             tuple[ToolDefinition, ToolHandler, bool],
         ] = {}
         self._skills: list[str] = []
         self._hooks: dict[str, list[LifecycleHandler]] = {}
+        self._trace_sink = trace_sink
+        self._trace_context = trace_context
+        self._trace_clock = trace_clock
+        self._trace_utc_clock = trace_utc_clock
 
     @property
     def tools(self) -> tuple[ToolDefinition, ...]:
@@ -128,10 +141,40 @@ class ExtensionRegistry:
     def emit(self, event: str) -> None:
         """Invoke lifecycle handlers in registration order."""
         for handler in self._hooks.get(event, ()):
+            active_trace_clock = (
+                self._trace_clock
+                if self._trace_sink is not None and self._trace_clock is not None
+                else None
+            )
+            started_at = (
+                active_trace_clock() if active_trace_clock is not None else None
+            )
             try:
                 handler()
             except Exception as error:
+                if started_at is not None and active_trace_clock is not None:
+                    emit_trace(
+                        self._trace_sink,
+                        started_at=started_at,
+                        ended_at=active_trace_clock(),
+                        operation="extension.hook",
+                        outcome="error",
+                        context=self._trace_context,
+                        utc_clock=self._trace_utc_clock or _utc_now,
+                        fields={"hook": event},
+                    )
                 raise ExtensionError(f"event '{event}' failed: {error}") from error
+            if started_at is not None and active_trace_clock is not None:
+                emit_trace(
+                    self._trace_sink,
+                    started_at=started_at,
+                    ended_at=active_trace_clock(),
+                    operation="extension.hook",
+                    outcome="success",
+                    context=self._trace_context,
+                    utc_clock=self._trace_utc_clock or _utc_now,
+                    fields={"hook": event},
+                )
 
 
 def _accepts_context(handler: ToolHandler) -> bool:
@@ -140,3 +183,7 @@ def _accepts_context(handler: ToolHandler) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)

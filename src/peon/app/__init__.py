@@ -17,6 +17,7 @@ from .commands import (
 	CommandMatch,
 )
 from .config import JsonProviderConfigStore, ProviderConfigStore, UiConfig
+from .observability import JsonlTraceSink
 from .sessions import (
 	JsonlSessionStore,
 	MemorySessionStore,
@@ -35,6 +36,7 @@ __all__ = [
 	"CommandMatch",
 	"CodingSession",
 	"JsonProviderConfigStore",
+	"JsonlTraceSink",
 	"JsonlSessionStore",
 	"MemorySessionStore",
 	"MessageEvent",

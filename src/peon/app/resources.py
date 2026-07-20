@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Literal
 
-from peon.agent import AgentContext, AgentMessage
+from peon.agent import AgentContext, AgentMessage, TraceContext, TraceSink
+from peon.agent.tracing import emit_trace
 
 ResourceDiagnosticKind = Literal[
     "missing",
@@ -140,6 +142,10 @@ class ResourceLoader:
         system_prompt_path: Path | None = None,
         append_system_prompt: Sequence[str] = (),
         append_system_prompt_paths: Sequence[Path] = (),
+        trace_sink: TraceSink | None = None,
+        trace_context: TraceContext | None = None,
+        trace_clock: Callable[[], float] | None = None,
+        trace_utc_clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.root = (root or Path.cwd()).resolve()
         self.global_root = (
@@ -162,28 +168,56 @@ class ResourceLoader:
         self.append_system_prompt_paths = tuple(
             path.resolve() for path in append_system_prompt_paths
         )
+        self._trace_sink = trace_sink
+        self._trace_context = trace_context
+        self._trace_clock = trace_clock
+        self._trace_utc_clock = trace_utc_clock
 
     def load(self) -> ResourceInventory:
-        diagnostics: list[ResourceDiagnostic] = []
-        skills = self._load_skills(diagnostics)
-        context_files = self._load_context_files(diagnostics)
-        system_prompt, system_prompt_source = self._load_system_prompt(diagnostics)
-        append_prompts, append_prompt_sources = self._load_append_prompts(diagnostics)
-        effective_prompt = build_effective_system_prompt(
-            system_prompt,
-            append_prompts,
-            context_files,
-            skills,
+        started_at = (
+            self._trace_clock()
+            if self._trace_sink is not None and self._trace_clock is not None
+            else None
         )
-        return ResourceInventory(
-            skills=skills,
-            context_files=context_files,
-            system_prompt=system_prompt,
-            system_prompt_source=system_prompt_source,
-            append_system_prompt=append_prompts,
-            append_system_prompt_sources=append_prompt_sources,
-            diagnostics=tuple(diagnostics),
-            effective_system_prompt=effective_prompt,
+        diagnostics: list[ResourceDiagnostic] = []
+        try:
+            skills = self._load_skills(diagnostics)
+            context_files = self._load_context_files(diagnostics)
+            system_prompt, system_prompt_source = self._load_system_prompt(diagnostics)
+            append_prompts, append_prompt_sources = self._load_append_prompts(diagnostics)
+            effective_prompt = build_effective_system_prompt(
+                system_prompt,
+                append_prompts,
+                context_files,
+                skills,
+            )
+            inventory = ResourceInventory(
+                skills=skills,
+                context_files=context_files,
+                system_prompt=system_prompt,
+                system_prompt_source=system_prompt_source,
+                append_system_prompt=append_prompts,
+                append_system_prompt_sources=append_prompt_sources,
+                diagnostics=tuple(diagnostics),
+                effective_system_prompt=effective_prompt,
+            )
+        except Exception:
+            self._emit_trace(started_at, "error")
+            raise
+        self._emit_trace(started_at, "success")
+        return inventory
+
+    def _emit_trace(self, started_at: float | None, outcome: str) -> None:
+        if started_at is None or self._trace_clock is None:
+            return
+        emit_trace(
+            self._trace_sink,
+            started_at=started_at,
+            ended_at=self._trace_clock(),
+            operation="resource.load",
+            outcome=outcome,
+            context=self._trace_context,
+            utc_clock=self._trace_utc_clock or _utc_now,
         )
 
     def _load_skills(
@@ -472,6 +506,10 @@ def conversation_messages_without_resource_prompt(
             and message.content == resources.effective_system_prompt
         )
     )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _default_global_root() -> Path:
