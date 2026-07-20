@@ -80,6 +80,11 @@ app -> extensions -> agent
   with `--trace PATH`; operation owners record provider, tool, resource,
   persistence, extension-hook, and turn durations as correlated JSONL without
   conversation content. Trace export failures are isolated from turn state.
+- `peon.embedded.EmbeddedSession` is a direct text-only Python adapter over
+  `CodingSession`; it exposes typed lifecycle events, structured turn results,
+  cancellation, injected providers/tools/stores/clocks/IDs, and does not load
+  Textual or prompt-toolkit. Application convenience exports are lazy so the
+  neutral path remains frontend-free.
 - `ToolExecutionContext` supports cancellation and live tool output callbacks.
 - Adapters support OpenAI-compatible, GitHub Copilot, and configurable custom
   proxy profiles. Model discovery uses compatible `GET /models` endpoints.
@@ -276,7 +281,7 @@ creating work:
 - Extension discovery, packaging, reload, and management beyond in-process
   registry and local skill metadata.
 - Project initialization and richer skill/extension lifecycle.
-- Fullscreen/webapp, RPC, and embedded APIs only when concrete need exists.
+- Fullscreen/webapp and RPC APIs remain reserved until concrete need exists.
 - Decide whether Pi-like navigation warrants enabling `ls`, `find`, and `grep`
   by default; they are registered but currently opt-in.
 - Stronger shell sandboxing and security audit beyond current cwd/process/output
@@ -353,6 +358,20 @@ These corrections are permanent unless implementation changes:
 - Added `--trace PATH` for print mode while preserving ordinary print and JSON
   event output. Validation passed: `275` tests and `mypy src/peon` with no
   issues.
+
+### Ticket 05: embedded Python adapter
+
+- Added `peon.embedded.EmbeddedSession` as a direct caller-facing facade over
+  `CodingSession`. It accepts text prompts, forwards injected provider,
+  executor, resources, session store, clock, and turn ID factory dependencies,
+  exposes typed event callbacks and structured `TurnResult` values, and
+  delegates cancellation without exposing terminal state.
+- Kept the request shape text-only. Moved `peon.app` convenience exports to
+  lazy resolution so importing the embedded adapter does not import Textual or
+  prompt-toolkit; existing CLI and TUI imports remain compatible.
+- Focused validation passed: `5` embedded tests and `144` embedded/session/agent
+  and host regression tests. Full pytest and mypy remain the final gate for
+  this ticket.
 
 ## Primary Upstream Sources
 
