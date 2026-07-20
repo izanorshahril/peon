@@ -373,6 +373,20 @@ These corrections are permanent unless implementation changes:
   and host regression tests. Full pytest and mypy remain the final gate for
   this ticket.
 
+### Ticket 06: Textual turns through CodingSession
+
+- Routed normal Textual prompts and model-following shell turns through
+  `CodingSession`, moving prompt preparation, execution, persistence,
+  lifecycle events, and cancellation out of the widget orchestration path.
+- Preserved Textual-owned transcript rendering, live tool output, shell-only
+  execution, worker scheduling, keyboard controls, resource/session behavior,
+  and existing picker and dialog interactions.
+- Added the session-owned live tool-output callback required for the existing
+  bash presentation, while keeping direct shell commands on their dedicated
+  execution context.
+- Focused Textual/resource/bash/session validation passed: `52` tests. Full
+  validation passed: `281` tests and `mypy src/peon` with no issues.
+
 ## Primary Upstream Sources
 
 ### Pi

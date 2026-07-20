@@ -29,7 +29,6 @@ from peon.agent import (
     ModelProvider,
     ToolCall,
     ToolExecutionContext,
-    run_task,
 )
 from peon.ai import ProviderError
 from peon.extensions import ExtensionRegistry, discover_skill_names
@@ -74,6 +73,7 @@ from .sessions import (
     create_session,
     select_session,
 )
+from .coding_session import CodingSession, MessageEvent, SessionEvent, TurnResult
 from .resources import (
     ResourceInventory,
     apply_resource_prompt,
@@ -1103,6 +1103,7 @@ class TextualPeonApp(App[int]):
         self.session_name = session_name
         self.resources = resources
         self.session_id = ""
+        self.run_id = ""
         self.persisted_message_count = 0
         discovered_skill_names = (
             tuple(skill.name for skill in resources.skills)
@@ -1161,8 +1162,9 @@ class TextualPeonApp(App[int]):
         self.user_top_blank_lines = self.ui_config.user_top_blank_lines
         self.user_bottom_blank_lines = self.ui_config.user_bottom_blank_lines
         self.message_left_padding = self.ui_config.message_left_padding
-        self.task_worker: Worker[str | ToolCall] | None = None
+        self.task_worker: Worker[TurnResult | str] | None = None
         self.execution_context: ToolExecutionContext | None = None
+        self.coding_session: CodingSession | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(
@@ -1618,6 +1620,10 @@ class TextualPeonApp(App[int]):
                 return
             return
         self._last_escape_at = None
+        if self.coding_session is not None and self.task_worker is not None:
+            if self.coding_session.cancel():
+                self._write("Task cancellation requested.", role="system")
+                return
         if self.execution_context is not None and not self.execution_context.cancelled:
             self.execution_context.cancel()
             self._write("Task cancellation requested.", role="system")
@@ -1625,6 +1631,10 @@ class TextualPeonApp(App[int]):
         self.query_one("#prompt", PeonInput).action_clear()
 
     def action_clear_input(self) -> None:
+        if self.coding_session is not None and self.task_worker is not None:
+            if self.coding_session.cancel():
+                self._write("Task cancellation requested.", role="system")
+                return
         if self.execution_context is not None and not self.execution_context.cancelled:
             self.execution_context.cancel()
             self._write("Task cancellation requested.", role="system")
@@ -1662,6 +1672,8 @@ class TextualPeonApp(App[int]):
         )
 
     def _append_runtime_message(self, message: object) -> None:
+        if hasattr(message, "role"):
+            self.persisted_message_count = len(self.context.messages)
         if getattr(message, "role", None) == "user":
             return
         self._append_context_message(message)
@@ -1699,54 +1711,45 @@ class TextualPeonApp(App[int]):
         if not active:
             prompt.focus()
 
-    def _run_task(self, task: str) -> str | ToolCall:
+    def _on_session_event(self, event: SessionEvent) -> None:
+        if isinstance(event, MessageEvent):
+            self.call_from_thread(
+                self._append_runtime_message,
+                event.message,
+            )
+
+    def _build_coding_session(self) -> None:
         assert self.provider is not None
         assert self.config is not None
-        execution_context = self.execution_context
-        try:
-            return run_task(
-                task,
-                self.provider,
-                context=self.context,
-                executor=filter_tool_executor(self.ui_config, self.registry),
-                model=self.config.model,
-                on_message=lambda message: self.call_from_thread(
-                    self._append_runtime_message,
-                    message,
-                ),
-                execution_context=execution_context,
-            )
-        finally:
-            self._persist_new_messages()
+        self.coding_session = CodingSession(
+            provider=self.provider,
+            session_store=self.session_store,
+            session_id=self.session_id,
+            run_id=self.run_id or None,
+            context=self.context,
+            executor=filter_tool_executor(self.ui_config, self.registry),
+            model=self.config.model,
+            resources=self.resources,
+            on_event=self._on_session_event,
+            on_tool_output=lambda stream, chunk: self.call_from_thread(
+                self._append_bash_output,
+                None,
+                stream,
+                chunk,
+            ),
+        )
+        self.run_id = self.coding_session.run_id
 
-    def _persist_new_messages(self) -> None:
-        for index in range(
-            self.persisted_message_count, len(self.context.messages)
-        ):
-            message = self.context.messages[index]
-            try:
-                self.session_store.append(self.session_id, message)
-            except (OSError, SessionStoreError) as caught:
-                self.call_from_thread(
-                    self._write,
-                    f"Could not save conversation: {caught}",
-                )
-                return
-            self.persisted_message_count = index + 1
+    def _run_task(self, task: str) -> TurnResult:
+        assert self.coding_session is not None
+        return self.coding_session.prompt(task)
 
     def _start_task(self, task: str) -> None:
         self._set_processing(True)
-        execution_context = ToolExecutionContext(
-            on_output=lambda stream, chunk: self.call_from_thread(
-                self._append_bash_output,
-                execution_context,
-                stream,
-                chunk,
-            )
-        )
-        self.execution_context = execution_context
+        self.execution_context = None
+        self._build_coding_session()
         self.task_worker = cast(
-            Worker[str | ToolCall],
+            Worker[TurnResult | str],
             self.run_worker(
                 lambda: self._run_task(task),
                 name="peon-task",
@@ -1777,6 +1780,7 @@ class TextualPeonApp(App[int]):
         )
         self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
         self._set_processing(True)
+        self.coding_session = None
         execution_context = ToolExecutionContext(
             on_output=lambda stream, chunk: self.call_from_thread(
                 self._append_bash_output,
@@ -1787,7 +1791,7 @@ class TextualPeonApp(App[int]):
         )
         self.execution_context = execution_context
         self.task_worker = cast(
-            Worker[str | ToolCall],
+            Worker[TurnResult | str],
             self.run_worker(
                 lambda: self._run_shell_command(
                     command,
@@ -1810,7 +1814,7 @@ class TextualPeonApp(App[int]):
         send_to_model: bool,
         execution_context: ToolExecutionContext,
         call_id: str,
-    ) -> str | ToolCall:
+    ) -> str | TurnResult:
         result = self.registry.invoke_with_context(
             "bash",
             {"command": command},
@@ -1819,6 +1823,7 @@ class TextualPeonApp(App[int]):
         self.call_from_thread(self._append_shell_result, result, call_id)
         if not send_to_model:
             return result
+        self._build_coding_session()
         return self._run_task(
             f"Shell command `{command}` output:\n{result}"
         )
@@ -1843,7 +1848,12 @@ class TextualPeonApp(App[int]):
             return
         if event.state == WorkerState.SUCCESS:
             result = event.worker.result
-            if isinstance(result, ToolCall):
+            if isinstance(result, TurnResult):
+                if result.status == "cancelled":
+                    self._write("Task cancelled.", role="system")
+                elif result.status == "error":
+                    self._write(result.error or "task failed", role="system")
+            elif isinstance(result, ToolCall):
                 self._write(
                     f"provider requested unhandled tool '{result.name}'",
                     role="system",
@@ -1861,11 +1871,14 @@ class TextualPeonApp(App[int]):
 
     def _append_bash_output(
         self,
-        execution_context: ToolExecutionContext,
+        execution_context: ToolExecutionContext | None,
         stream: str,
         chunk: str,
     ) -> None:
-        if self.execution_context is not execution_context:
+        if (
+            execution_context is not None
+            and self.execution_context is not execution_context
+        ):
             return
         del stream
         transcript = self.query_one("#transcript", ChatMessage)

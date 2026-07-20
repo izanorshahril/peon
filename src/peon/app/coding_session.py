@@ -154,6 +154,7 @@ class CodingSession:
         model: str | None = None,
         resources: ResourceInventory | None = None,
         on_event: EventHandler | None = None,
+        on_tool_output: Callable[[str, str], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         id_factory: Callable[[], str] = lambda: uuid4().hex,
         trace_sink: TraceSink | None = None,
@@ -171,6 +172,7 @@ class CodingSession:
         if resources is not None:
             apply_resource_prompt(self._context, resources)
         self._on_event = on_event
+        self._on_tool_output = on_tool_output
         self._clock = clock
         self._id_factory = id_factory
         self._trace_sink = trace_sink
@@ -202,7 +204,7 @@ class CodingSession:
         preserve_task_whitespace: bool = False,
     ) -> TurnResult:
         """Run one prompt and return a structured terminal outcome."""
-        execution_context = ToolExecutionContext()
+        execution_context = ToolExecutionContext(on_output=self._on_tool_output)
         turn_id = self._id_factory()
         with self._state_lock:
             if self._active_execution_context is not None:

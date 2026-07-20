@@ -317,6 +317,54 @@ def test_coding_session_cancels_an_active_tool_turn() -> None:
     assert events[-1].result == results[0]
 
 
+def test_coding_session_forwards_live_tool_output() -> None:
+    store = MemorySessionStore()
+    record = store.create()
+    output: list[tuple[str, str]] = []
+
+    class OutputExecutor:
+        @property
+        def tools(self) -> tuple[ToolDefinition, ...]:
+            return (ToolDefinition("bash", "Run a command.", {}),)
+
+        def invoke(self, name: str, arguments: dict[str, object]) -> str:
+            raise AssertionError("context-aware invocation is required")
+
+        def invoke_with_context(
+            self,
+            name: str,
+            arguments: dict[str, object],
+            context: ToolExecutionContext,
+        ) -> str:
+            assert context.on_output is not None
+            context.on_output("stdout", "hello\n")
+            return "done"
+
+    session = CodingSession(
+        provider=UsageProvider(
+            responses=[
+                ModelResponse(
+                    tool_call=ToolCall(
+                        name="bash",
+                        arguments={},
+                        call_id="call-1",
+                    )
+                ),
+                ModelResponse(content="finished"),
+            ]
+        ),
+        session_store=store,
+        session_id=record.session_id,
+        executor=OutputExecutor(),
+        on_tool_output=lambda stream, chunk: output.append((stream, chunk)),
+    )
+
+    result = session.prompt("run the command")
+
+    assert result.status == "success"
+    assert output == [("stdout", "hello\n")]
+
+
 def test_coding_session_rejects_concurrent_prompt_with_a_correlated_error() -> None:
     store = MemorySessionStore()
     record = store.create()
