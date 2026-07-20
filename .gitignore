@@ -27,3 +27,5 @@ pi_output/
 *.credentials
 provider.json
 provider-*.json
+docs/
+reference/

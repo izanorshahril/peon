@@ -63,6 +63,74 @@ def test_resource_loader_discovers_skills_context_and_effective_prompt(
     assert "project context" in resources.effective_system_prompt
 
 
+def test_resource_startup_summary_lists_skill_names_without_paths(
+    tmp_path: Path,
+) -> None:
+    skill_file = tmp_path / ".agents" / "skills" / "notes" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text(
+        "---\nname: notes\ndescription: Note taking\n---\nUse notes.\n",
+        encoding="utf-8",
+    )
+
+    resources = ResourceLoader(
+        tmp_path,
+        global_root=tmp_path / "missing-global",
+    ).load()
+
+    summary = resources.startup_summary()
+
+    assert "  notes" in summary
+    assert str(skill_file) not in "\n".join(summary)
+
+
+def test_resource_startup_summary_groups_context_before_horizontal_skills(
+    tmp_path: Path,
+) -> None:
+    skill_directory = tmp_path / ".agents" / "skills" / "notes"
+    skill_directory.mkdir(parents=True)
+    (skill_directory / "SKILL.md").write_text(
+        "---\nname: notes\ndescription: Note taking\n---\nUse notes.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "AGENTS.md").write_text("Project rules\n", encoding="utf-8")
+
+    resources = ResourceLoader(
+        tmp_path,
+        global_root=tmp_path / "missing-global",
+    ).load()
+
+    assert resources.startup_summary() == (
+        "[Context]",
+        "  AGENTS.md",
+        "",
+        "[Skills]",
+        "  notes",
+    )
+
+
+def test_resource_loader_accepts_folded_skill_description(tmp_path: Path) -> None:
+    skill_file = tmp_path / ".agents" / "skills" / "notes" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text(
+        "---\nname: notes\ndescription: >\n"
+        "  Note taking workflows.\n"
+        "  Use when organizing notes.\n"
+        "license: MIT\n---\nUse notes.\n",
+        encoding="utf-8",
+    )
+
+    resources = ResourceLoader(
+        tmp_path,
+        global_root=tmp_path / "missing-global",
+    ).load()
+
+    assert resources.diagnostics == ()
+    assert resources.skills[0].description == (
+        "Note taking workflows. Use when organizing notes.\n"
+    )
+
+
 def test_resource_loader_reports_malformed_resources_and_supports_opt_outs(
     tmp_path: Path,
 ) -> None:

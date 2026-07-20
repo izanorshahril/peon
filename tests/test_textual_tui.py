@@ -7,6 +7,7 @@ from rich.console import Console
 from peon.agent import AgentMessage, ModelResponse, ToolCall
 from peon.app import ProviderConfig, UiConfig
 from peon.app.sessions import JsonlSessionStore, MemorySessionStore
+from peon.app.resources import ContextResource, ResourceInventory, SkillResource
 from peon.app.textual_tui import (
     ChatMessage,
     PeonInput,
@@ -23,6 +24,15 @@ from textual.widgets import Input, Static
 class FakeProvider:
     def complete(self, *, messages, tools=(), model=None):
         return ModelResponse(content="ok")
+
+
+class ShellProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.received_messages = []
+
+    def complete(self, *, messages, tools=(), model=None):
+        self.received_messages.append(tuple(messages))
+        return ModelResponse(content="shell result received")
 
 
 class BlockingProvider(FakeProvider):
@@ -88,6 +98,167 @@ class MemoryConfigStore:
 
 def provider_factory(config: ProviderConfig) -> FakeProvider:
     return FakeProvider()
+
+
+def test_textual_startup_styles_sections_and_spaces_context() -> None:
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="alpha",
+        base_url="https://example.test/v1",
+    )
+    resources = ResourceInventory(
+        skills=(
+            SkillResource(
+                name="notes",
+                description="Notes",
+                content="Use notes.",
+                path=Path("notes/SKILL.md"),
+                base_directory=Path("notes"),
+                source="project",
+            ),
+        ),
+        context_files=(
+            ContextResource(
+                path=Path("AGENTS.md"),
+                content="Rules",
+                source="project",
+            ),
+        ),
+        effective_system_prompt="prompt",
+    )
+    app = TextualPeonApp(
+        provider_factory=provider_factory,
+        config_store=MemoryConfigStore((config,)),
+        registry=ExtensionRegistry(),
+        resources=resources,
+    )
+
+    async def exercise() -> None:
+        async with app.run_test():
+            startup = app.query_one("#startup", Static).renderable
+            assert startup.plain.index("\n\n[Context]") >= 0
+            assert "[Skills]\n  notes" in startup.plain
+            context_offset = startup.plain.index("[Context]")
+            skills_offset = startup.plain.index("[Skills]")
+            assert any(
+                span.start <= context_offset < span.end
+                and str(span.style) == "#f2c94c"
+                for span in startup.spans
+            )
+            assert any(
+                span.start <= skills_offset < span.end
+                and str(span.style) == "#f2c94c"
+                for span in startup.spans
+            )
+
+    asyncio.run(exercise())
+
+
+def test_textual_ctrl_c_clears_prompt_from_app_binding() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=MemoryConfigStore((config,)),
+            registry=ExtensionRegistry(),
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", PeonInput)
+            prompt.focus()
+            prompt.value = "draft"
+            await pilot.press("ctrl+c")
+            assert prompt.value == ""
+            assert not app.quit_confirmation_active
+
+    asyncio.run(exercise())
+
+
+def test_textual_bang_command_sends_shell_output_to_model() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        provider = ShellProvider()
+        registry = ExtensionRegistry()
+
+        def bash(arguments, context=None):
+            assert arguments["command"] == "echo hello"
+            if context is not None and context.on_output is not None:
+                context.on_output("stdout", "hello\n")
+            return "bash: exit code 0\nstatus: exited\nstdout:\nhello"
+
+        registry.register_tool(
+            name="bash",
+            description="Run commands",
+            parameters={"type": "object"},
+            handler=bash,
+        )
+        app = TextualPeonApp(
+            provider_factory=lambda _config: provider,
+            config_store=MemoryConfigStore((config,)),
+            registry=registry,
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", PeonInput)
+            prompt.value = "!echo hello"
+            await pilot.press("enter")
+            for _ in range(20):
+                await pilot.pause()
+                if not app.query_one("#processing").display:
+                    break
+            transcript = app.query_one("#transcript", ChatMessage)
+            assert "$ echo hello" in transcript.text
+            assert "shell result received" in transcript.text
+            assert any(
+                "Shell command `echo hello` output:" in message.content
+                for messages in provider.received_messages
+                for message in messages
+                if message.role == "user"
+            )
+
+    asyncio.run(exercise())
+
+
+def test_textual_hidden_bang_command_does_not_call_model() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        provider = ShellProvider()
+        registry = ExtensionRegistry()
+        registry.register_tool(
+            name="bash",
+            description="Run commands",
+            parameters={"type": "object"},
+            handler=lambda arguments: "hello",
+        )
+        app = TextualPeonApp(
+            provider_factory=lambda _config: provider,
+            config_store=MemoryConfigStore((config,)),
+            registry=registry,
+        )
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", PeonInput)
+            prompt.value = "!!echo hello"
+            await pilot.press("enter")
+            for _ in range(20):
+                await pilot.pause()
+                if not app.query_one("#processing").display:
+                    break
+            assert provider.received_messages == []
+
+    asyncio.run(exercise())
 
 
 def test_textual_mounts_stable_layout_and_command_suggestions() -> None:
@@ -1503,7 +1674,7 @@ def test_textual_escape_backtracks_nested_settings_and_long_escape_closes() -> N
     asyncio.run(exercise())
 
 
-def test_textual_ctrl_c_confirms_before_exit_and_restores_draft() -> None:
+def test_textual_ctrl_c_clears_prompt_without_quit_confirmation() -> None:
     async def exercise() -> None:
         config = ProviderConfig(
             name="openai-compatible",
@@ -1517,18 +1688,11 @@ def test_textual_ctrl_c_confirms_before_exit_and_restores_draft() -> None:
         )
 
         async with app.run_test() as pilot:
-            prompt = app.query_one("#prompt")
+            prompt = app.query_one("#prompt", PeonInput)
             prompt.value = "unfinished question"
             await pilot.press("ctrl+c")
-            assert str(app.query_one("#setup-label", Static).renderable) == "Exit Peon? [y/N]"
             assert prompt.value == ""
-            prompt.value = "n"
-            await pilot.press("enter")
-            assert prompt.value == "unfinished question"
-            assert str(app.query_one("#setup-label", Static).renderable) == ""
-            await pilot.press("ctrl+c")
-            prompt.value = "yes"
-            await pilot.press("enter")
+            assert not app.quit_confirmation_active
 
     asyncio.run(exercise())
 

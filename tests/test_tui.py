@@ -861,6 +861,65 @@ def test_tui_supports_help_tools_and_clear_commands() -> None:
     )
 
 
+def test_tui_supports_visible_and_hidden_bang_commands() -> None:
+    factory = ProviderFactory()
+    output = StringIO()
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=scripted_input(["!echo hello", "!!echo hidden", "/quit"]),
+        output=output,
+        config_store=MemoryConfigStore(config),
+    )
+
+    assert result == 0
+    rendered = output.getvalue()
+    assert "hello" in rendered
+    assert "hidden" in rendered
+    assert any(
+        message.role == "user"
+        and "Shell command `echo hello` output:" in message.content
+        for message in factory.providers[0].received_messages[0]
+    )
+    assert all(
+        "hidden" not in message.content
+        for messages in factory.providers[0].received_messages
+        for message in messages
+    )
+
+
+def test_tui_ctrl_c_clears_input_instead_of_exiting() -> None:
+    factory = ProviderFactory()
+    output = StringIO()
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+    values: list[object] = [KeyboardInterrupt(), "/quit"]
+
+    def input_fn(_prompt: str) -> str:
+        value = values.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    result = run_tui(
+        provider_factory=factory,
+        input_fn=input_fn,
+        output=output,
+        config_store=MemoryConfigStore(config),
+    )
+
+    assert result == 0
+    assert "Goodbye." in output.getvalue()
+
+
 def test_tui_tool_settings_enable_registered_tool_for_provider(tmp_path) -> None:
     config = ProviderConfig(
         name="openai-compatible",

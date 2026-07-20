@@ -83,28 +83,38 @@ class ResourceInventory:
         )
 
     def startup_summary(self) -> tuple[str, ...]:
-        lines = [
-            f"Resources: {len(self.skills)} skill(s), "
-            f"{len(self.context_files)} context file(s), "
-            f"{'effective system prompt assembled' if self.effective_system_prompt else 'no system prompt'}.",
-        ]
+        lines: list[str] = []
+        if self.context_files:
+            lines.extend(
+                [
+                    "[Context]",
+                    *(f"  {resource.path.name}" for resource in self.context_files),
+                ]
+            )
+        if self.skills:
+            if lines:
+                lines.append("")
+            lines.extend(
+                [
+                    "[Skills]",
+                    f"  {', '.join(skill.name for skill in self.skills)}",
+                ]
+            )
         if self.system_prompt_source is not None:
+            if lines:
+                lines.append("")
             lines.append(f"  system prompt: {self.system_prompt_source}")
         elif self.system_prompt:
+            if lines:
+                lines.append("")
             lines.append("  system prompt: inline override")
         lines.extend(
             f"  append prompt: {path}"
             for path in self.append_system_prompt_sources
         )
-        lines.extend(
-            f"  {resource.source} skill: {resource.name} ({resource.path})"
-            for resource in self.skills
-        )
-        lines.extend(
-            f"  {resource.source} context: {resource.path}"
-            for resource in self.context_files
-        )
         if self.diagnostics:
+            if lines:
+                lines.append("")
             lines.append(f"Resource diagnostics: {self.diagnostic_summary()}")
             lines.extend(
                 f"  {diagnostic.kind}: {diagnostic.path} ({diagnostic.message})"
@@ -527,16 +537,72 @@ def _parse_skill(content: str) -> tuple[dict[str, str], str, str | None]:
     closing = content.find("\n---", 4)
     if closing < 0:
         return {}, "", "skill front matter is not closed"
+    front_matter = content[4:closing].splitlines()
     metadata: dict[str, str] = {}
-    for line in content[4:closing].splitlines():
+    index = 0
+    while index < len(front_matter):
+        line = front_matter[index]
+        if not line.strip():
+            index += 1
+            continue
+        if line[0].isspace():
+            return {}, "", "skill front matter contains an invalid field"
         key, separator, value = line.partition(":")
         if not separator or not key.strip():
             return {}, "", "skill front matter contains an invalid field"
-        metadata[key.strip().casefold()] = value.strip().strip('"\'')
+        normalized_value = value.strip().strip('"\'')
+        index += 1
+        if normalized_value[:1] in {">", "|"} and normalized_value[1:].strip() in {"", "+", "-"}:
+            block_lines: list[str] = []
+            while index < len(front_matter):
+                continuation = front_matter[index]
+                if not continuation.strip():
+                    block_lines.append("")
+                    index += 1
+                    continue
+                if not continuation[0].isspace():
+                    break
+                block_lines.append(continuation)
+                index += 1
+            metadata[key.strip().casefold()] = _parse_block_scalar(
+                normalized_value[0],
+                normalized_value[1:].strip(),
+                block_lines,
+            )
+            continue
+        metadata[key.strip().casefold()] = normalized_value
     body = content[closing + len("\n---") :]
     if body.startswith("\n"):
         body = body[1:]
     return metadata, body, None
+
+
+def _parse_block_scalar(style: str, chomping: str, lines: list[str]) -> str:
+    non_empty_indents = [
+        len(line) - len(line.lstrip())
+        for line in lines
+        if line.strip()
+    ]
+    indent = min(non_empty_indents, default=0)
+    normalized_lines = [line[indent:] if line.strip() else "" for line in lines]
+    if style == "|":
+        value = "\n".join(normalized_lines)
+    else:
+        folded: list[str] = []
+        paragraph: list[str] = []
+        for line in normalized_lines:
+            if line:
+                paragraph.append(line.strip())
+            elif paragraph:
+                folded.append(" ".join(paragraph))
+                paragraph = []
+                folded.append("")
+        if paragraph:
+            folded.append(" ".join(paragraph))
+        value = "\n".join(folded)
+    if chomping != "-":
+        value += "\n"
+    return value
 
 
 def _read_text_resource(

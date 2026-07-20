@@ -121,6 +121,12 @@ app -> extensions -> agent
 - Project trust and resource opt-outs do not disable explicit resources.
 - Diagnostics distinguish missing, malformed, unreadable, duplicate, and
   intentionally disabled resources.
+- Startup resource display follows Pi's compact layout: context filenames first,
+  then comma-separated skill names; YAML folded skill descriptions and optional
+  front-matter fields load without false malformed diagnostics.
+- Startup headings use Pi-like section colors and spacing; `Ctrl+C` clears the
+  composer, while `!command` runs `bash` and sends output to the model and
+  `!!command` keeps output out of model context.
 - Effective prompt includes compact skill metadata, not every full body.
   `/skill:<name>` progressively injects a selected body once.
 - Prompt assembly occurs at provider boundary; portable agent loop does not
@@ -214,6 +220,8 @@ Status below is historical fact, not an active backlog.
 | Pi parity 05 | Added guarded `write` and exact-match `edit`. |
 | Pi parity 06 | Added cancellable bounded `bash`. |
 | Pi parity 07 | Added resource discovery and effective system prompt assembly. |
+| Pi parity 08 | Matched compact startup resource display and skill front-matter parsing. |
+| Pi parity 09 | Added colored startup sections, Ctrl+C clearing, and bang shell commands. |
 
 ### Commit chronology
 

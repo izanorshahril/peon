@@ -14,7 +14,14 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion, CompleteEvent
 from prompt_toolkit.document import Document
 
-from peon.agent import AgentContext, AgentError, ModelProvider, ToolCall, run_task
+from peon.agent import (
+    AgentContext,
+    AgentError,
+    ModelProvider,
+    ToolCall,
+    ToolExecutionContext,
+    run_task,
+)
 from peon.ai import ProviderError
 from peon.extensions import (
     ExtensionRegistry,
@@ -134,7 +141,7 @@ def _terminal_rule() -> str:
 def _print_header(*, output: TextIO) -> None:
     print(f" peon v{_PEON_VERSION}", file=output)
     print(
-        " escape interrupt · ctrl+c/ctrl+d clear/exit · / commands",
+        " escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash",
         file=output,
     )
     print(" Type /help for commands and /model for saved models.", file=output)
@@ -147,6 +154,7 @@ def _print_resource_summary(
 ) -> None:
     if resources is None:
         return
+    print(file=output)
     for line in resources.startup_summary():
         print(line, file=output)
 
@@ -1178,7 +1186,10 @@ def _conversation_loop(
 ) -> tuple[int, TuiSession]:
     while True:
         print(_terminal_rule(), file=output)
-        task = input_fn(" > ").strip()
+        try:
+            task = input_fn(" > ").strip()
+        except KeyboardInterrupt:
+            continue
         print(_terminal_rule(), file=output)
         if not task:
             continue
@@ -1196,6 +1207,29 @@ def _conversation_loop(
             if should_exit:
                 return 0, session
             continue
+
+        if task.startswith("!"):
+            hidden = task.startswith("!!")
+            command = task[2:] if hidden else task[1:]
+            if not command.strip():
+                print("bash command is required", file=error)
+                continue
+            if not any(tool.name == "bash" for tool in session.registry.tools):
+                print("bash tool is not registered", file=error)
+                continue
+            try:
+                result = session.registry.invoke_with_context(
+                    "bash",
+                    {"command": command.strip()},
+                    ToolExecutionContext(),
+                )
+            except Exception as caught:
+                print(str(caught), file=error)
+                continue
+            print(result, file=output)
+            if hidden:
+                continue
+            task = f"Shell command `{command.strip()}` output:\n{result}"
 
         try:
             response = run_task(

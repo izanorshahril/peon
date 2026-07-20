@@ -91,6 +91,34 @@ _ESCAPE_REPEAT_DELAY = 0.3
 _ESCAPE_REPEAT_WINDOW = 0.75
 _MARKDOWN_CONSOLE = Console(width=4096)
 _COLLAPSED_TOOL_PREVIEW_LINES = 5
+_STARTUP_SECTION_COLOR = "#f2c94c"
+_STARTUP_TEXT_COLOR = "#808080"
+
+
+def _render_startup(resources: ResourceInventory | None) -> Text:
+    rendered = Text.assemble(
+        ("peon", "#8bd5ff"),
+        (" v0.1.0", _STARTUP_TEXT_COLOR),
+        (
+            "\nescape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash",
+            _STARTUP_TEXT_COLOR,
+        ),
+    )
+    if resources is None:
+        return rendered
+    rendered.append("\n\n")
+    for index, line in enumerate(resources.startup_summary()):
+        if index:
+            rendered.append("\n")
+        rendered.append(
+            line,
+            style=(
+                _STARTUP_SECTION_COLOR
+                if line in {"[Context]", "[Skills]"}
+                else _STARTUP_TEXT_COLOR
+            ),
+        )
+    return rendered
 
 
 def _render_markdown_lines(markdown: str) -> list[Text]:
@@ -262,6 +290,10 @@ class PeonInput(Input):
     """Composer input with live slash-command hints and Escape clearing."""
 
     COMPONENT_CLASSES = Input.COMPONENT_CLASSES | {"input--selection"}
+    BINDINGS = [
+        *Input.BINDINGS,
+        Binding("ctrl+c", "clear_input", "", show=False, priority=True),
+    ]
     selection_start = 0
     _selecting = False
 
@@ -370,7 +402,7 @@ class PeonInput(Input):
         elif event.key == "ctrl+c":
             event.stop()
             event.prevent_default()
-            app.action_confirm_quit()
+            app.action_clear_input()
         elif app.choice_kind is not None and event.key in {"up", "down"}:
             app.move_choice_selection(1 if event.key == "down" else -1)
             event.stop()
@@ -393,6 +425,9 @@ class PeonInput(Input):
 
     def action_clear(self) -> None:
         cast(TextualPeonApp, self.app).dismiss_command_palette()
+
+    def action_clear_input(self) -> None:
+        cast(TextualPeonApp, self.app).action_clear_input()
 
     def action_confirm_quit(self) -> None:
         cast(TextualPeonApp, self.app).action_confirm_quit()
@@ -1031,7 +1066,7 @@ class TextualPeonApp(App[int]):
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "confirm_quit", "", show=False, priority=True),
+        Binding("ctrl+c", "clear_input", "", show=False, priority=True),
         Binding("escape", "clear_prompt", "", show=False, priority=True),
         ("ctrl+d", "quit", "Quit"),
     ]
@@ -1130,18 +1165,8 @@ class TextualPeonApp(App[int]):
         self.execution_context: ToolExecutionContext | None = None
 
     def compose(self) -> ComposeResult:
-        resource_lines = (
-            "\n".join(self.resources.startup_summary())
-            if self.resources is not None
-            else ""
-        )
         yield Static(
-            Text.assemble(
-                ("peon", "#8bd5ff"),
-                (" v0.1.0", "#808080"),
-                ("\nescape interrupt · ctrl+c ask before exit · ctrl+d exit · / commands", "#808080"),
-                (f"\n{resource_lines}" if resource_lines else "", "#808080"),
-            ),
+            _render_startup(self.resources),
             id="startup",
         )
         with VerticalScroll(id="conversation"):
@@ -1337,18 +1362,9 @@ class TextualPeonApp(App[int]):
             event.prevent_default()
 
     def _handle_ctrl_c(self, event: Key) -> None:
-        if isinstance(self.focused, ChatMessage) and self.focused.selected_text:
-            self.copy_to_clipboard(self.focused.selected_text)
-            event.stop()
-            event.prevent_default()
-            return
-        if isinstance(self.focused, PeonInput):
-            event.stop()
-            event.prevent_default()
-            if self.focused.selected_text:
-                self.copy_to_clipboard(self.focused.selected_text)
-            else:
-                self.action_confirm_quit()
+        self.action_clear_input()
+        event.stop()
+        event.prevent_default()
 
     def _is_non_input_focus(self) -> bool:
         return self.focused is not None and not isinstance(
@@ -1608,6 +1624,15 @@ class TextualPeonApp(App[int]):
             return
         self.query_one("#prompt", PeonInput).action_clear()
 
+    def action_clear_input(self) -> None:
+        if self.execution_context is not None and not self.execution_context.cancelled:
+            self.execution_context.cancel()
+            self._write("Task cancellation requested.", role="system")
+            return
+        self.dismiss_command_palette()
+        self._last_escape_at = None
+        self.query_one("#prompt", PeonInput).clear()
+
     def action_cycle_reasoning(self) -> None:
         if self.config is not None:
             self._cycle_active_reasoning()
@@ -1731,6 +1756,81 @@ class TextualPeonApp(App[int]):
                 thread=True,
             ),
         )
+
+    def _start_shell_command(self, command: str, *, send_to_model: bool) -> None:
+        if not command:
+            self._write("bash command is required")
+            return
+        if not any(tool.name == "bash" for tool in self.registry.tools):
+            self._write("bash tool is not registered")
+            return
+        call = ToolCall(
+            name="bash",
+            arguments={"command": command},
+            call_id=f"shell-{time.monotonic_ns()}",
+        )
+        transcript = self.query_one("#transcript", ChatMessage)
+        transcript.append_message(
+            _format_tool_call(call),
+            role="tool-call",
+            tool_call_id=call.call_id,
+        )
+        self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
+        self._set_processing(True)
+        execution_context = ToolExecutionContext(
+            on_output=lambda stream, chunk: self.call_from_thread(
+                self._append_bash_output,
+                execution_context,
+                stream,
+                chunk,
+            )
+        )
+        self.execution_context = execution_context
+        self.task_worker = cast(
+            Worker[str | ToolCall],
+            self.run_worker(
+                lambda: self._run_shell_command(
+                    command,
+                    send_to_model=send_to_model,
+                    execution_context=execution_context,
+                    call_id=call.call_id or "",
+                ),
+                name="peon-bash",
+                group="peon-task",
+                exclusive=True,
+                exit_on_error=False,
+                thread=True,
+            ),
+        )
+
+    def _run_shell_command(
+        self,
+        command: str,
+        *,
+        send_to_model: bool,
+        execution_context: ToolExecutionContext,
+        call_id: str,
+    ) -> str | ToolCall:
+        result = self.registry.invoke_with_context(
+            "bash",
+            {"command": command},
+            execution_context,
+        )
+        self.call_from_thread(self._append_shell_result, result, call_id)
+        if not send_to_model:
+            return result
+        return self._run_task(
+            f"Shell command `{command}` output:\n{result}"
+        )
+
+    def _append_shell_result(self, result: str, call_id: str) -> None:
+        transcript = self.query_one("#transcript", ChatMessage)
+        transcript.append_message(
+            result,
+            role="tool",
+            tool_call_id=call_id,
+        )
+        self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker is not self.task_worker:
@@ -2535,6 +2635,16 @@ class TextualPeonApp(App[int]):
         if self.provider is None or self.config is None:
             event.input.value = ""
             self._begin_provider_setup()
+            return
+        if value.startswith("!"):
+            event.input.value = ""
+            self.dismiss_command_palette()
+            hidden = value.startswith("!!")
+            command = value[2:] if hidden else value[1:]
+            self._start_shell_command(
+                command.strip(),
+                send_to_model=not hidden,
+            )
             return
         if value.startswith("/"):
             invocation = DEFAULT_COMMAND_CATALOG.resolve(value)
