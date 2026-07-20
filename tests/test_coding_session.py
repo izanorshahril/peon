@@ -8,6 +8,7 @@ from peon.agent import (
     ToolCall,
     ToolDefinition,
     ToolExecutionContext,
+    Usage,
 )
 from peon.app.coding_session import (
     CodingSession,
@@ -18,6 +19,7 @@ from peon.app.coding_session import (
 )
 from peon.app.resources import ResourceInventory
 from peon.app.sessions import MemorySessionStore
+from peon.extensions import ExtensionRegistry, register_sample_tools
 
 
 @dataclass
@@ -94,6 +96,20 @@ class ToolProvider:
         return ModelResponse(content="Finished.")
 
 
+@dataclass
+class UsageProvider:
+    responses: list[ModelResponse]
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+    ) -> ModelResponse:
+        return self.responses.pop(0)
+
+
 def test_coding_session_runs_turn_persists_messages_and_applies_resources() -> None:
     store = MemorySessionStore()
     record = store.create()
@@ -143,6 +159,96 @@ def test_coding_session_runs_turn_persists_messages_and_applies_resources() -> N
     assert finished.run_id == "run-1"
     assert finished.result == result
     assert finished.duration == 2.5
+
+
+def test_coding_session_aggregates_usage_across_provider_continuations() -> None:
+    store = MemorySessionStore()
+    record = store.create()
+    registry = ExtensionRegistry()
+    register_sample_tools(registry)
+    session = CodingSession(
+        provider=UsageProvider(
+            responses=[
+                ModelResponse(
+                    tool_call=ToolCall(
+                        name="word_count",
+                        arguments={"text": "one two"},
+                        call_id="call-1",
+                    ),
+                    usage=Usage(
+                        input_tokens=10,
+                        output_tokens=2,
+                        cache_tokens=4,
+                        cost=0.001,
+                        currency="USD",
+                    ),
+                ),
+                ModelResponse(
+                    content="Finished.",
+                    usage=Usage(
+                        input_tokens=20,
+                        output_tokens=3,
+                        cost=0.002,
+                        currency="USD",
+                    ),
+                ),
+            ]
+        ),
+        session_store=store,
+        session_id=record.session_id,
+        executor=registry,
+        id_factory=lambda: "turn-1",
+    )
+
+    result = session.prompt("Count the words.")
+
+    assert result == TurnResult(
+        status="success",
+        session_id=record.session_id,
+        run_id=session.run_id,
+        turn_id="turn-1",
+        content="Finished.",
+        usage=Usage(
+            input_tokens=30,
+            output_tokens=5,
+            cache_tokens=4,
+            cost=0.003,
+            currency="USD",
+        ),
+    )
+
+
+def test_coding_session_does_not_sum_costs_in_mixed_currencies() -> None:
+    store = MemorySessionStore()
+    record = store.create()
+    registry = ExtensionRegistry()
+    register_sample_tools(registry)
+    session = CodingSession(
+        provider=UsageProvider(
+            responses=[
+                ModelResponse(
+                    tool_call=ToolCall(
+                        name="word_count",
+                        arguments={"text": "one"},
+                        call_id="call-1",
+                    ),
+                    usage=Usage(input_tokens=10, cost=0.001, currency="USD"),
+                ),
+                ModelResponse(
+                    content="Finished.",
+                    usage=Usage(output_tokens=2, cost=0.002, currency="EUR"),
+                ),
+            ]
+        ),
+        session_store=store,
+        session_id=record.session_id,
+        executor=registry,
+        id_factory=lambda: "turn-1",
+    )
+
+    result = session.prompt("Finish the task.")
+
+    assert result.usage == Usage(input_tokens=10, output_tokens=2)
 
 
 def test_coding_session_returns_provider_failure_as_structured_error() -> None:

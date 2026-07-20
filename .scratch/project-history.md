@@ -70,10 +70,12 @@ app -> extensions -> agent
 
 - `AgentContext`, `AgentMessage`, `ToolCall`, and `ModelResponse` are portable.
 - `run_task` performs provider turns, bounded tool dispatch, result append, and
-  continuation until final assistant output.
+  continuation until final assistant output, while exposing optional provider
+  usage observations without changing its return contract.
 - `CodingSession` owns one host-neutral prompt lifecycle around `run_task`,
   including resource application, message persistence, typed start/message/
-  finish events, structured outcomes, and active tool cancellation.
+  finish events, structured outcomes, active tool cancellation, and normalized
+  usage aggregation across provider continuations.
 - `ToolExecutionContext` supports cancellation and live tool output callbacks.
 - Adapters support OpenAI-compatible, GitHub Copilot, and configurable custom
   proxy profiles. Model discovery uses compatible `GET /models` endpoints.
@@ -91,7 +93,7 @@ app -> extensions -> agent
   lifecycle, resource behavior, persistence, and JSON event translation remain
   compatible. JSON records use schema version 1 and carry session, run, and
   turn correlation where a turn exists; terminal turn records come from the
-  typed session finish event.
+  typed session finish event and include normalized usage when available.
 - `fullscreen` and `webapp` modes are reserved and reject honestly.
 
 ### Sessions
@@ -153,7 +155,8 @@ app -> extensions -> agent
 - Settings persist UI spacing/colors/text style, provider mappings, reasoning,
   thinking visibility, tool rendering/availability, and shortcuts.
 - Footer shows cwd, provider/model, context count, and reasoning. Token usage is
-  currently `n/a`.
+  available through the host-neutral turn result and JSON event contract;
+  interactive footer display remains `n/a` until a presentation ticket uses it.
 - Prompt-toolkit shell remains a smaller fallback/test path; Textual owns full
   interaction parity.
 
@@ -263,7 +266,6 @@ Use this as next-session feature discovery, then verify upstream behavior before
 creating work:
 
 - Context compaction and `/compact` workflow.
-- Usage/token/cost contract and `/usage`; `ModelResponse` lacks usage metadata.
 - Provider streaming through agent loop and live assistant rendering.
 - Export/share/copy/status/theme/editor workflows.
 - Undo/redo and navigable session tree beyond fork metadata.
@@ -322,6 +324,18 @@ These corrections are permanent unless implementation changes:
 - `/models` is an alias of `/model`; candidate vocabulary is not always alias.
 - Ticket 20 was research only and proves no runtime feature by itself.
 - Remote/tracker blockers from old planning notes no longer apply.
+
+### Ticket 03: normalized provider usage
+
+- Added immutable provider-neutral `Usage` metadata to `ModelResponse`.
+- OpenAI-compatible and custom adapters normalize prompt/completion tokens,
+  cached prompt tokens, cost, and currency while preserving unavailable fields.
+- `CodingSession.TurnResult` aggregates usage across tool continuations and
+  leaves mixed-currency costs unavailable rather than adding incompatible units.
+- JSON print events include usage on terminal turn records; ordinary print mode
+  remains response-only.
+- Focused validation: provider, agent, session, and CLI suites passed; edge
+  coverage includes unsupported usage payloads and mixed currencies.
 
 ## Primary Upstream Sources
 

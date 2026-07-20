@@ -4,7 +4,14 @@ from typing import cast
 
 import pytest
 
-from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition, run_task
+from peon.agent import (
+    AgentMessage,
+    ModelResponse,
+    ToolCall,
+    ToolDefinition,
+    Usage,
+    run_task,
+)
 from peon.ai import (
     CustomProvider,
     CustomRequestFields,
@@ -117,6 +124,62 @@ def test_openai_compatible_provider_normalizes_request_and_text_response() -> No
     ]
 
 
+def test_openai_provider_normalizes_complete_and_partial_usage() -> None:
+    transport = QueuedTransport(
+        [
+            {
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 30,
+                    "prompt_tokens_details": {"cached_tokens": 80},
+                    "cost": 0.0042,
+                    "currency": "USD",
+                },
+                "choices": [{"message": {"content": "Done."}}],
+            },
+            {
+                "usage": {"prompt_tokens": 7},
+                "choices": [{"message": {"content": "Partial."}}],
+            },
+        ]
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://example.test/v1",
+        model="usage-model",
+        transport=transport,
+    )
+
+    complete = provider.complete(messages=[])
+    partial = provider.complete(messages=[])
+
+    assert complete.usage == Usage(
+        input_tokens=120,
+        output_tokens=30,
+        cache_tokens=80,
+        cost=0.0042,
+        currency="USD",
+    )
+    assert partial.usage == Usage(input_tokens=7)
+
+
+def test_openai_provider_leaves_unsupported_usage_unavailable() -> None:
+    transport = StubTransport(
+        {
+            "usage": {"total_tokens": 12},
+            "choices": [{"message": {"content": "Done."}}],
+        }
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://example.test/v1",
+        model="usage-model",
+        transport=transport,
+    )
+
+    response = provider.complete(messages=[])
+
+    assert response.usage is None
+
+
 def test_custom_provider_matches_corporate_chat_payload(monkeypatch) -> None:
     monkeypatch.setattr("peon.ai.provider_adapters.time.time", lambda: 1784295526)
     transport = StubTransport(
@@ -174,6 +237,34 @@ def test_custom_provider_matches_corporate_chat_payload(monkeypatch) -> None:
             },
         ],
     }
+
+
+def test_custom_provider_normalizes_direct_response_usage() -> None:
+    transport = StubTransport(
+        {
+            "completion": "Corporate response.",
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 5,
+                "cost": 0.002,
+                "currency": "USD",
+            },
+        }
+    )
+    provider = CustomProvider(
+        base_url="https://proxy.test/api/client-apps",
+        model="corporate-model",
+        transport=transport,
+    )
+
+    response = provider.complete(messages=[])
+
+    assert response.usage == Usage(
+        input_tokens=12,
+        output_tokens=5,
+        cost=0.002,
+        currency="USD",
+    )
 
 
 def test_custom_provider_supports_configured_request_field_and_embedding(monkeypatch) -> None:

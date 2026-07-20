@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Literal, TextIO
 from uuid import uuid4
 
-from peon.agent import AgentContext, AgentError, ModelProvider, ToolCall, run_task
+from peon.agent import (
+    AgentContext,
+    AgentError,
+    ModelProvider,
+    ToolCall,
+    Usage,
+    run_task,
+)
 from peon.ai import (
     CustomProvider,
     CustomRequestFields,
@@ -740,6 +747,7 @@ def _run_print_mode(
                     success=True,
                     status=event.result.status,
                     duration=event.duration,
+                    usage=_serialize_usage(event.result.usage),
                 )
             else:
                 events.write(
@@ -748,6 +756,7 @@ def _run_print_mode(
                     message=event.result.error or "task failed",
                     status=event.result.status,
                     duration=event.duration,
+                    usage=_serialize_usage(event.result.usage),
                 )
             return
         if not isinstance(event, MessageEvent):
@@ -900,6 +909,18 @@ def _event_correlation(event: SessionEvent) -> dict[str, str]:
         "session_id": event.session_id,
         "run_id": event.run_id,
         "turn_id": event.turn_id,
+    }
+
+
+def _serialize_usage(usage: Usage | None) -> dict[str, object] | None:
+    if usage is None:
+        return None
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_tokens": usage.cache_tokens,
+        "cost": usage.cost,
+        "currency": usage.currency,
     }
 
 

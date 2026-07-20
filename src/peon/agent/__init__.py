@@ -9,6 +9,7 @@ from .models import (
 	ModelResponse,
 	ToolCall,
 	ToolDefinition,
+	Usage,
 )
 from .provider_protocol import ModelProvider
 
@@ -20,6 +21,7 @@ __all__ = [
 	"ModelResponse",
 	"ToolCall",
 	"ToolDefinition",
+	"Usage",
 	"ToolExecutionContext",
 	"ToolExecutor",
 	"run_task",

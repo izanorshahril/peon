@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from .runtime_errors import AgentError
 
 from .executor import ToolExecutionContext, ToolExecutor
-from .models import AgentContext, AgentMessage, ToolCall, ToolDefinition
+from .models import AgentContext, AgentMessage, ToolCall, ToolDefinition, Usage
 from .provider_protocol import ModelProvider
 
 
@@ -19,6 +19,7 @@ def run_task(
     max_tool_calls: int = 8,
     model: str | None = None,
     on_message: Callable[[AgentMessage], None] | None = None,
+    on_usage: Callable[[Usage | None], None] | None = None,
     preserve_task_whitespace: bool = False,
     execution_context: ToolExecutionContext | None = None,
 ) -> str | ToolCall:
@@ -47,6 +48,8 @@ def run_task(
             )
         except Exception as error:
             raise AgentError(f"provider request failed: {error}") from error
+        if on_usage is not None:
+            on_usage(response.usage)
 
         if response.tool_call is not None:
             if executor is None:

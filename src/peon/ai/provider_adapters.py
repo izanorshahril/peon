@@ -9,7 +9,7 @@ from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
+from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition, Usage
 
 from .provider_errors import ProviderError
 
@@ -496,14 +496,23 @@ class _CustomServiceClient:
         result = self._post(payload, chat=True)
         thinking = _extract_custom_thinking(result, self._response_fields.thinking)
         completion = _extract_response_field(result, self._response_fields.content)
+        usage = _parse_usage(result.get("usage"))
         if isinstance(completion, str) and completion.strip():
             tool_call = _parse_text_tool_call(completion)
             if tool_call is not None:
-                return ModelResponse(tool_call=tool_call, thinking=thinking)
+                return ModelResponse(
+                    tool_call=tool_call,
+                    thinking=thinking,
+                    usage=usage,
+                )
             final = _parse_text_final(completion)
             if final is not None:
-                return ModelResponse(content=final, thinking=thinking)
-            return ModelResponse(content=completion, thinking=thinking)
+                return ModelResponse(
+                    content=final,
+                    thinking=thinking,
+                    usage=usage,
+                )
+            return ModelResponse(content=completion, thinking=thinking, usage=usage)
         if "choices" in result:
             return _parse_response(result)
         raise ProviderError("provider response did not contain completion")
@@ -725,20 +734,30 @@ def _parse_response(result: JsonObject) -> ModelResponse:
     tool_call = _parse_tool_call(message.get("tool_calls"))
     thinking = _extract_thinking(message)
     content = message.get("content")
+    usage = _parse_usage(result.get("usage"))
     if tool_call is not None:
         return ModelResponse(
             content=content if isinstance(content, str) else "",
             thinking=thinking,
             tool_call=tool_call,
+            usage=usage,
         )
     if isinstance(content, str) and content.strip():
         fallback_tool_call = _parse_text_tool_call(content)
         if fallback_tool_call is not None:
-            return ModelResponse(tool_call=fallback_tool_call, thinking=thinking)
+            return ModelResponse(
+                tool_call=fallback_tool_call,
+                thinking=thinking,
+                usage=usage,
+            )
         fallback_final = _parse_text_final(content)
         if fallback_final is not None:
-            return ModelResponse(content=fallback_final, thinking=thinking)
-        return ModelResponse(content=content, thinking=thinking)
+            return ModelResponse(
+                content=fallback_final,
+                thinking=thinking,
+                usage=usage,
+            )
+        return ModelResponse(content=content, thinking=thinking, usage=usage)
     raise ProviderError("provider response did not contain text or a tool call")
 
 
@@ -748,6 +767,47 @@ def _extract_thinking(message: Mapping[str, object]) -> str:
         if isinstance(value, str) and value.strip():
             return value
     return ""
+
+
+def _parse_usage(value: object) -> Usage | None:
+    if not isinstance(value, Mapping):
+        return None
+    usage = Usage(
+        input_tokens=_optional_int(value.get("prompt_tokens")),
+        output_tokens=_optional_int(value.get("completion_tokens")),
+        cache_tokens=_optional_int(
+            _nested_value(value, "prompt_tokens_details", "cached_tokens")
+        ),
+        cost=_optional_float(value.get("cost")),
+        currency=(
+            value["currency"]
+            if isinstance(value.get("currency"), str)
+            and value["currency"].strip()
+            else None
+        ),
+    )
+    if usage == Usage():
+        return None
+    return usage
+
+
+def _nested_value(value: Mapping[str, object], key: str, nested_key: str) -> object:
+    nested = value.get(key)
+    if not isinstance(nested, Mapping):
+        return None
+    return nested.get(nested_key)
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _optional_float(value: object) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
 
 
 def _extract_custom_thinking(result: JsonObject, path: str) -> str:

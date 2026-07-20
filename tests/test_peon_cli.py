@@ -12,6 +12,7 @@ from peon.agent import (
     ModelResponse,
     ToolCall,
     ToolDefinition,
+    Usage,
 )
 from peon.app import ProviderConfig, main
 from peon.app.sessions import MemorySessionStore, SessionStoreError
@@ -115,6 +116,26 @@ def test_print_mode_writes_only_response_and_includes_piped_input() -> None:
             content="Summarize this input.\n\npiped context",
         ),
     )
+
+
+def test_print_mode_does_not_decorate_response_with_usage() -> None:
+    provider = FakeProvider(
+        response=ModelResponse(
+            content="Repository summarized.",
+            usage=Usage(input_tokens=10, output_tokens=4),
+        )
+    )
+    output = StringIO()
+
+    result = main(
+        ["-p", "Summarize the repository.", "--provider", "fake"],
+        provider_factory=lambda _config: provider,
+        output=output,
+        error=StringIO(),
+    )
+
+    assert result == 0
+    assert output.getvalue() == "Repository summarized.\n"
 
 
 def test_print_mode_accepts_piped_input_without_a_prompt() -> None:
@@ -373,6 +394,40 @@ def test_print_event_mode_emits_ordered_json_lines() -> None:
     assert events[2]["content"] == "I checked the request."
     assert events[3]["content"] == "Done."
     assert error.getvalue() == ""
+
+
+def test_print_event_mode_serializes_normalized_usage() -> None:
+    provider = FakeProvider(
+        response=ModelResponse(
+            content="Done.",
+            usage=Usage(
+                input_tokens=120,
+                output_tokens=30,
+                cache_tokens=80,
+                cost=0.0042,
+                currency="USD",
+            ),
+        )
+    )
+    output = StringIO()
+
+    result = main(
+        ["-p", "Do work.", "--events", "--provider", "fake"],
+        provider_factory=lambda _config: provider,
+        output=output,
+        error=StringIO(),
+    )
+
+    assert result == 0
+    events = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert events[-2]["type"] == "turn_end"
+    assert events[-2]["usage"] == {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "cache_tokens": 80,
+        "cost": 0.0042,
+        "currency": "USD",
+    }
 
 
 def test_print_event_mode_uses_injected_correlation_ids_and_clock() -> None:

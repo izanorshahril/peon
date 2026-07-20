@@ -18,6 +18,7 @@ from peon.agent import (
     ToolCall,
     ToolExecutionContext,
     ToolExecutor,
+    Usage,
     run_task,
 )
 
@@ -39,6 +40,7 @@ class TurnResult:
     turn_id: str
     content: str | None = None
     error: str | None = None
+    usage: Usage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +73,68 @@ SessionEvent: TypeAlias = (
 )
 EventHandler = Callable[[SessionEvent], None]
 logger = logging.getLogger(__name__)
+
+
+class _UsageAccumulator:
+    def __init__(self) -> None:
+        self._input_tokens = 0
+        self._output_tokens = 0
+        self._cache_tokens = 0
+        self._has_input_tokens = False
+        self._has_output_tokens = False
+        self._has_cache_tokens = False
+        self._cost_by_currency: dict[str | None, float] = {}
+        self._currencies: set[str] = set()
+
+    def add(self, usage: Usage | None) -> None:
+        if usage is None:
+            return
+        if usage.input_tokens is not None:
+            self._input_tokens += usage.input_tokens
+            self._has_input_tokens = True
+        if usage.output_tokens is not None:
+            self._output_tokens += usage.output_tokens
+            self._has_output_tokens = True
+        if usage.cache_tokens is not None:
+            self._cache_tokens += usage.cache_tokens
+            self._has_cache_tokens = True
+        if usage.cost is not None:
+            self._cost_by_currency[usage.currency] = (
+                self._cost_by_currency.get(usage.currency, 0.0) + usage.cost
+            )
+        if usage.currency is not None:
+            self._currencies.add(usage.currency)
+
+    def result(self) -> Usage | None:
+        if not any(
+            (
+                self._has_input_tokens,
+                self._has_output_tokens,
+                self._has_cache_tokens,
+                self._cost_by_currency,
+                self._currencies,
+            )
+        ):
+            return None
+        cost_currency = None
+        cost = None
+        if len(self._cost_by_currency) == 1:
+            cost_currency, cost = next(iter(self._cost_by_currency.items()))
+        return Usage(
+            input_tokens=self._input_tokens if self._has_input_tokens else None,
+            output_tokens=self._output_tokens if self._has_output_tokens else None,
+            cache_tokens=self._cache_tokens if self._has_cache_tokens else None,
+            cost=cost,
+            currency=(
+                cost_currency
+                if cost is not None
+                else (
+                    next(iter(self._currencies))
+                    if len(self._currencies) == 1
+                    else None
+                )
+            ),
+        )
 
 
 class CodingSession:
@@ -144,6 +208,7 @@ class CodingSession:
             self._active_execution_context = execution_context
 
         started_at = self._clock()
+        usage = _UsageAccumulator()
         try:
             self._emit(
                 TurnStartedEvent(
@@ -164,6 +229,7 @@ class CodingSession:
                         message,
                         turn_id,
                     ),
+                    on_usage=usage.add,
                     preserve_task_whitespace=preserve_task_whitespace,
                     execution_context=execution_context,
                 )
@@ -178,6 +244,7 @@ class CodingSession:
                     run_id=self._run_id,
                     turn_id=turn_id,
                     error=str(error),
+                    usage=usage.result(),
                 )
             else:
                 if execution_context.cancelled:
@@ -187,6 +254,7 @@ class CodingSession:
                         run_id=self._run_id,
                         turn_id=turn_id,
                         error="task cancelled",
+                        usage=usage.result(),
                     )
                 elif isinstance(response, ToolCall):
                     result = TurnResult(
@@ -198,6 +266,7 @@ class CodingSession:
                             f"provider requested tool '{response.name}', but "
                             "tool execution is not configured"
                         ),
+                        usage=usage.result(),
                     )
                 else:
                     result = TurnResult(
@@ -206,6 +275,7 @@ class CodingSession:
                         run_id=self._run_id,
                         turn_id=turn_id,
                         content=response,
+                        usage=usage.result(),
                     )
             self._emit(
                 TurnFinishedEvent(

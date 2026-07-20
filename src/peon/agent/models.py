@@ -33,10 +33,20 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class Usage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_tokens: int | None = None
+    cost: float | None = None
+    currency: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ModelResponse:
     content: str = ""
     tool_call: ToolCall | None = None
     thinking: str = ""
+    usage: Usage | None = None
 
 
 @dataclass(slots=True)

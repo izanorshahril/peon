@@ -10,6 +10,7 @@ from peon.agent import (
     ToolCall,
     ToolExecutionContext,
     ToolDefinition,
+    Usage,
     run_task,
 )
 from peon.extensions import ExtensionRegistry
@@ -200,6 +201,42 @@ def test_run_task_executes_tool_and_continues_until_final_response() -> None:
     )
     assert context.messages == list(provider.received_messages[1]) + [
         AgentMessage(role="assistant", content="The owner is Peon."),
+    ]
+
+
+def test_run_task_reports_usage_for_each_provider_request() -> None:
+    provider = ScriptedProvider(
+        responses=[
+            ModelResponse(
+                tool_call=ToolCall(
+                    name="lookup",
+                    arguments={"key": "owner"},
+                    call_id="call-usage",
+                ),
+                usage=Usage(input_tokens=10, output_tokens=2),
+            ),
+            ModelResponse(
+                content="The owner is Peon.",
+                usage=Usage(input_tokens=20, output_tokens=4, cache_tokens=3),
+            ),
+        ],
+        received_messages=[],
+        received_tools=[],
+    )
+    usage: list[Usage | None] = []
+
+    result = run_task(
+        "Who owns the project?",
+        provider,
+        context=AgentContext(),
+        executor=build_lookup_registry(),
+        on_usage=usage.append,
+    )
+
+    assert result == "The owner is Peon."
+    assert usage == [
+        Usage(input_tokens=10, output_tokens=2),
+        Usage(input_tokens=20, output_tokens=4, cache_tokens=3),
     ]
 
 
