@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 from collections.abc import Sequence
+import json
+from io import StringIO
 from threading import Event, Thread
 
 from peon.agent import (
@@ -17,6 +19,7 @@ from peon.app.coding_session import (
     TurnStartedEvent,
     TurnResult,
 )
+from peon.app.observability import JsonlTraceSink
 from peon.app.resources import ResourceInventory
 from peon.app.sessions import MemorySessionStore
 from peon.extensions import ExtensionRegistry, register_sample_tools
@@ -50,9 +53,32 @@ class FailingProvider:
 
 
 @dataclass
+class PersistenceAndProviderFailure:
+    def complete(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+    ) -> ModelResponse:
+        raise RuntimeError("provider unavailable")
+
+
+@dataclass
 class FailingStore(MemorySessionStore):
     def append(self, session_id: str, message: AgentMessage) -> None:
         raise RuntimeError("persistence unavailable")
+
+
+@dataclass
+class FailOnceStore(MemorySessionStore):
+    failed: bool = False
+
+    def append(self, session_id: str, message: AgentMessage) -> None:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("persistence temporarily unavailable")
+        super().append(session_id, message)
 
 
 @dataclass
@@ -410,3 +436,109 @@ def test_coding_session_returns_persistence_failure_as_structured_error() -> Non
     assert result.run_id == "run-1"
     assert result.error is not None
     assert "persistence unavailable" in result.error
+
+
+def test_coding_session_retries_messages_left_unsaved_by_a_previous_turn() -> None:
+    store = FailOnceStore()
+    record = store.create()
+    session = CodingSession(
+        provider=UsageProvider(
+            responses=[
+                ModelResponse(content="first response"),
+                ModelResponse(content="second response"),
+            ]
+        ),
+        session_store=store,
+        session_id=record.session_id,
+    )
+
+    first = session.prompt("first task")
+    second = session.prompt("second task")
+
+    assert first.status == "error"
+    assert second.status == "success"
+    assert store.load(record.session_id).messages == (
+        AgentMessage(role="user", content="first task"),
+        AgentMessage(role="assistant", content="first response"),
+        AgentMessage(role="user", content="second task"),
+        AgentMessage(role="assistant", content="second response"),
+    )
+
+
+def test_coding_session_does_not_emit_unsaved_messages_during_retry() -> None:
+    store = FailOnceStore()
+    record = store.create()
+    events = []
+    session = CodingSession(
+        provider=UsageProvider(
+            responses=[
+                ModelResponse(content="first response"),
+                ModelResponse(content="second response"),
+            ]
+        ),
+        session_store=store,
+        session_id=record.session_id,
+        on_event=events.append,
+    )
+
+    first = session.prompt("first task")
+    first_event_count = len(events)
+    second = session.prompt("second task")
+
+    assert first.status == "error"
+    assert second.status == "success"
+    assert len(events) - first_event_count == 4
+    assert all(
+        not isinstance(event, MessageEvent)
+        or event.message.content not in {"first task", "first response"}
+        for event in events[first_event_count:]
+    )
+
+
+def test_coding_session_traces_persistence_retries() -> None:
+    store = FailOnceStore()
+    record = store.create()
+    output = StringIO()
+    session = CodingSession(
+        provider=UsageProvider(
+            responses=[
+                ModelResponse(content="first response"),
+                ModelResponse(content="second response"),
+            ]
+        ),
+        session_store=store,
+        session_id=record.session_id,
+        trace_sink=JsonlTraceSink(output),
+    )
+
+    session.prompt("first task")
+    session.prompt("second task")
+
+    records = [json.loads(line) for line in output.getvalue().splitlines()]
+    persistence_records = [
+        record for record in records if record["operation"] == "persistence.append"
+    ]
+    assert [record["outcome"] for record in persistence_records] == [
+        "error",
+        "success",
+        "success",
+        "success",
+        "success",
+    ]
+
+
+def test_coding_session_reports_provider_and_persistence_failures() -> None:
+    store = FailingStore()
+    record = store.create()
+    session = CodingSession(
+        provider=PersistenceAndProviderFailure(),
+        session_store=store,
+        session_id=record.session_id,
+    )
+
+    result = session.prompt("first task")
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert "provider request failed" in result.error
+    assert "persistence failed" in result.error

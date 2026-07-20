@@ -4,6 +4,8 @@ from io import StringIO
 
 from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
 from peon.app import JsonProviderConfigStore, ProviderConfig, UiConfig
+from peon.app import tui as tui_module
+from peon.app.coding_session import TurnResult
 from peon.app.resources import ResourceLoader
 from peon.app.tui import SlashCommandCompleter, run_tui
 from peon.app.sessions import JsonlSessionStore, MemorySessionStore
@@ -261,6 +263,48 @@ def test_tui_configures_provider_and_keeps_context_between_tasks() -> None:
         AgentMessage(role="assistant", content="first response"),
         AgentMessage(role="user", content="second task"),
     )
+
+
+def test_tui_delegates_prompts_to_coding_session(monkeypatch) -> None:
+    submitted: list[str] = []
+
+    class RecordingSession:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            self.run_id = "run-1"
+
+        def prompt(self, task: str) -> TurnResult:
+            submitted.append(task)
+            return TurnResult(
+                status="success",
+                session_id="session-1",
+                run_id="run-1",
+                turn_id="turn-1",
+                content="session response",
+            )
+
+    monkeypatch.setattr(tui_module, "CodingSession", RecordingSession)
+    output = StringIO()
+
+    result = run_tui(
+        provider_factory=ProviderFactory(),
+        input_fn=scripted_input(
+            [
+                "1",
+                "https://example.test/v1",
+                "1",
+                "first task",
+                "/quit",
+            ]
+        ),
+        secret_input=scripted_secret(["api-key"]),
+        output=output,
+        config_store=MemoryConfigStore(),
+    )
+
+    assert result == 0
+    assert submitted == ["first task"]
+    assert "session response" in output.getvalue()
 
 
 def test_tui_executes_native_word_count_and_renders_final_response() -> None:

@@ -29,7 +29,7 @@ from .resources import (
     apply_resource_prompt,
     conversation_messages_without_resource_prompt,
 )
-from .sessions import SessionStore, SessionStoreError
+from .sessions import SessionStore
 
 TurnStatus = Literal["success", "error", "cancelled"]
 
@@ -179,6 +179,11 @@ class CodingSession:
         self._trace_provider = trace_provider
         self._trace_utc_clock = trace_utc_clock
         self._active_execution_context: ToolExecutionContext | None = None
+        (
+            self._persisted_message_count,
+            self._load_error,
+        ) = self._stored_message_count()
+        self._persistence_error: str | None = None
         self._state_lock = Lock()
 
     @property
@@ -219,6 +224,8 @@ class CodingSession:
 
         started_at = self._clock()
         usage = _UsageAccumulator()
+        self._persistence_error = self._load_error
+        self._flush_pending_messages(turn_id)
         trace_context = TraceContext(
             session_id=self._session_id,
             run_id=self._run_id,
@@ -302,6 +309,19 @@ class CodingSession:
                         content=response,
                         usage=usage.result(),
                     )
+            if self._persistence_error is not None:
+                persistence_error = self._persistence_error
+                result_error = result.error
+                if result_error is not None and result_error != persistence_error:
+                    persistence_error = f"{result_error}; persistence failed: {persistence_error}"
+                result = TurnResult(
+                    status="error",
+                    session_id=result.session_id,
+                    run_id=result.run_id,
+                    turn_id=result.turn_id,
+                    error=persistence_error,
+                    usage=result.usage,
+                )
             ended_at = self._clock()
             emit_trace(
                 self._trace_sink,
@@ -337,41 +357,23 @@ class CodingSession:
         return True
 
     def _persist_message(self, message: AgentMessage, turn_id: str) -> None:
-        started_at = (
-            self._clock() if self._trace_sink is not None else None
+        if self._persistence_error is not None:
+            return
+        messages = conversation_messages_without_resource_prompt(
+            self._context.messages,
+            self._resources,
         )
-        try:
-            self.session_store.append(self._session_id, message)
-        except Exception:
-            if started_at is not None:
-                emit_trace(
-                    self._trace_sink,
-                    started_at=started_at,
-                    ended_at=self._clock(),
-                    operation="persistence.append",
-                    outcome="error",
-                    context=TraceContext(
-                        session_id=self._session_id,
-                        run_id=self._run_id,
-                        turn_id=turn_id,
-                    ),
-                    utc_clock=self._trace_utc_clock or _utc_now,
-                )
-            raise
-        if started_at is not None:
-            emit_trace(
-                self._trace_sink,
-                started_at=started_at,
-                ended_at=self._clock(),
-                operation="persistence.append",
-                outcome="success",
-                context=TraceContext(
-                    session_id=self._session_id,
-                    run_id=self._run_id,
-                    turn_id=turn_id,
-                ),
-                utc_clock=self._trace_utc_clock or _utc_now,
+        message_index = len(messages) - 1
+        if message_index != self._persisted_message_count:
+            self._persistence_error = (
+                "conversation context does not match persisted session"
             )
+            return
+        if not self._append_message(message, turn_id):
+            return
+        self._emit_message(message, turn_id)
+
+    def _emit_message(self, message: AgentMessage, turn_id: str) -> None:
         self._emit(
             MessageEvent(
                 session_id=self._session_id,
@@ -380,6 +382,53 @@ class CodingSession:
                 message=message,
             )
         )
+
+    def _flush_pending_messages(self, turn_id: str) -> None:
+        messages = conversation_messages_without_resource_prompt(
+            self._context.messages,
+            self._resources,
+        )
+        if self._persisted_message_count > len(messages):
+            self._persistence_error = (
+                "conversation context does not match persisted session"
+            )
+            return
+        while self._persisted_message_count < len(messages):
+            message = messages[self._persisted_message_count]
+            if not self._append_message(message, turn_id):
+                return
+
+    def _append_message(self, message: AgentMessage, turn_id: str) -> bool:
+        started_at = self._clock() if self._trace_sink is not None else None
+        try:
+            self.session_store.append(self._session_id, message)
+        except Exception as error:
+            self._persistence_error = str(error)
+            outcome = "error"
+        else:
+            self._persisted_message_count += 1
+            outcome = "success"
+        if started_at is not None:
+            emit_trace(
+                self._trace_sink,
+                started_at=started_at,
+                ended_at=self._clock(),
+                operation="persistence.append",
+                outcome=outcome,
+                context=TraceContext(
+                    session_id=self._session_id,
+                    run_id=self._run_id,
+                    turn_id=turn_id,
+                ),
+                utc_clock=self._trace_utc_clock or _utc_now,
+            )
+        return outcome == "success"
+
+    def _stored_message_count(self) -> tuple[int, str | None]:
+        try:
+            return len(self.session_store.load(self._session_id).messages), None
+        except Exception as error:
+            return 0, str(error)
 
     def _emit(self, event: SessionEvent) -> None:
         if self._on_event is not None:

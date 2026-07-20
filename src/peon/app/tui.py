@@ -16,11 +16,8 @@ from prompt_toolkit.document import Document
 
 from peon.agent import (
     AgentContext,
-    AgentError,
     ModelProvider,
-    ToolCall,
     ToolExecutionContext,
-    run_task,
 )
 from peon.ai import ProviderError
 from peon.extensions import (
@@ -59,6 +56,7 @@ from .config import (
     update_ui_setting,
 )
 from .commands import DEFAULT_COMMAND_CATALOG, CommandDefinition
+from .coding_session import CodingSession, TurnResult
 from .resources import (
     ResourceInventory,
     apply_resource_prompt,
@@ -131,6 +129,7 @@ class TuiSession:
     session_id: str = ""
     session_store: SessionStore = field(default_factory=MemorySessionStore)
     persisted_message_count: int = 0
+    run_id: str = ""
 
 
 def _terminal_rule() -> str:
@@ -1231,29 +1230,28 @@ def _conversation_loop(
                 continue
             task = f"Shell command `{command.strip()}` output:\n{result}"
 
-        try:
-            response = run_task(
-                task,
-                session.provider,
-                context=session.context,
-                executor=filter_tool_executor(
-                    load_ui_config(config_store),
-                    session.registry,
-                ),
-                model=session.config.model,
-            )
-        except AgentError as caught:
-            _persist_new_messages(session, error=error)
-            print(f"peon: {caught}", file=error)
-            continue
-        _persist_new_messages(session, error=error)
-        if isinstance(response, ToolCall):
+        coding_session = CodingSession(
+            provider=session.provider,
+            session_store=session.session_store,
+            session_id=session.session_id,
+            run_id=session.run_id or None,
+            context=session.context,
+            executor=filter_tool_executor(
+                load_ui_config(config_store),
+                session.registry,
+            ),
+            model=session.config.model,
+            resources=session.resources,
+        )
+        session.run_id = coding_session.run_id
+        response = coding_session.prompt(task)
+        if response.status != "success":
             print(
-                f"peon: provider requested unhandled tool '{response.name}'",
+                f"peon: {response.error or 'task failed'}",
                 file=error,
             )
             continue
-        print(f"peon> {response}", file=output)
+        print(f"peon> {response.content or ''}", file=output)
 
 
 def _handle_command(
@@ -1483,18 +1481,3 @@ def _handle_command(
             False,
         )
     return session, False
-
-
-def _persist_new_messages(
-    session: TuiSession,
-    *,
-    error: TextIO,
-) -> None:
-    for index in range(session.persisted_message_count, len(session.context.messages)):
-        message = session.context.messages[index]
-        try:
-            session.session_store.append(session.session_id, message)
-        except (OSError, SessionStoreError) as caught:
-            print(f"peon: could not save conversation: {caught}", file=error)
-            return
-        session.persisted_message_count = index + 1

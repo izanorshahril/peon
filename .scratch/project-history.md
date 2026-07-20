@@ -387,6 +387,23 @@ These corrections are permanent unless implementation changes:
 - Focused Textual/resource/bash/session validation passed: `52` tests. Full
   validation passed: `281` tests and `mypy src/peon` with no issues.
 
+### Ticket 07: prompt-toolkit turns through CodingSession
+
+- Routed the prompt-toolkit fallback's normal prompts and model-following bang
+  commands through `CodingSession`, preserving its smaller terminal
+  presentation and command/session controls.
+- Moved persistence failure retry into `CodingSession`, so failed appends are
+  retried in order by later turns without reintroducing host-specific
+  persistence or leaking unsaved messages into event streams.
+- Removed the fallback's direct `run_task` and `_persist_new_messages` paths;
+  resource application, tool execution, structured outcomes, and persistence
+  now use the shared session boundary.
+- Hardened retry behavior rejects context/store mismatches, preserves combined
+  provider and persistence failures, keeps unsaved messages out of event
+  streams, and traces retry appends like ordinary persistence.
+- Focused fallback/session validation passed: `37` and `12` tests. Full
+  validation passed: `286` tests and `mypy src/peon` with no issues.
+
 ## Primary Upstream Sources
 
 ### Pi
