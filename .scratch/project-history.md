@@ -103,6 +103,10 @@ app -> extensions -> agent
   compatible. JSON records use schema version 1 and carry session, run, and
   turn correlation where a turn exists; terminal turn records come from the
   typed session finish event and include normalized usage when available.
+- Built-in hosts resolve through stable `print`, `jsonl`, `textual`,
+  `prompt-toolkit`, and `embedded` identifiers. Reserved `fullscreen` and
+  `webapp` hosts fail before startup session work; CLI mode names remain
+  compatible with the host identifiers.
 - `fullscreen` and `webapp` modes are reserved and reject honestly.
 
 ### Sessions
@@ -403,6 +407,20 @@ These corrections are permanent unless implementation changes:
   streams, and traces retry appends like ordinary persistence.
 - Focused fallback/session validation passed: `37` and `12` tests. Full
   validation passed: `286` tests and `mypy src/peon` with no issues.
+
+### Ticket 08: centralized host selection
+
+- Added a small immutable app-owned host catalog with stable identifiers,
+  explicit roles, and actionable unavailable-host errors for unknown and
+  reserved hosts.
+- Routed CLI print/event/interactive mode composition and `run_tui` startup
+  through the catalog. Textual and prompt-toolkit remain presentation hosts;
+  embedded remains a direct Python entry path, with no frontend dependency in
+  `CodingSession`.
+- Reserved hosts are rejected before registry or session creation, while
+  existing `--mode` behavior and injected TUI runners remain compatible.
+- Focused host/CLI/fallback validation passed: `88` tests. Full validation
+  passed: `295` tests and `mypy src/peon` with no issues.
 
 ## Primary Upstream Sources
 

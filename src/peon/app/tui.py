@@ -57,6 +57,7 @@ from .config import (
 )
 from .commands import DEFAULT_COMMAND_CATALOG, CommandDefinition
 from .coding_session import CodingSession, TurnResult
+from .hosts import HostUnavailableError, resolve_host
 from .resources import (
     ResourceInventory,
     apply_resource_prompt,
@@ -209,11 +210,26 @@ def run_tui(
     session_target: str | None = None,
     session_name: str | None = None,
     resources: ResourceInventory | None = None,
+    host_id: str | None = None,
 ) -> int:
     """Run an interactive Peon conversation until the user exits."""
     output = output or sys.stdout
     error = error or sys.stderr
     secret_input = secret_input or getpass.getpass
+    selected_host_id = host_id or (
+        "prompt-toolkit" if input_fn is not None else "textual"
+    )
+    try:
+        selected_host = resolve_host(selected_host_id)
+    except HostUnavailableError as caught:
+        print(f"peon: {caught}", file=error)
+        return 1
+    if selected_host.role != "interactive":
+        print(
+            f"peon: host '{selected_host.identifier}' is not an interactive host",
+            file=error,
+        )
+        return 1
     active_registry = registry or ExtensionRegistry()
     active_config_store = config_store or JsonProviderConfigStore()
     active_session_store = session_store or _default_session_store(active_config_store)
@@ -223,7 +239,7 @@ def run_tui(
         register_sample_tools(active_registry)
         register_filesystem_tools(active_registry)
 
-    if input_fn is None:
+    if selected_host.identifier == "textual":
         from .textual_tui import run_textual_tui
 
         return run_textual_tui(
@@ -242,6 +258,9 @@ def run_tui(
             session_name=session_name,
             resources=resources,
         )
+
+    if input_fn is None:
+        input_fn = _create_input_function()
 
     _print_header(output=output)
     try:

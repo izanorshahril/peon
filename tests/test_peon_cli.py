@@ -886,6 +886,7 @@ def test_command_supports_explicit_interactive_modes() -> None:
 
     assert result == 0
     assert len(calls) == 1
+    assert calls[0]["host_id"] == "textual"
 
 
 def test_command_requires_task_for_non_interactive_mode() -> None:

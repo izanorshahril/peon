@@ -10,6 +10,9 @@ _EXPORTS = {
 	"CommandInvocation": (".commands", "CommandInvocation"),
 	"CommandMatch": (".commands", "CommandMatch"),
 	"CodingSession": (".coding_session", "CodingSession"),
+	"Host": (".hosts", "Host"),
+	"HostRole": (".hosts", "HostRole"),
+	"HostUnavailableError": (".hosts", "HostUnavailableError"),
 	"JsonProviderConfigStore": (".config", "JsonProviderConfigStore"),
 	"JsonlTraceSink": (".observability", "JsonlTraceSink"),
 	"JsonlSessionStore": (".sessions", "JsonlSessionStore"),
@@ -28,6 +31,7 @@ _EXPORTS = {
 	"UiConfig": (".config", "UiConfig"),
 	"build_parser": (".cli", "build_parser"),
 	"main": (".cli", "main"),
+	"resolve_host": (".hosts", "resolve_host"),
 	"run_tui": (".tui", "run_tui"),
 }
 
@@ -52,6 +56,9 @@ __all__ = [
 	"JsonProviderConfigStore",
 	"JsonlTraceSink",
 	"JsonlSessionStore",
+	"Host",
+	"HostRole",
+	"HostUnavailableError",
 	"MemorySessionStore",
 	"MessageEvent",
 	"SessionEvent",
@@ -67,5 +74,6 @@ __all__ = [
 	"UiConfig",
 	"build_parser",
 	"main",
+	"resolve_host",
 	"run_tui",
 ]

@@ -39,6 +39,7 @@ from .coding_session import (
     SessionEvent,
     TurnFinishedEvent,
 )
+from .hosts import HostUnavailableError, resolve_host
 from .observability import JsonlTraceSink
 from .sessions import SessionStore
 from .resources import ResourceInventory, ResourceLoader, apply_resource_prompt
@@ -548,6 +549,10 @@ def main(
         if args.print_mode:
             if args.tui or args.mode is not None:
                 raise CommandError("--print cannot be combined with interactive mode")
+            try:
+                resolve_host("jsonl" if args.event_mode else "print")
+            except HostUnavailableError as caught:
+                raise CommandError(str(caught)) from caught
             if not task:
                 task = _read_piped_input(input_stream)
             else:
@@ -590,6 +595,19 @@ def main(
         mode: InteractionMode = args.mode or (
             "minimal" if args.tui or not task else "non-interactive"
         )
+        host_identifier = (
+            "textual"
+            if mode == "minimal"
+            else "print"
+            if mode == "non-interactive"
+            else mode
+        )
+        try:
+            resolve_host(host_identifier)
+        except HostUnavailableError as caught:
+            if mode in {"fullscreen", "webapp"}:
+                raise CommandError(f"{mode} mode is not available yet") from caught
+            raise CommandError(str(caught)) from caught
         if mode != "minimal" and (
             args.continue_session
             or args.no_session
@@ -619,6 +637,7 @@ def main(
                 session_target=args.session_target,
                 session_name=args.session_name,
                 resources=_load_resources(args),
+                host_id=host_identifier,
             )
         else:
             raise CommandError(f"{mode} mode is not available yet")

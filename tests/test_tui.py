@@ -964,6 +964,32 @@ def test_tui_ctrl_c_clears_input_instead_of_exiting() -> None:
     assert "Goodbye." in output.getvalue()
 
 
+def test_tui_rejects_unavailable_hosts_before_creating_a_session() -> None:
+    class TrackingStore(MemorySessionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.create_calls = 0
+
+        def create(self, **kwargs):
+            self.create_calls += 1
+            return super().create(**kwargs)
+
+    store = TrackingStore()
+    error = StringIO()
+
+    result = run_tui(
+        host_id="fullscreen",
+        input_fn=scripted_input([]),
+        output=StringIO(),
+        error=error,
+        session_store=store,
+    )
+
+    assert result == 1
+    assert store.create_calls == 0
+    assert "fullscreen host is not available yet" in error.getvalue()
+
+
 def test_tui_tool_settings_enable_registered_tool_for_provider(tmp_path) -> None:
     config = ProviderConfig(
         name="openai-compatible",
