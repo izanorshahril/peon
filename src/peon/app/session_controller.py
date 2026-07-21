@@ -295,16 +295,23 @@ class SessionController:
 
     def _execute_tools_command(self) -> ToolsOutcome:
         tools: list[ToolStatus] = []
-        if isinstance(self._executor, ExtensionRegistry):
-            registered_tools = self._executor.tools
-        elif hasattr(self._executor, "tools"):
-            registered_tools = getattr(self._executor, "tools")
+        underlying = getattr(self._executor, "_executor", self._executor)
+        if isinstance(underlying, ExtensionRegistry):
+            all_registered = underlying.tools
+        elif hasattr(underlying, "tools"):
+            all_registered = getattr(underlying, "tools")
         else:
-            registered_tools = ()
+            all_registered = ()
 
-        enabled_set = set(self._enabled_tools) if self._enabled_tools is not None else None
-        for tool in registered_tools:
-            is_enabled = enabled_set is None or tool.name in enabled_set
+        if self._enabled_tools is not None:
+            enabled_set = set(self._enabled_tools)
+        elif hasattr(self._executor, "tools"):
+            enabled_set = {t.name for t in getattr(self._executor, "tools")}
+        else:
+            enabled_set = {t.name for t in all_registered}
+
+        for tool in all_registered:
+            is_enabled = tool.name in enabled_set
             tools.append(
                 ToolStatus(
                     name=tool.name,
@@ -342,6 +349,11 @@ class SessionController:
             arg_clean = argument.strip().lower()
             if arg_clean in self._reasoning_choices:
                 self._reasoning_effort = arg_clean
+                if hasattr(self.provider, "config"):
+                    try:
+                        setattr(self.provider.config, "reasoning_effort", arg_clean)
+                    except (AttributeError, TypeError):
+                        pass
                 return ReasoningOutcome(
                     supported=True,
                     current=self._reasoning_effort,
@@ -352,11 +364,27 @@ class SessionController:
                 command="reasoning",
                 error=f"Invalid reasoning effort '{argument}'. Choices: {', '.join(self._reasoning_choices)}",
             )
+
+        current_effort = self._reasoning_effort
+        if current_effort in self._reasoning_choices:
+            current_idx = self._reasoning_choices.index(current_effort)
+            next_idx = (current_idx + 1) % len(self._reasoning_choices)
+            new_effort = self._reasoning_choices[next_idx]
+        else:
+            new_effort = self._reasoning_choices[0]
+
+        self._reasoning_effort = new_effort
+        if hasattr(self.provider, "config"):
+            try:
+                setattr(self.provider.config, "reasoning_effort", new_effort)
+            except (AttributeError, TypeError):
+                pass
+
         return ReasoningOutcome(
             supported=True,
             current=self._reasoning_effort,
             choices=self._reasoning_choices,
-            updated=False,
+            updated=True,
         )
 
     def _get_registered_skill_names(self) -> tuple[str, ...]:

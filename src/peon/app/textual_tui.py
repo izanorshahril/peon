@@ -3154,6 +3154,8 @@ class TextualPeonApp(App[int]):
             if not outcome.supported:
                 self._write("Reasoning effort is not supported by this provider.")
             elif outcome.updated and outcome.current is not None:
+                if self.config is not None:
+                    self.config = replace(self.config, reasoning_effort=outcome.current)
                 self._write(f"Reasoning effort set to {outcome.current}.")
         elif isinstance(outcome, CommandErrorOutcome):
             self._write(outcome.error)

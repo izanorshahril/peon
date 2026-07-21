@@ -1411,6 +1411,8 @@ def _dispatch_tui_controller_command(
         if not outcome.supported:
             print("Reasoning effort is not supported by this provider.", file=output)
         elif outcome.updated and outcome.current is not None:
+            if session.config is not None:
+                session = replace(session, config=replace(session.config, reasoning_effort=outcome.current))
             print(f"Reasoning effort set to {outcome.current}.", file=output)
     elif isinstance(outcome, CommandErrorOutcome):
         print(f"peon: {outcome.error}", file=error)
