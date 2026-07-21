@@ -374,13 +374,13 @@ def test_dispatch_command_reasoning():
     outcome = controller.dispatch_command(CommandIntent("/reasoning"))
     assert isinstance(outcome, ReasoningOutcome)
     assert outcome.supported is True
-    assert outcome.current == "low"
-    assert outcome.updated is False
+    assert outcome.current == "high"
+    assert outcome.updated is True
 
-    # Change effort
-    outcome_updated = controller.dispatch_command(CommandIntent("/reasoning high"))
+    # Change effort explicitly
+    outcome_updated = controller.dispatch_command(CommandIntent("/reasoning none"))
     assert isinstance(outcome_updated, ReasoningOutcome)
-    assert outcome_updated.current == "high"
+    assert outcome_updated.current == "none"
     assert outcome_updated.updated is True
 
 

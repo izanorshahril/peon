@@ -1354,7 +1354,7 @@ def _dispatch_tui_controller_command(
     output: TextIO,
     error: TextIO,
     config_store: ProviderConfigStore,
-) -> bool:
+) -> tuple[TuiSession, bool]:
     name = command.split(maxsplit=1)[0].lower()
     invocation = DEFAULT_COMMAND_CATALOG.resolve(command)
     cmd_id = invocation.command.id if invocation is not None else None
@@ -1365,7 +1365,7 @@ def _dispatch_tui_controller_command(
         or (invocation is not None and invocation.command.id.startswith("skill:"))
     )
     if not is_info_cmd:
-        return False
+        return session, False
 
     ui_config = load_ui_config(config_store)
     controller = SessionController(
@@ -1412,12 +1412,17 @@ def _dispatch_tui_controller_command(
             print("Reasoning effort is not supported by this provider.", file=output)
         elif outcome.updated and outcome.current is not None:
             if session.config is not None:
-                session = replace(session, config=replace(session.config, reasoning_effort=outcome.current))
+                updated_config = replace(session.config, reasoning_effort=outcome.current)
+                try:
+                    update_saved_provider(config_store, session.config, updated_config)
+                except (AttributeError, OSError):
+                    pass
+                session = replace(session, config=updated_config)
             print(f"Reasoning effort set to {outcome.current}.", file=output)
     elif isinstance(outcome, CommandErrorOutcome):
         print(f"peon: {outcome.error}", file=error)
 
-    return True
+    return session, True
 
 
 def _handle_command(
@@ -1432,13 +1437,14 @@ def _handle_command(
     config_store: ProviderConfigStore,
     ) -> tuple[TuiSession, bool]:
     command_name = command.split(maxsplit=1)[0].lower()
-    if _dispatch_tui_controller_command(
+    session, handled = _dispatch_tui_controller_command(
         command,
         session,
         output=output,
         error=error,
         config_store=config_store,
-    ):
+    )
+    if handled:
         return session, False
     invocation = DEFAULT_COMMAND_CATALOG.resolve(command)
     if invocation is None:

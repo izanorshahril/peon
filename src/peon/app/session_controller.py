@@ -388,10 +388,11 @@ class SessionController:
         )
 
     def _get_registered_skill_names(self) -> tuple[str, ...]:
-        if isinstance(self._executor, ExtensionRegistry):
-            return self._executor.skills
-        if hasattr(self._executor, "skills"):
-            skills_val = getattr(self._executor, "skills")
+        underlying = getattr(self._executor, "_executor", self._executor)
+        if isinstance(underlying, ExtensionRegistry):
+            return underlying.skills
+        if hasattr(underlying, "skills"):
+            skills_val = getattr(underlying, "skills")
             if isinstance(skills_val, tuple):
                 return skills_val
         return ()
