@@ -24,7 +24,9 @@ from .coding_session import (
     CodingSession,
     EventHandler,
     MessageEvent,
+    RunLimits,
     SessionEvent,
+    StopReason,
     TurnFinishedEvent,
     TurnResult,
     TurnStartedEvent,
@@ -386,6 +388,7 @@ class SessionController:
         trace_sink: TraceSink | None = None,
         trace_provider: str | None = None,
         trace_utc_clock: Callable[[], datetime] | None = None,
+        limits: RunLimits | None = None,
     ) -> None:
         self.provider = provider
         self.session_store = session_store
@@ -397,6 +400,7 @@ class SessionController:
         self._reasoning_effort = reasoning_effort
         self._reasoning_choices = tuple(reasoning_choices)
         self._id_factory = id_factory
+        self._limits = limits
         self._resume_tokens: dict[str, dict[str, str]] = {}
         self._continuation_tokens: dict[str, dict[str, object]] = {}
         self._session = CodingSession(
@@ -415,6 +419,7 @@ class SessionController:
             trace_sink=trace_sink,
             trace_provider=trace_provider,
             trace_utc_clock=trace_utc_clock,
+            limits=limits,
         )
 
     @property

@@ -1,6 +1,6 @@
 """Portable agent runtime, tools, events, messages, and harness."""
 
-from .runtime_errors import AgentError
+from .runtime_errors import AgentError, LimitExceededError
 from .executor import ToolExecutionContext, ToolExecutor
 from .loop import run_task
 from .models import (
@@ -18,6 +18,7 @@ __all__ = [
 	"AgentContext",
 	"AgentError",
 	"AgentMessage",
+	"LimitExceededError",
 	"ModelProvider",
 	"ModelResponse",
 	"ToolCall",

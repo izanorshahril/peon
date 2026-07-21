@@ -15,6 +15,7 @@ from peon.agent import (
     AgentContext,
     AgentError,
     AgentMessage,
+    LimitExceededError,
     ModelProvider,
     ToolCall,
     ToolExecutionContext,
@@ -31,6 +32,38 @@ from .resources import (
 )
 from .sessions import SessionStore
 
+StopReason: TypeAlias = Literal[
+    "completed",
+    "cancelled",
+    "max_provider_calls_exceeded",
+    "max_tool_calls_exceeded",
+    "max_elapsed_seconds_exceeded",
+    "max_input_tokens_exceeded",
+    "max_output_tokens_exceeded",
+    "max_total_tokens_exceeded",
+    "max_cost_exceeded",
+    "provider_error",
+    "tool_error",
+    "persistence_error",
+    "consumer_error",
+    "internal_error",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RunLimits:
+    """Immutable run policy bounds for automation and hosted execution."""
+
+    max_provider_calls: int | None = None
+    max_tool_calls: int | None = None
+    max_elapsed_seconds: float | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_total_tokens: int | None = None
+    max_cost: float | None = None
+    currency: str | None = None
+
+
 TurnStatus = Literal["success", "error", "cancelled"]
 
 
@@ -43,6 +76,18 @@ class TurnResult:
     content: str | None = None
     error: str | None = None
     usage: Usage | None = None
+    stop_reason: StopReason | str | None = None
+
+    def __post_init__(self) -> None:
+        if self.stop_reason is None:
+            default_reason = (
+                "completed"
+                if self.status == "success"
+                else "cancelled"
+                if self.status == "cancelled"
+                else "provider_error"
+            )
+            object.__setattr__(self, "stop_reason", default_reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +205,7 @@ class CodingSession:
         trace_sink: TraceSink | None = None,
         trace_provider: str | None = None,
         trace_utc_clock: Callable[[], datetime] | None = None,
+        limits: RunLimits | None = None,
     ) -> None:
         self.provider = provider
         self.session_store = session_store
@@ -178,6 +224,7 @@ class CodingSession:
         self._trace_sink = trace_sink
         self._trace_provider = trace_provider
         self._trace_utc_clock = trace_utc_clock
+        self._limits = limits
         self._active_execution_context: ToolExecutionContext | None = None
         (
             self._persisted_message_count,
@@ -264,6 +311,17 @@ class CodingSession:
                         if self._trace_sink is not None
                         else None
                     ),
+                    limits=self._limits,
+                )
+            except LimitExceededError as error:
+                result = TurnResult(
+                    status="error",
+                    session_id=self._session_id,
+                    run_id=self._run_id,
+                    turn_id=turn_id,
+                    error=str(error),
+                    usage=usage.result(),
+                    stop_reason=error.stop_reason,
                 )
             except Exception as error:
                 result = TurnResult(

@@ -2,8 +2,10 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
+import time
+from typing import Any
 
-from .runtime_errors import AgentError
+from .runtime_errors import AgentError, LimitExceededError
 
 from .executor import ToolExecutionContext, ToolExecutor
 from .models import AgentContext, AgentMessage, ToolCall, ToolDefinition, Usage
@@ -30,6 +32,7 @@ def run_task(
     trace_utc_clock: Callable[[], datetime] | None = None,
     preserve_task_whitespace: bool = False,
     execution_context: ToolExecutionContext | None = None,
+    limits: Any = None,
 ) -> str | ToolCall:
     """Run one task against an injected provider and return its response."""
     normalized_task = task if preserve_task_whitespace else task.strip()
@@ -46,16 +49,43 @@ def run_task(
     available_tools = tuple(tools)
     if executor is not None and not available_tools:
         available_tools = tuple(executor.tools)
+    provider_calls = 0
     tool_calls = 0
+    acc_input_tokens = 0
+    acc_output_tokens = 0
+    acc_total_tokens = 0
     active_trace_clock = (
         trace_clock
         if trace_sink is not None and trace_clock is not None
         else None
     )
+    clock_fn = active_trace_clock or time.monotonic
+    start_time = (
+        clock_fn()
+        if (limits is not None and limits.max_elapsed_seconds is not None)
+        else 0.0
+    )
     while True:
+        if limits is not None:
+            if limits.max_elapsed_seconds is not None:
+                now_time = clock_fn()
+                if (now_time - start_time) > limits.max_elapsed_seconds:
+                    raise LimitExceededError(
+                        "max_elapsed_seconds_exceeded", "elapsed time limit exceeded"
+                    )
+            if (
+                limits.max_provider_calls is not None
+                and provider_calls >= limits.max_provider_calls
+            ):
+                raise LimitExceededError(
+                    "max_provider_calls_exceeded",
+                    "maximum provider-call limit exceeded",
+                )
+
         provider_started_at = (
             active_trace_clock() if active_trace_clock is not None else 0.0
         )
+        provider_calls += 1
         try:
             response = provider.complete(
                 messages=active_context.messages,
@@ -94,11 +124,30 @@ def run_task(
         if on_usage is not None:
             on_usage(response.usage)
 
+        if limits is not None and response.usage is not None:
+            u = response.usage
+            if limits.max_input_tokens is not None and u.input_tokens is not None:
+                acc_input_tokens += u.input_tokens
+                if acc_input_tokens > limits.max_input_tokens:
+                    raise LimitExceededError("max_input_tokens_exceeded", "input token limit exceeded")
+            if limits.max_output_tokens is not None and u.output_tokens is not None:
+                acc_output_tokens += u.output_tokens
+                if acc_output_tokens > limits.max_output_tokens:
+                    raise LimitExceededError("max_output_tokens_exceeded", "output token limit exceeded")
+            if limits.max_total_tokens is not None:
+                tot = (u.input_tokens or 0) + (u.output_tokens or 0)
+                acc_total_tokens += tot
+                if acc_total_tokens > limits.max_total_tokens:
+                    raise LimitExceededError("max_total_tokens_exceeded", "total token limit exceeded")
+
         if response.tool_call is not None:
             if executor is None:
                 return response.tool_call
             tool_calls += 1
-            if tool_calls > max_tool_calls:
+            max_allowed = limits.max_tool_calls if limits is not None and limits.max_tool_calls is not None else max_tool_calls
+            if tool_calls > max_allowed:
+                if limits is not None and limits.max_tool_calls is not None:
+                    raise LimitExceededError("max_tool_calls_exceeded", "maximum tool-call limit exceeded")
                 raise AgentError("maximum tool-call limit exceeded")
             _continue_with_tool_call(
                 active_context,

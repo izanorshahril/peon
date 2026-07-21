@@ -368,6 +368,12 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Consistently filter model-facing tools and execution across CLI, TUI, and embedded hosts.
 - Pass 55 focused tests, 340 full suite, mypy clean, git diff check clean.
 
+### Ticket 11: enforce run limits and stop reasons
+
+- Add `RunLimits`, `LimitExceededError`, and `StopReason` to runtime loop, `CodingSession`, `SessionController`, and `EmbeddedSession`.
+- Enforce provider-call, tool-call, elapsed-time, token, and cost bounds with precise machine-readable `stop_reason` values on `TurnResult`.
+- Pass 51 focused tests, 342 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi

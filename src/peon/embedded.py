@@ -8,7 +8,9 @@ from uuid import uuid4
 from peon.agent import AgentContext, AgentMessage, ModelProvider, ToolExecutor
 from peon.app.coding_session import (
     MessageEvent,
+    RunLimits,
     SessionEvent,
+    StopReason,
     TurnFinishedEvent,
     TurnResult,
     TurnStartedEvent,
@@ -37,6 +39,7 @@ class EmbeddedSession:
         on_event: SessionEventHandler | None = None,
         clock: Callable[[], float] = time.monotonic,
         id_factory: Callable[[], str] = lambda: uuid4().hex,
+        limits: RunLimits | None = None,
     ) -> None:
         active_store = session_store or MemorySessionStore()
         active_session_id = session_id
@@ -54,6 +57,7 @@ class EmbeddedSession:
             on_event=on_event,
             clock=clock,
             id_factory=id_factory,
+            limits=limits,
         )
 
     @property
