@@ -57,7 +57,6 @@ _EXPORTS = {
 	"SessionRecord": (".sessions", "SessionRecord"),
 	"SessionStore": (".sessions", "SessionStore"),
 	"SessionStoreError": (".sessions", "SessionStoreError"),
-	"TuiSession": (".tui", "TuiSession"),
 	"TurnFinishedEvent": (".coding_session", "TurnFinishedEvent"),
 	"TurnResult": (".coding_session", "TurnResult"),
 	"TurnStartedEvent": (".coding_session", "TurnStartedEvent"),

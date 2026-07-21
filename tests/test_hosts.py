@@ -9,7 +9,6 @@ from peon.app.hosts import HostUnavailableError, resolve_host
         ("print", "print"),
         ("jsonl", "events"),
         ("textual", "interactive"),
-        ("prompt-toolkit", "interactive"),
         ("embedded", "embedded"),
     ],
 )
@@ -22,6 +21,11 @@ def test_builtin_hosts_have_stable_ids_and_roles(
     assert host.identifier == host_id
     assert host.role == role
     assert host.available is True
+
+
+def test_retired_prompt_toolkit_host_returns_actionable_error() -> None:
+    with pytest.raises(HostUnavailableError, match="prompt-toolkit host has been retired"):
+        resolve_host("prompt-toolkit")
 
 
 @pytest.mark.parametrize("host_id", ["fullscreen", "webapp"])

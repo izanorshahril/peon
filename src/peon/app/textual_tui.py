@@ -3383,9 +3383,10 @@ def run_textual_tui(
     user_top_blank_lines: int = 1,
     user_bottom_blank_lines: int = 1,
     message_left_padding: int = 1,
+    host_id: str | None = None,
 ) -> int:
     """Run the real terminal UI; output/error stay in the CLI signature."""
-    del output, error
+    del output, error, host_id
     app = TextualPeonApp(
         provider_factory=provider_factory,
         config_store=config_store,

@@ -380,6 +380,12 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Ensure all host interactions dispatch via `SessionController` intents.
 - Pass 50 focused Textual tests, 343 full suite, mypy clean, git diff check clean.
 
+### Ticket 13: retire prompt-toolkit host
+
+- Remove `src/peon/app/tui.py` and `tests/test_tui.py`, making Textual the sole maintained interactive TUI.
+- Remove `prompt-toolkit` from `pyproject.toml` dependencies and update `hosts.py` to return an actionable error if `prompt-toolkit` is requested.
+- Pass 98 focused host/CLI/Textual tests, 302 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi
