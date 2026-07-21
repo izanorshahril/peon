@@ -92,6 +92,9 @@ from .session_controller import (
     SessionController,
     SessionInfoOutcome,
     SessionTransitionOutcome,
+    ShellErrorOutcome,
+    ShellIntent,
+    ShellResultOutcome,
     SkillsOutcome,
     ToolsOutcome,
 )
@@ -1923,18 +1926,21 @@ class TextualPeonApp(App[int]):
         execution_context: ToolExecutionContext,
         call_id: str,
     ) -> str | TurnResult:
-        result = self.registry.invoke_with_context(
-            "bash",
-            {"command": command},
+        self._build_controller()
+        if self.controller is None:
+            return "SessionController not available"
+        outcome = self.controller.dispatch_shell(
+            ShellIntent(command=command, hidden=not send_to_model),
             execution_context,
         )
-        self.call_from_thread(self._append_shell_result, result, call_id)
-        if not send_to_model:
-            return result
-        self._build_controller()
-        return self._run_task(
-            f"Shell command `{command}` output:\n{result}"
-        )
+        if isinstance(outcome, ShellErrorOutcome):
+            self.call_from_thread(self._append_shell_result, outcome.error, call_id)
+            return outcome.error
+
+        self.call_from_thread(self._append_shell_result, outcome.output, call_id)
+        if outcome.turn_result is not None:
+            return outcome.turn_result
+        return outcome.output
 
     def _append_shell_result(self, result: str, call_id: str) -> None:
         transcript = self.query_one("#transcript", ChatMessage)

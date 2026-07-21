@@ -355,6 +355,13 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Add single-use continuation token handling for multi-step provider setup, model selection, and provider logout.
 - Pass 33 focused tests, 335 full suite, mypy clean, git diff check clean.
 
+### Ticket 09: move bang-shell behavior behind controller
+
+- Add `ShellIntent`, `ShellResultOutcome`, `ShellErrorOutcome` to `SessionController`.
+- Implement `dispatch_shell(...)` for direct visible (`!`) and hidden (`!!`) shell command execution.
+- Route `!` and `!!` in Textual and prompt-toolkit hosts through `SessionController.dispatch_shell(...)`.
+- Pass 36 focused tests, 338 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi

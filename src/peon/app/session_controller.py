@@ -14,6 +14,7 @@ from peon.agent import (
     AgentContext,
     AgentMessage,
     ModelProvider,
+    ToolExecutionContext,
     ToolExecutor,
     Usage,
 )
@@ -287,6 +288,33 @@ class LogoutSuccessOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class ShellIntent:
+    """Typed request for direct visible or hidden shell command execution."""
+
+    command: str
+    hidden: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ShellResultOutcome:
+    """Outcome of direct shell command execution."""
+
+    command: str
+    output: str
+    exit_code: int = 0
+    hidden: bool = False
+    turn_result: TurnResult | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ShellErrorOutcome:
+    """Outcome when direct shell command execution fails."""
+
+    command: str
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
 class CommandErrorOutcome:
     """Outcome when a command fails or is unavailable."""
 
@@ -307,6 +335,8 @@ CommandOutcome: TypeAlias = (
     | ProviderSuccessOutcome
     | LogoutOptionsOutcome
     | LogoutSuccessOutcome
+    | ShellResultOutcome
+    | ShellErrorOutcome
     | CommandErrorOutcome
 )
 
@@ -322,6 +352,7 @@ Intent: TypeAlias = (
     | SettingsIntent
     | LogoutIntent
     | ContinuationResponseIntent
+    | ShellIntent
 )
 
 
@@ -451,6 +482,11 @@ class SessionController:
         self, intent: ContinuationResponseIntent
     ) -> CommandOutcome: ...
 
+    @overload
+    def dispatch(
+        self, intent: ShellIntent
+    ) -> ShellResultOutcome | ShellErrorOutcome: ...
+
     def dispatch(
         self,
         intent: Intent,
@@ -481,6 +517,8 @@ class SessionController:
             return self.dispatch_logout(intent)
         if isinstance(intent, ContinuationResponseIntent):
             return self.dispatch_continuation_response(intent)
+        if isinstance(intent, ShellIntent):
+            return self.dispatch_shell(intent)
         raise TypeError(f"Unknown intent type: {type(intent)}")
 
     def dispatch_command(self, intent: CommandIntent) -> CommandOutcome:
@@ -954,6 +992,59 @@ class SessionController:
             )
 
         return CommandErrorOutcome(command="continuation", error=f"Unknown flow type '{flow_type}'")
+
+    def dispatch_shell(
+        self,
+        intent: ShellIntent,
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ShellResultOutcome | ShellErrorOutcome:
+        """Execute a direct visible or hidden shell command."""
+        command = intent.command.strip()
+        if not command:
+            return ShellErrorOutcome(command=intent.command, error="bash command is required")
+
+        if self._executor is None:
+            return ShellErrorOutcome(command=command, error="No tool executor configured.")
+
+        registered_tools = getattr(self._executor, "tools", ())
+        if not any(getattr(tool, "name", None) == "bash" for tool in registered_tools):
+            return ShellErrorOutcome(command=command, error="bash tool is not registered")
+
+        if self._enabled_tools is not None and "bash" not in self._enabled_tools:
+            return ShellErrorOutcome(command=command, error="tool 'bash' is disabled")
+
+        try:
+            if execution_context is not None and hasattr(self._executor, "invoke_with_context"):
+                output = str(
+                    getattr(self._executor, "invoke_with_context")(
+                        "bash",
+                        {"command": command},
+                        execution_context,
+                    )
+                )
+            else:
+                output = str(self._executor.invoke("bash", {"command": command}))
+        except Exception as caught:
+            return ShellErrorOutcome(command=command, error=str(caught))
+
+        if intent.hidden:
+            return ShellResultOutcome(
+                command=command,
+                output=output,
+                exit_code=0,
+                hidden=True,
+                turn_result=None,
+            )
+
+        task = f"Shell command `{command}` output:\n{output}"
+        turn_result = self._session.prompt(task)
+        return ShellResultOutcome(
+            command=command,
+            output=output,
+            exit_code=0,
+            hidden=False,
+            turn_result=turn_result,
+        )
 
     def cancel(self) -> bool:
         """Request cancellation of the active prompt, if one is running."""

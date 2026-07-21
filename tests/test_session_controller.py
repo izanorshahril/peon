@@ -43,6 +43,9 @@ from peon.app.session_controller import (
     SessionController,
     SessionInfoOutcome,
     SessionTransitionOutcome,
+    ShellErrorOutcome,
+    ShellIntent,
+    ShellResultOutcome,
     SkillsOutcome,
     ToolsOutcome,
 )
@@ -590,3 +593,43 @@ def test_dispatch_continuation_response_invalid_token():
     )
     assert isinstance(outcome, CommandErrorOutcome)
     assert "invalid, expired, or already used" in outcome.error
+
+
+def test_dispatch_shell_empty_command():
+    controller = _make_controller()
+    outcome = controller.dispatch(ShellIntent(command=""))
+    assert isinstance(outcome, ShellErrorOutcome)
+    assert outcome.error == "bash command is required"
+
+
+def test_dispatch_shell_no_executor():
+    controller = _make_controller()
+    outcome = controller.dispatch(ShellIntent(command="echo hi"))
+    assert isinstance(outcome, ShellErrorOutcome)
+    assert outcome.error == "No tool executor configured."
+
+
+def test_dispatch_shell_with_registry():
+    registry = ExtensionRegistry()
+    registry.register_tool(
+        name="bash",
+        description="exec",
+        parameters={},
+        handler=lambda args: f"executed {args.get('command')}",
+    )
+    controller = _make_controller(executor=registry)
+
+    # Hidden shell execution
+    hidden_outcome = controller.dispatch(ShellIntent(command="echo hello", hidden=True))
+    assert isinstance(hidden_outcome, ShellResultOutcome)
+    assert hidden_outcome.output == "executed echo hello"
+    assert hidden_outcome.hidden is True
+    assert hidden_outcome.turn_result is None
+
+    # Visible shell execution
+    visible_outcome = controller.dispatch(ShellIntent(command="echo world", hidden=False))
+    assert isinstance(visible_outcome, ShellResultOutcome)
+    assert visible_outcome.output == "executed echo world"
+    assert visible_outcome.hidden is False
+    assert visible_outcome.turn_result is not None
+    assert visible_outcome.turn_result.status == "success"

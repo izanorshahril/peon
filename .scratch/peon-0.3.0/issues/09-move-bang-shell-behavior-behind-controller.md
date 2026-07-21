@@ -4,15 +4,15 @@
 
 **Blocked by:** 05 — Dispatch prompts through SessionController.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] A direct shell intent validates command text and bash availability before execution.
-- [ ] Visible shell execution emits tool lifecycle events and submits one canonical model-following prompt containing the bounded result.
-- [ ] Hidden shell execution emits progress/result events but does not add shell output to model conversation context.
-- [ ] Tool timeout, output bounds, live output, cancellation, cwd containment, and process-tree termination remain compatible.
-- [ ] Direct shell results are not accidentally persisted as provider tool messages unless they enter a model-following turn by declared policy.
-- [ ] Textual `!` and `!!` syntax, compact output, expansion, focus, and cancellation remain compatible.
-- [ ] A headless caller can execute both shell modes through controller intents without Textual.
-- [ ] Shell errors produce one typed terminal outcome and do not trigger a provider request.
-- [ ] Prompt-toolkit remains temporarily compatible until retirement.
-- [ ] Focused controller/bash/Textual, full pytest, static typing, and diff validation pass.
+- [x] A direct shell intent validates command text and bash availability before execution.
+- [x] Visible shell execution emits tool lifecycle events and submits one canonical model-following prompt containing the bounded result.
+- [x] Hidden shell execution emits progress/result events but does not add shell output to model conversation context.
+- [x] Tool timeout, output bounds, live output, cancellation, cwd containment, and process-tree termination remain compatible.
+- [x] Direct shell results are not accidentally persisted as provider tool messages unless they enter a model-following turn by declared policy.
+- [x] Textual `!` and `!!` syntax, compact output, expansion, focus, and cancellation remain compatible.
+- [x] A headless caller can execute both shell modes through controller intents without Textual.
+- [x] Shell errors produce one typed terminal outcome and do not trigger a provider request.
+- [x] Prompt-toolkit remains temporarily compatible until retirement.
+- [x] Focused controller/bash/Textual, full pytest, static typing, and diff validation pass.
