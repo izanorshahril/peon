@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import time
-from typing import Literal, TypeAlias, overload
+from typing import Any, Literal, TypeAlias, cast, overload
 from uuid import uuid4
 
 from peon.agent import (
@@ -19,7 +19,6 @@ from peon.agent import (
 )
 from peon.agent.tracing import TraceSink
 from peon.extensions import ExtensionRegistry
-
 from .coding_session import (
     CodingSession,
     EventHandler,
@@ -95,6 +94,43 @@ class ForkSessionIntent:
     """Typed request to fork the active conversation session."""
 
     name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSelectIntent:
+    """Typed request to list models or directly select a model."""
+
+    target: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSetupIntent:
+    """Typed request to initiate provider setup flow."""
+
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsIntent:
+    """Typed request to view or update application settings."""
+
+    setting: str | None = None
+    value: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LogoutIntent:
+    """Typed request to list providers for logout or remove active provider."""
+
+    target: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuationResponseIntent:
+    """Typed response to a single-use continuation token for multi-step flows."""
+
+    continuation_token: str
+    response: str | Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +231,62 @@ class SessionTransitionOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelOption:
+    """A semantic choice for selecting a saved provider model."""
+
+    option_id: str
+    label: str
+    provider_name: str
+    model_name: str
+    active: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ModelOptionsOutcome:
+    """Outcome listing available models with a continuation token or active update."""
+
+    options: tuple[ModelOption, ...]
+    current_model: str | None
+    continuation_token: str | None = None
+    updated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSetupStepOutcome:
+    """Outcome requesting user input during multi-step provider setup."""
+
+    step: str
+    prompt: str
+    is_secret: bool
+    continuation_token: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSuccessOutcome:
+    """Outcome when provider setup or configuration succeeds."""
+
+    provider_name: str
+    model_name: str
+    config: Any
+
+
+@dataclass(frozen=True, slots=True)
+class LogoutOptionsOutcome:
+    """Outcome listing saved providers for removal with a continuation token."""
+
+    options: tuple[tuple[str, str], ...]  # (option_id, provider_name)
+    continuation_token: str
+
+
+@dataclass(frozen=True, slots=True)
+class LogoutSuccessOutcome:
+    """Outcome when a provider is removed."""
+
+    removed_provider_name: str
+    active_provider_name: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class CommandErrorOutcome:
     """Outcome when a command fails or is unavailable."""
 
@@ -210,6 +302,11 @@ CommandOutcome: TypeAlias = (
     | ReasoningOutcome
     | ResumeOptionsOutcome
     | SessionTransitionOutcome
+    | ModelOptionsOutcome
+    | ProviderSetupStepOutcome
+    | ProviderSuccessOutcome
+    | LogoutOptionsOutcome
+    | LogoutSuccessOutcome
     | CommandErrorOutcome
 )
 
@@ -220,6 +317,11 @@ Intent: TypeAlias = (
     | ResumeSessionIntent
     | ResumeSelectIntent
     | ForkSessionIntent
+    | ModelSelectIntent
+    | ProviderSetupIntent
+    | SettingsIntent
+    | LogoutIntent
+    | ContinuationResponseIntent
 )
 
 
@@ -265,6 +367,7 @@ class SessionController:
         self._reasoning_choices = tuple(reasoning_choices)
         self._id_factory = id_factory
         self._resume_tokens: dict[str, dict[str, str]] = {}
+        self._continuation_tokens: dict[str, dict[str, object]] = {}
         self._session = CodingSession(
             provider=provider,
             session_store=session_store,
@@ -328,10 +431,30 @@ class SessionController:
         self, intent: ForkSessionIntent
     ) -> SessionTransitionOutcome | CommandErrorOutcome: ...
 
+    @overload
+    def dispatch(
+        self, intent: ModelSelectIntent
+    ) -> ModelOptionsOutcome | CommandErrorOutcome: ...
+
+    @overload
+    def dispatch(
+        self, intent: ProviderSetupIntent
+    ) -> ProviderSetupStepOutcome | CommandErrorOutcome: ...
+
+    @overload
+    def dispatch(
+        self, intent: LogoutIntent
+    ) -> LogoutOptionsOutcome | LogoutSuccessOutcome | CommandErrorOutcome: ...
+
+    @overload
+    def dispatch(
+        self, intent: ContinuationResponseIntent
+    ) -> CommandOutcome: ...
+
     def dispatch(
         self,
         intent: Intent,
-    ) -> TurnResult | CommandOutcome | ResumeOptionsOutcome | SessionTransitionOutcome:
+    ) -> TurnResult | CommandOutcome:
         """Dispatch any typed intent to its corresponding handler."""
         if isinstance(intent, PromptIntent):
             return self._session.prompt(
@@ -348,6 +471,16 @@ class SessionController:
             return self.dispatch_resume_select(intent)
         if isinstance(intent, ForkSessionIntent):
             return self.dispatch_fork(intent)
+        if isinstance(intent, ModelSelectIntent):
+            return self.dispatch_model_select(intent)
+        if isinstance(intent, ProviderSetupIntent):
+            return self.dispatch_provider_setup(intent)
+        if isinstance(intent, SettingsIntent):
+            return self.dispatch_settings(intent)
+        if isinstance(intent, LogoutIntent):
+            return self.dispatch_logout(intent)
+        if isinstance(intent, ContinuationResponseIntent):
+            return self.dispatch_continuation_response(intent)
         raise TypeError(f"Unknown intent type: {type(intent)}")
 
     def dispatch_command(self, intent: CommandIntent) -> CommandOutcome:
@@ -422,6 +555,18 @@ class SessionController:
 
         if cmd_id == "fork":
             return self.dispatch_fork(ForkSessionIntent(invocation.argument or None))
+
+        if cmd_id == "model":
+            return self.dispatch_model_select(ModelSelectIntent(invocation.argument or None))
+
+        if cmd_id == "provider":
+            return self.dispatch_provider_setup(ProviderSetupIntent())
+
+        if cmd_id == "settings":
+            return self.dispatch_settings(SettingsIntent(invocation.argument or None))
+
+        if cmd_id == "logout":
+            return self.dispatch_logout(LogoutIntent(invocation.argument or None))
 
         return CommandErrorOutcome(command=raw_cmd, error=f"Command '{cmd_id}' is not an informational or transition command.")
 
@@ -598,6 +743,217 @@ class SessionController:
             record=created,
             messages=self.messages,
         )
+
+    def dispatch_model_select(
+        self,
+        intent: ModelSelectIntent | None = None,
+        config_store: object = None,
+    ) -> ModelOptionsOutcome | CommandErrorOutcome:
+        """Select a saved model or return available model choices."""
+        from .cli import saved_model_choices, select_saved_model
+
+        target = intent.target if intent is not None else None
+        store_configs = ()
+        if config_store is not None and hasattr(config_store, "load_all"):
+            try:
+                store_configs = getattr(config_store, "load_all")()
+            except OSError:
+                store_configs = ()
+
+        choices = saved_model_choices(store_configs) if store_configs else ()
+
+        if target is not None:
+            if not choices:
+                return CommandErrorOutcome(
+                    command="model",
+                    error="No saved models. Use /provider to discover models.",
+                )
+            try:
+                choice = select_saved_model(target, choices)
+            except Exception as error:
+                return CommandErrorOutcome(command="model", error=str(error))
+
+            self._model = choice.model
+            options = tuple(
+                ModelOption(
+                    option_id=str(idx),
+                    label=c.label,
+                    provider_name=c.config.name,
+                    model_name=c.model,
+                    active=(c.model == choice.model),
+                )
+                for idx, c in enumerate(choices, 1)
+            )
+            return ModelOptionsOutcome(
+                options=options,
+                current_model=choice.model,
+                updated=True,
+            )
+
+        if not choices:
+            return CommandErrorOutcome(
+                command="model",
+                error="No saved models. Use /provider to discover models.",
+            )
+
+        token = self._id_factory()
+        token_map = {str(idx): c for idx, c in enumerate(choices, 1)}
+        self._continuation_tokens[token] = {
+            "type": "model",
+            "map": token_map,
+            "choices": choices,
+        }
+
+        options = tuple(
+            ModelOption(
+                option_id=str(idx),
+                label=c.label,
+                provider_name=c.config.name,
+                model_name=c.model,
+                active=(c.model == self._model),
+            )
+            for idx, c in enumerate(choices, 1)
+        )
+        return ModelOptionsOutcome(
+            options=options,
+            current_model=self._model,
+            continuation_token=token,
+            updated=False,
+        )
+
+    def dispatch_provider_setup(
+        self,
+        intent: ProviderSetupIntent | None = None,
+    ) -> ProviderSetupStepOutcome:
+        """Start multi-step provider connection setup."""
+        del intent
+        token = self._id_factory()
+        self._continuation_tokens[token] = {
+            "type": "provider_step",
+            "step": "provider_type",
+            "data": {},
+        }
+        return ProviderSetupStepOutcome(
+            step="provider_type",
+            prompt="Select provider type (1. openai-compatible, 2. custom):",
+            is_secret=False,
+            continuation_token=token,
+        )
+
+    def dispatch_settings(
+        self,
+        intent: SettingsIntent | None = None,
+    ) -> CommandOutcome:
+        """Inspect or change settings."""
+        del intent
+        return CommandErrorOutcome(command="settings", error="Settings command executed via controller.")
+
+    def dispatch_logout(
+        self,
+        intent: LogoutIntent | None = None,
+        config_store: object = None,
+    ) -> LogoutOptionsOutcome | LogoutSuccessOutcome | CommandErrorOutcome:
+        """List providers to remove or remove specified provider."""
+        from .cli import ProviderConfig
+
+        target = intent.target if intent is not None else None
+        store_configs: tuple[ProviderConfig, ...] = ()
+        if config_store is not None and hasattr(config_store, "load_all"):
+            try:
+                store_configs = getattr(config_store, "load_all")()
+            except OSError:
+                store_configs = ()
+
+        if not store_configs:
+            return CommandErrorOutcome(command="logout", error="No saved providers to remove.")
+
+        if target is not None:
+            matching = [c for c in store_configs if c.name == target or target in c.models]
+            if not matching:
+                return CommandErrorOutcome(command="logout", error=f"Unknown provider '{target}'")
+            target_config = matching[0]
+            if hasattr(config_store, "delete"):
+                try:
+                    getattr(config_store, "delete")(target_config)
+                except OSError as error:
+                    return CommandErrorOutcome(command="logout", error=str(error))
+
+            remaining = [c for c in store_configs if c.name != target_config.name]
+            next_active = remaining[0].name if remaining else None
+            return LogoutSuccessOutcome(
+                removed_provider_name=target_config.name,
+                active_provider_name=next_active,
+            )
+
+        token = self._id_factory()
+        options = tuple(
+            (str(idx), config.name)
+            for idx, config in enumerate(store_configs, 1)
+        )
+        token_map = {str(idx): config for idx, config in enumerate(store_configs, 1)}
+        self._continuation_tokens[token] = {
+            "type": "logout",
+            "map": token_map,
+            "configs": store_configs,
+        }
+        return LogoutOptionsOutcome(
+            options=options,
+            continuation_token=token,
+        )
+
+    def dispatch_continuation_response(
+        self,
+        intent: ContinuationResponseIntent,
+    ) -> CommandOutcome:
+        """Process response for a single-use continuation token."""
+        from .cli import ProviderConfig, SavedModel, select_saved_model
+
+        token_data = self._continuation_tokens.pop(intent.continuation_token, None)
+        if token_data is None:
+            return CommandErrorOutcome(
+                command="continuation",
+                error=f"Continuation token '{intent.continuation_token}' is invalid, expired, or already used.",
+            )
+
+        flow_type = token_data.get("type")
+        if flow_type == "model":
+            resp_str = str(intent.response).strip()
+            choices = cast(tuple[SavedModel, ...], token_data["choices"])
+            try:
+                choice = select_saved_model(resp_str, choices)
+            except Exception as error:
+                return CommandErrorOutcome(command="model", error=str(error))
+
+            self._model = choice.model
+            options = tuple(
+                ModelOption(
+                    option_id=str(idx),
+                    label=c.label,
+                    provider_name=c.config.name,
+                    model_name=c.model,
+                    active=(c.model == choice.model),
+                )
+                for idx, c in enumerate(choices, 1)
+            )
+            return ModelOptionsOutcome(
+                options=options,
+                current_model=choice.model,
+                updated=True,
+            )
+
+        if flow_type == "logout":
+            resp_str = str(intent.response).strip()
+            token_map = cast(dict[str, ProviderConfig], token_data["map"])
+            config_choice = token_map.get(resp_str)
+            if config_choice is None:
+                return CommandErrorOutcome(command="logout", error=f"Invalid provider choice '{resp_str}'")
+
+            return LogoutSuccessOutcome(
+                removed_provider_name=config_choice.name,
+                active_provider_name=None,
+            )
+
+        return CommandErrorOutcome(command="continuation", error=f"Unknown flow type '{flow_type}'")
 
     def cancel(self) -> bool:
         """Request cancellation of the active prompt, if one is running."""

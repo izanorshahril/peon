@@ -24,10 +24,18 @@ from peon.app.coding_session import (
 from peon.app.session_controller import (
     CommandErrorOutcome,
     CommandIntent,
+    ContinuationResponseIntent,
     ForkSessionIntent,
     HelpOutcome,
+    LogoutIntent,
+    LogoutOptionsOutcome,
+    LogoutSuccessOutcome,
+    ModelOptionsOutcome,
+    ModelSelectIntent,
     NewSessionIntent,
     PromptIntent,
+    ProviderSetupIntent,
+    ProviderSetupStepOutcome,
     ReasoningOutcome,
     ResumeOptionsOutcome,
     ResumeSelectIntent,
@@ -38,9 +46,37 @@ from peon.app.session_controller import (
     SkillsOutcome,
     ToolsOutcome,
 )
+from peon.app.cli import ProviderConfig
+from peon.app.config import UiConfig
 from peon.app.resources import ResourceInventory, SkillResource
 from peon.app.sessions import MemorySessionStore
 from peon.extensions import ExtensionRegistry
+
+
+class MemoryConfigStore:
+    def __init__(self, configurations: tuple[ProviderConfig, ...] = ()) -> None:
+        self.configurations = list(configurations)
+        self.ui_configuration = UiConfig()
+
+    def load(self) -> ProviderConfig | None:
+        return self.configurations[-1] if self.configurations else None
+
+    def load_all(self) -> tuple[ProviderConfig, ...]:
+        return tuple(self.configurations)
+
+    def save(self, config: ProviderConfig) -> None:
+        for index, existing in enumerate(self.configurations):
+            if existing.name == config.name and existing.base_url == config.base_url:
+                self.configurations[index] = config
+                return
+        self.configurations.append(config)
+
+    def delete(self, config: ProviderConfig) -> None:
+        self.configurations = [
+            existing
+            for existing in self.configurations
+            if existing != config
+        ]
 
 
 @dataclass
@@ -487,3 +523,70 @@ def test_dispatch_command_session_transitions():
     assert isinstance(fork_outcome, SessionTransitionOutcome)
     assert fork_outcome.action == "fork"
     assert fork_outcome.name == "branch"
+
+
+def test_dispatch_model_select_no_saved_models():
+    controller = _make_controller()
+    outcome = controller.dispatch(ModelSelectIntent())
+    assert isinstance(outcome, CommandErrorOutcome)
+    assert "No saved models" in outcome.error
+
+
+def test_dispatch_provider_setup():
+    controller = _make_controller()
+    outcome = controller.dispatch(ProviderSetupIntent())
+    assert isinstance(outcome, ProviderSetupStepOutcome)
+    assert outcome.step == "provider_type"
+    assert outcome.continuation_token != ""
+
+
+def test_dispatch_logout_no_saved_providers():
+    controller = _make_controller()
+    outcome = controller.dispatch(LogoutIntent())
+    assert isinstance(outcome, CommandErrorOutcome)
+    assert "No saved providers" in outcome.error
+
+
+def test_dispatch_model_select_with_saved_models():
+    c1 = ProviderConfig(name="alpha", model="model-a", models=("model-a",), base_url="http://a.test")
+    c2 = ProviderConfig(name="beta", model="model-b", models=("model-b",), base_url="http://b.test")
+    store = MemoryConfigStore((c1, c2))
+    controller = _make_controller()
+
+    outcome = controller.dispatch_model_select(ModelSelectIntent(), config_store=store)
+    assert isinstance(outcome, ModelOptionsOutcome)
+    assert len(outcome.options) == 2
+    assert outcome.continuation_token is not None
+
+    select_outcome = controller.dispatch(
+        ContinuationResponseIntent(continuation_token=outcome.continuation_token, response="2")
+    )
+    assert isinstance(select_outcome, ModelOptionsOutcome)
+    assert select_outcome.current_model == "model-b"
+    assert select_outcome.updated is True
+
+
+def test_dispatch_logout_with_saved_providers():
+    c1 = ProviderConfig(name="alpha", model="model-a", base_url="http://a.test")
+    store = MemoryConfigStore((c1,))
+    controller = _make_controller()
+
+    outcome = controller.dispatch_logout(LogoutIntent(), config_store=store)
+    assert isinstance(outcome, LogoutOptionsOutcome)
+    assert len(outcome.options) == 1
+    assert outcome.continuation_token is not None
+
+    logout_outcome = controller.dispatch(
+        ContinuationResponseIntent(continuation_token=outcome.continuation_token, response="1")
+    )
+    assert isinstance(logout_outcome, LogoutSuccessOutcome)
+    assert logout_outcome.removed_provider_name == "alpha"
+
+
+def test_dispatch_continuation_response_invalid_token():
+    controller = _make_controller()
+    outcome = controller.dispatch(
+        ContinuationResponseIntent(continuation_token="nonexistent", response="1")
+    )
+    assert isinstance(outcome, CommandErrorOutcome)
+    assert "invalid, expired, or already used" in outcome.error

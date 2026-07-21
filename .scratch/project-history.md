@@ -349,6 +349,12 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Route `/new`, `/resume`, `/fork` through controller in Textual + prompt-toolkit hosts.
 - Pass 27 focused tests, 329 full suite, mypy clean, git diff check clean.
 
+### Ticket 08: move provider and settings flows behind controller
+
+- Add `ModelSelectIntent`, `ProviderSetupIntent`, `SettingsIntent`, `LogoutIntent`, `ContinuationResponseIntent` + `ModelOption`, `ModelOptionsOutcome`, `ProviderSetupStepOutcome`, `ProviderSuccessOutcome`, `LogoutOptionsOutcome`, `LogoutSuccessOutcome` to `SessionController`.
+- Add single-use continuation token handling for multi-step provider setup, model selection, and provider logout.
+- Pass 33 focused tests, 335 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi
