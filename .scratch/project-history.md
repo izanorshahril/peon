@@ -336,6 +336,12 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Wire CLI one-shot, print, JSONL, Textual, prompt-toolkit, embedded prompt dispatch via controller.
 - Pass 14 focused tests, 316 full suite, mypy clean, git diff check clean.
 
+### Ticket 06: move informational commands behind controller
+
+- Add `CommandIntent` + typed outcomes (`HelpOutcome`, `ToolsOutcome`, `SkillsOutcome`, `SessionInfoOutcome`, `ReasoningOutcome`, `CommandErrorOutcome`) to `SessionController`.
+- Dispatch `/help`, `/tools`, `/skills`, `/session`, `/reasoning` through `controller.dispatch_command(...)` in Textual + prompt-toolkit hosts.
+- Pass 22 focused tests, 324 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi

@@ -58,7 +58,17 @@ from .config import (
 )
 from .commands import DEFAULT_COMMAND_CATALOG, CommandDefinition
 from .coding_session import TurnResult
-from .session_controller import PromptIntent, SessionController
+from .session_controller import (
+    CommandErrorOutcome,
+    CommandIntent,
+    HelpOutcome,
+    PromptIntent,
+    ReasoningOutcome,
+    SessionController,
+    SessionInfoOutcome,
+    SkillsOutcome,
+    ToolsOutcome,
+)
 from .hosts import HostUnavailableError, resolve_host
 from .resources import (
     ResourceInventory,
@@ -1337,6 +1347,77 @@ def _conversation_loop(
         print(f"peon> {response.content or ''}", file=output)
 
 
+def _dispatch_tui_controller_command(
+    command: str,
+    session: TuiSession,
+    *,
+    output: TextIO,
+    error: TextIO,
+    config_store: ProviderConfigStore,
+) -> bool:
+    name = command.split(maxsplit=1)[0].lower()
+    invocation = DEFAULT_COMMAND_CATALOG.resolve(command)
+    cmd_id = invocation.command.id if invocation is not None else None
+
+    is_info_cmd = (
+        name.startswith("/skill:")
+        or cmd_id in ("help", "tools", "skills", "session", "reasoning")
+        or (invocation is not None and invocation.command.id.startswith("skill:"))
+    )
+    if not is_info_cmd:
+        return False
+
+    ui_config = load_ui_config(config_store)
+    controller = SessionController(
+        provider=session.provider,
+        session_store=session.session_store,
+        session_id=session.session_id,
+        run_id=session.run_id or None,
+        context=session.context,
+        executor=filter_tool_executor(ui_config, session.registry),
+        model=session.config.model,
+        resources=session.resources,
+        enabled_tools=ui_config.enabled_tools,
+        reasoning_effort=session.config.reasoning_effort,
+    )
+    outcome = controller.dispatch_command(CommandIntent(command))
+    if isinstance(outcome, HelpOutcome):
+        print(outcome.help_text, file=output)
+    elif isinstance(outcome, ToolsOutcome):
+        if not outcome.tools:
+            print("No tools registered.", file=output)
+        else:
+            for t in outcome.tools:
+                state = "enabled" if t.enabled else "disabled"
+                print(f"- {t.name} ({state}): {t.description}", file=output)
+    elif isinstance(outcome, SkillsOutcome):
+        if outcome.selected_skill is not None:
+            s = outcome.selected_skill
+            if s.status == "loaded":
+                print(f"Skill '{s.name}' ({s.path}):", file=output)
+                print(s.content, file=output)
+            elif s.status == "registered":
+                print(f"Skill '{s.name}' is registered.", file=output)
+            elif s.status == "available":
+                print(f"Skill '{s.name}' is available but not loaded.", file=output)
+            else:
+                print(f"Unknown skill: {s.name}", file=error)
+        else:
+            names = [s.name for s in outcome.skills]
+            print("Skills: " + ", ".join(names) if names else "Skills: none", file=output)
+    elif isinstance(outcome, SessionInfoOutcome):
+        _print_session_info(session, output=output, error=error)
+    elif isinstance(outcome, ReasoningOutcome):
+        if not outcome.supported:
+            print("Reasoning effort is not supported by this provider.", file=output)
+        elif outcome.updated and outcome.current is not None:
+            print(f"Reasoning effort set to {outcome.current}.", file=output)
+    elif isinstance(outcome, CommandErrorOutcome):
+        print(f"peon: {outcome.error}", file=error)
+
+    return True
+
+
 def _handle_command(
     command: str,
     session: TuiSession,
@@ -1349,21 +1430,13 @@ def _handle_command(
     config_store: ProviderConfigStore,
     ) -> tuple[TuiSession, bool]:
     command_name = command.split(maxsplit=1)[0].lower()
-    if command_name.startswith("/skill:") and command_name != "/skill:":
-        skill_name = command.split(maxsplit=1)[0].split(":", maxsplit=1)[1]
-        resource = (
-            session.resources.find_skill(skill_name)
-            if session.resources is not None
-            else None
-        )
-        if resource is not None:
-            load_skill_into_context(session.context, resource)
-            print(f"Skill '{resource.name}' ({resource.path}):", file=output)
-            print(resource.content, file=output)
-        elif skill_name in session.registry.skills:
-            print(f"Skill '{skill_name}' is registered.", file=output)
-        else:
-            print(f"Unknown skill: {skill_name}", file=error)
+    if _dispatch_tui_controller_command(
+        command,
+        session,
+        output=output,
+        error=error,
+        config_store=config_store,
+    ):
         return session, False
     invocation = DEFAULT_COMMAND_CATALOG.resolve(command)
     if invocation is None:
@@ -1394,9 +1467,6 @@ def _handle_command(
     if definition.id == "quit":
         print("Goodbye.", file=output)
         return session, True
-    if definition.id == "help":
-        print(DEFAULT_COMMAND_CATALOG.help_text(), file=output)
-        return session, False
     if definition.id == "logout":
         configs = config_store.load_all()
         selected = _select_saved_provider(
@@ -1483,15 +1553,6 @@ def _handle_command(
             ),
             False,
         )
-    if definition.id == "tools":
-        if not session.registry.tools:
-            print("No tools registered.", file=output)
-        else:
-            enabled = set(load_ui_config(config_store).enabled_tools)
-            for tool in session.registry.tools:
-                state = "enabled" if tool.name in enabled else "disabled"
-                print(f"- {tool.name} ({state}): {tool.description}", file=output)
-        return session, False
     if definition.id == "new":
         if not any(message.role == "user" for message in session.context.messages):
             discard_empty_session(session.session_store, session.session_id)

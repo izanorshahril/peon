@@ -1,7 +1,8 @@
 """Tests for SessionController prompt dispatch."""
 
-from dataclasses import dataclass
 from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from threading import Event, Thread
 
 from peon.agent import (
@@ -20,9 +21,20 @@ from peon.app.coding_session import (
     TurnStartedEvent,
     TurnResult,
 )
-from peon.app.session_controller import PromptIntent, SessionController
-from peon.app.resources import ResourceInventory
+from peon.app.session_controller import (
+    CommandErrorOutcome,
+    CommandIntent,
+    HelpOutcome,
+    PromptIntent,
+    ReasoningOutcome,
+    SessionController,
+    SessionInfoOutcome,
+    SkillsOutcome,
+    ToolsOutcome,
+)
+from peon.app.resources import ResourceInventory, SkillResource
 from peon.app.sessions import MemorySessionStore
+from peon.extensions import ExtensionRegistry
 
 
 @dataclass
@@ -278,3 +290,109 @@ def test_prompt_intent_frozen():
 def test_prompt_intent_with_whitespace():
     intent = PromptIntent("  hello  ", preserve_whitespace=True)
     assert intent.preserve_whitespace is True
+
+
+# --- Command Intent Tests ---
+
+def test_dispatch_command_help():
+    controller = _make_controller()
+    outcome = controller.dispatch_command(CommandIntent("/help"))
+    assert isinstance(outcome, HelpOutcome)
+    assert "/help" in outcome.help_text
+    assert len(outcome.commands) > 0
+
+
+def test_dispatch_command_tools():
+    registry = ExtensionRegistry()
+    registry.register_tool(
+        name="test_tool",
+        description="A test tool",
+        parameters={"type": "object"},
+        handler=lambda arguments: "ok",
+    )
+    controller = _make_controller(executor=registry, enabled_tools=["test_tool"])
+    outcome = controller.dispatch_command(CommandIntent("/tools"))
+    assert isinstance(outcome, ToolsOutcome)
+    assert len(outcome.tools) == 1
+    assert outcome.tools[0].name == "test_tool"
+    assert outcome.tools[0].enabled is True
+
+
+def test_dispatch_command_skills():
+    resources = ResourceInventory(
+        skills=(
+            SkillResource(
+                name="sample_skill",
+                description="Sample skill description",
+                content="Skill body content",
+                path=Path("path/to/skill/SKILL.md"),
+                base_directory=Path("path/to/skill"),
+                source="project",
+            ),
+        )
+    )
+    controller = _make_controller(resources=resources)
+    outcome = controller.dispatch_command(CommandIntent("/skills"))
+    assert isinstance(outcome, SkillsOutcome)
+    assert len(outcome.skills) >= 1
+    assert any(s.name == "sample_skill" for s in outcome.skills)
+
+
+def test_dispatch_command_skill_selection():
+    resources = ResourceInventory(
+        skills=(
+            SkillResource(
+                name="sample_skill",
+                description="Sample skill description",
+                content="Skill body content",
+                path=Path("path/to/skill/SKILL.md"),
+                base_directory=Path("path/to/skill"),
+                source="project",
+            ),
+        )
+    )
+    controller = _make_controller(resources=resources)
+    outcome = controller.dispatch_command(CommandIntent("/skill:sample_skill"))
+    assert isinstance(outcome, SkillsOutcome)
+    assert outcome.selected_skill is not None
+    assert outcome.selected_skill.name == "sample_skill"
+    assert outcome.selected_skill.status == "loaded"
+    assert outcome.selected_skill.content == "Skill body content"
+
+
+def test_dispatch_command_session_info():
+    controller = _make_controller()
+    outcome = controller.dispatch_command(CommandIntent("/session"))
+    assert isinstance(outcome, SessionInfoOutcome)
+    assert outcome.session_id == controller.session_id
+    assert outcome.message_count == 0
+    assert outcome.interaction_count == 0
+
+
+def test_dispatch_command_reasoning():
+    controller = _make_controller(reasoning_effort="low", reasoning_choices=("none", "low", "high"))
+    outcome = controller.dispatch_command(CommandIntent("/reasoning"))
+    assert isinstance(outcome, ReasoningOutcome)
+    assert outcome.supported is True
+    assert outcome.current == "low"
+    assert outcome.updated is False
+
+    # Change effort
+    outcome_updated = controller.dispatch_command(CommandIntent("/reasoning high"))
+    assert isinstance(outcome_updated, ReasoningOutcome)
+    assert outcome_updated.current == "high"
+    assert outcome_updated.updated is True
+
+
+def test_dispatch_command_unknown():
+    controller = _make_controller()
+    outcome = controller.dispatch_command(CommandIntent("/nonexistent"))
+    assert isinstance(outcome, CommandErrorOutcome)
+    assert "Unknown command" in outcome.error
+
+
+def test_dispatch_command_reserved():
+    controller = _make_controller()
+    outcome = controller.dispatch_command(CommandIntent("/compact"))
+    assert isinstance(outcome, CommandErrorOutcome)
+    assert "reserved" in outcome.error

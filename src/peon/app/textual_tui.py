@@ -82,7 +82,17 @@ from .sessions import (
     session_interaction_count,
 )
 from .coding_session import MessageEvent, SessionEvent, TurnResult
-from .session_controller import PromptIntent, SessionController
+from .session_controller import (
+    CommandErrorOutcome,
+    CommandIntent,
+    HelpOutcome,
+    PromptIntent,
+    ReasoningOutcome,
+    SessionController,
+    SessionInfoOutcome,
+    SkillsOutcome,
+    ToolsOutcome,
+)
 from .resources import (
     ResourceInventory,
     apply_resource_prompt,
@@ -3016,39 +3026,13 @@ class TextualPeonApp(App[int]):
     def _handle_command(self, command: str) -> None:
         name = command.split(maxsplit=1)[0]
         normalized_name = name.casefold()
-        if normalized_name.startswith("/skill:") and normalized_name != "/skill:":
-            skill_name = name.split(":", maxsplit=1)[1]
-            resource = (
-                self.resources.find_skill(skill_name)
-                if self.resources is not None
-                else None
-            )
-            if resource is not None:
-                load_skill_into_context(self.context, resource)
-                self._write(
-                    f"Skill '{resource.name}' ({resource.path}):\n{resource.content}"
-                )
-            elif skill_name in self.registry.skills:
-                self._write(f"Skill '{skill_name}' is registered.")
-            elif skill_name in self.skill_names:
-                self._write(f"Skill '{skill_name}' is available but not loaded.")
-            else:
-                self._write(f"Unknown skill: {skill_name}")
+        if self._dispatch_controller_command(command):
             return
         invocation = DEFAULT_COMMAND_CATALOG.resolve(command)
         if invocation is None:
             self._write(f"Unknown command: {name}")
             return
         definition = invocation.command
-        if definition.id.startswith("skill:"):
-            skill_name = definition.id.removeprefix("skill:")
-            if skill_name in self.registry.skills:
-                self._write(f"Skill '{skill_name}' is registered.")
-            elif skill_name in self.skill_names:
-                self._write(f"Skill '{skill_name}' is available but not loaded.")
-            else:
-                self._write(f"Unknown skill: {skill_name}")
-            return
         if definition.setting_key is not None:
             self._handle_provider_setting_command(
                 definition.setting_key,
@@ -3060,8 +3044,6 @@ class TextualPeonApp(App[int]):
             self._quit_with_resume()
         elif definition.id == "logout":
             self._show_logout_picker()
-        elif definition.id == "help":
-            self._write(DEFAULT_COMMAND_CATALOG.help_text())
         elif definition.id == "model" and name.casefold() == "/models" and not invocation.argument:
             choices = saved_model_choices(self.config_store.load_all())
             self._write("Models: " + ", ".join(choice.label for choice in choices))
@@ -3071,8 +3053,6 @@ class TextualPeonApp(App[int]):
             self._begin_provider_setup()
         elif definition.id == "settings":
             self._show_settings()
-        elif definition.id == "session":
-            self._show_session_info()
         elif definition.id == "resume":
             self._show_session_picker(invocation.argument)
         elif definition.id == "fork":
@@ -3098,18 +3078,85 @@ class TextualPeonApp(App[int]):
             self._append_startup_message()
             self._write("✓ New session started", role="success")
             self._set_status()
-        elif definition.id == "tools":
-            enabled = set(self.ui_config.enabled_tools)
-            self._write(
-                "Tools: "
-                + ", ".join(
-                    f"{tool.name} ({'enabled' if tool.name in enabled else 'disabled'})"
-                    for tool in self.registry.tools
+
+    def _dispatch_controller_command(self, command: str) -> bool:
+        name = command.split(maxsplit=1)[0].casefold()
+        invocation = DEFAULT_COMMAND_CATALOG.resolve(command)
+        cmd_id = invocation.command.id if invocation is not None else None
+
+        is_info_cmd = (
+            name.startswith("/skill:")
+            or cmd_id in ("help", "tools", "skills", "session", "reasoning")
+            or (invocation is not None and invocation.command.id.startswith("skill:"))
+        )
+        if not is_info_cmd:
+            return False
+
+        self._build_controller()
+        assert self.controller is not None
+        outcome = self.controller.dispatch_command(CommandIntent(command))
+        self._render_command_outcome(outcome)
+        return True
+
+    def _render_command_outcome(self, outcome: object) -> None:
+        if isinstance(outcome, HelpOutcome):
+            self._write(outcome.help_text)
+        elif isinstance(outcome, ToolsOutcome):
+            if not outcome.tools:
+                self._write("Tools: none")
+            else:
+                self._write(
+                    "Tools: "
+                    + ", ".join(
+                        f"{t.name} ({'enabled' if t.enabled else 'disabled'})"
+                        for t in outcome.tools
+                    )
+                )
+        elif isinstance(outcome, SkillsOutcome):
+            if outcome.selected_skill is not None:
+                s = outcome.selected_skill
+                if s.status == "loaded":
+                    self._write(f"Skill '{s.name}' ({s.path}):\n{s.content}")
+                elif s.status == "registered":
+                    self._write(f"Skill '{s.name}' is registered.")
+                elif s.status == "available":
+                    self._write(f"Skill '{s.name}' is available but not loaded.")
+                else:
+                    self._write(f"Unknown skill: {s.name}")
+            else:
+                names = [s.name for s in outcome.skills]
+                self._write("Skills: " + ", ".join(names) if names else "Skills: none")
+        elif isinstance(outcome, SessionInfoOutcome):
+            if outcome.record is None:
+                try:
+                    rec = self.session_store.load(self.session_id)
+                except (OSError, SessionStoreError) as caught:
+                    self._write(f"Could not inspect session: {caught}")
+                    return
+            else:
+                rec = outcome.record
+            messages = tuple(
+                conversation_messages_without_resource_prompt(
+                    self.context.messages,
+                    self.resources,
                 )
             )
-        elif definition.id == "skills":
-            skills = self.skill_names
-            self._write("Skills: " + ", ".join(skills) if skills else "Skills: none")
+            rec = replace(rec, messages=messages)
+            self._write(
+                "\n".join(
+                    format_session_info(
+                        rec,
+                        store=self.session_store,
+                    )
+                )
+            )
+        elif isinstance(outcome, ReasoningOutcome):
+            if not outcome.supported:
+                self._write("Reasoning effort is not supported by this provider.")
+            elif outcome.updated and outcome.current is not None:
+                self._write(f"Reasoning effort set to {outcome.current}.")
+        elif isinstance(outcome, CommandErrorOutcome):
+            self._write(outcome.error)
 
     def _handle_provider_setting_command(self, setting: str, value: str) -> None:
         if self.config is None:

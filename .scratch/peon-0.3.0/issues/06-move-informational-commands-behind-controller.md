@@ -4,15 +4,15 @@
 
 **Blocked by:** 05 — Dispatch prompts through SessionController.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] The controller resolves and executes `/help`, `/tools`, `/skills`, `/session`, and `/reasoning` without importing a host.
-- [ ] Command argument validation and availability behavior match the shared command catalog.
-- [ ] Command outcomes contain semantic data suitable for plain text, Textual, or future RPC presentation rather than preformatted widget objects.
-- [ ] Tool outcomes identify registered and enabled state from controller-owned policy.
-- [ ] Skill outcomes distinguish discovered, registered, and progressively loaded skills without injecting a body twice.
-- [ ] Session outcomes expose current durable or in-memory identity and compatible message/usage facts.
-- [ ] Reasoning outcomes preserve provider capability checks and active-state updates.
-- [ ] Textual renders outcomes with current user-visible behavior; a headless test can execute every command without Textual.
-- [ ] Prompt-toolkit behavior remains temporarily compatible until its retirement ticket.
-- [ ] Focused command/controller/Textual, full pytest, static typing, and diff validation pass.
+- [x] The controller resolves and executes `/help`, `/tools`, `/skills`, `/session`, and `/reasoning` without importing a host.
+- [x] Command argument validation and availability behavior match the shared command catalog.
+- [x] Command outcomes contain semantic data suitable for plain text, Textual, or future RPC presentation rather than preformatted widget objects.
+- [x] Tool outcomes identify registered and enabled state from controller-owned policy.
+- [x] Skill outcomes distinguish discovered, registered, and progressively loaded skills without injecting a body twice.
+- [x] Session outcomes expose current durable or in-memory identity and compatible message/usage facts.
+- [x] Reasoning outcomes preserve provider capability checks and active-state updates.
+- [x] Textual renders outcomes with current user-visible behavior; a headless test can execute every command without Textual.
+- [x] Prompt-toolkit behavior remains temporarily compatible until its retirement ticket.
+- [x] Focused command/controller/Textual, full pytest, static typing, and diff validation pass.
