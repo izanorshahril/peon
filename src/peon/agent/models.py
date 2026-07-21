@@ -49,6 +49,23 @@ class ModelResponse:
     usage: Usage | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ToolCallDelta:
+    index: int | None = None
+    id: str | None = None
+    name: str | None = None
+    arguments_delta: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelStreamChunk:
+    delta: str | None = None
+    thinking_delta: str | None = None
+    tool_call_delta: ToolCallDelta | None = None
+    usage: Usage | None = None
+    finish_reason: str | None = None
+
+
 @dataclass(slots=True)
 class AgentContext:
     messages: list[AgentMessage] = field(default_factory=list)

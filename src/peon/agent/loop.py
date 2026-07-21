@@ -2,14 +2,23 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
+import json
 import time
-from typing import Any
+from typing import Any, cast
 
 from .runtime_errors import AgentError, LimitExceededError
 
 from .executor import ToolExecutionContext, ToolExecutor
-from .models import AgentContext, AgentMessage, ToolCall, ToolDefinition, Usage
-from .provider_protocol import ModelProvider
+from .models import (
+	AgentContext,
+	AgentMessage,
+	ModelResponse,
+	ModelStreamChunk,
+	ToolCall,
+	ToolDefinition,
+	Usage,
+)
+from .provider_protocol import ModelProvider, StreamingModelProvider
 from .tracing import TraceContext, TraceSink, emit_trace
 
 
@@ -24,6 +33,7 @@ def run_task(
     model: str | None = None,
     on_message: Callable[[AgentMessage], None] | None = None,
     on_usage: Callable[[Usage | None], None] | None = None,
+    on_stream_chunk: Callable[[ModelStreamChunk], None] | None = None,
     trace_sink: TraceSink | None = None,
     trace_context: TraceContext | None = None,
     trace_provider: str | None = None,
@@ -87,11 +97,66 @@ def run_task(
         )
         provider_calls += 1
         try:
-            response = provider.complete(
-                messages=active_context.messages,
-                tools=available_tools,
-                model=model,
-            )
+            if hasattr(provider, "stream") and callable(getattr(provider, "stream")):
+                streaming_provider = cast(StreamingModelProvider, provider)
+                content_parts: list[str] = []
+                thinking_parts: list[str] = []
+                tool_calls_map: dict[int, dict[str, str]] = {}
+                final_usage: Usage | None = None
+
+                chunks = streaming_provider.stream(
+                    messages=active_context.messages,
+                    tools=available_tools,
+                    model=model,
+                )
+                for chunk in chunks:
+                    if chunk.delta:
+                        content_parts.append(chunk.delta)
+                    if chunk.thinking_delta:
+                        thinking_parts.append(chunk.thinking_delta)
+                    if chunk.tool_call_delta:
+                        tcd = chunk.tool_call_delta
+                        idx = tcd.index if tcd.index is not None else 0
+                        if idx not in tool_calls_map:
+                            tool_calls_map[idx] = {"id": "", "name": "", "args": ""}
+                        if tcd.id:
+                            tool_calls_map[idx]["id"] = tcd.id
+                        if tcd.name:
+                            tool_calls_map[idx]["name"] = tcd.name
+                        if tcd.arguments_delta:
+                            tool_calls_map[idx]["args"] += tcd.arguments_delta
+                    if chunk.usage:
+                        final_usage = chunk.usage
+
+                    if on_stream_chunk is not None:
+                        on_stream_chunk(chunk)
+
+                assembled_tool_call: ToolCall | None = None
+                if tool_calls_map:
+                    tc_dict = tool_calls_map[min(tool_calls_map.keys())]
+                    raw_args = tc_dict["args"]
+                    try:
+                        parsed_args = json.loads(raw_args) if raw_args.strip() else {}
+                    except ValueError:
+                        parsed_args = {}
+                    assembled_tool_call = ToolCall(
+                        name=tc_dict["name"],
+                        arguments=parsed_args if isinstance(parsed_args, dict) else {},
+                        call_id=tc_dict["id"] or None,
+                    )
+
+                response = ModelResponse(
+                    content="".join(content_parts),
+                    thinking="".join(thinking_parts),
+                    tool_call=assembled_tool_call,
+                    usage=final_usage,
+                )
+            else:
+                response = provider.complete(
+                    messages=active_context.messages,
+                    tools=available_tools,
+                    model=model,
+                )
         except Exception as error:
             if active_trace_clock is not None:
                 emit_trace(

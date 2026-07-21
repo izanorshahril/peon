@@ -25,9 +25,15 @@ from peon.extensions import ExtensionRegistry, register_sample_tools
 
 
 class StubTransport:
-    def __init__(self, response: object, get_response: object | None = None) -> None:
+    def __init__(
+        self,
+        response: object,
+        get_response: object | None = None,
+        stream_lines: Sequence[str] | None = None,
+    ) -> None:
         self.response = response
         self.get_response = get_response
+        self.stream_lines = stream_lines
         self.url: str | None = None
         self.headers: Mapping[str, str] | None = None
         self.payload: Mapping[str, object] | None = None
@@ -44,6 +50,20 @@ class StubTransport:
         if isinstance(self.response, Exception):
             raise self.response
         return cast(Mapping[str, object], self.response)
+
+    def stream_post(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+        payload: Mapping[str, object],
+    ):
+        self.url = url
+        self.headers = headers
+        self.payload = payload
+        if isinstance(self.response, Exception):
+            raise self.response
+        if self.stream_lines is not None:
+            yield from self.stream_lines
 
     def get(
         self,
@@ -737,3 +757,39 @@ def test_provider_rejects_invalid_response_shape(response) -> None:
 
     with pytest.raises(ProviderError, match="response"):
         provider.complete(messages=[])
+
+
+def test_openai_compatible_provider_streams_response_and_reconciles_canonical_message() -> None:
+    lines = [
+        'data: {"choices": [{"delta": {"thinking": "Thinking..."}}]}',
+        'data: {"choices": [{"delta": {"content": "Hello"}}]}',
+        'data: {"choices": [{"delta": {"content": " world!"}}]}',
+        'data: {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}',
+        'data: [DONE]',
+    ]
+    transport = StubTransport({}, stream_lines=lines)
+    provider = OpenAICompatibleProvider(
+        base_url="https://example.test",
+        api_key="key",
+        model="model",
+        transport=transport,
+    )
+
+    chunks = list(provider.stream(messages=[]))
+    assert len(chunks) == 4
+    assert chunks[0].thinking_delta == "Thinking..."
+    assert chunks[1].delta == "Hello"
+    assert chunks[2].delta == " world!"
+    assert chunks[3].usage == Usage(input_tokens=10, output_tokens=5)
+
+    result = run_task("hello", provider)
+    assert result == "Hello world!"
+
+
+def test_custom_provider_does_not_advertise_streaming() -> None:
+    provider = CustomProvider(
+        base_url="https://example.test",
+        api_key="key",
+        model="model",
+    )
+    assert not hasattr(provider, "stream") or not callable(getattr(provider, "stream", None))

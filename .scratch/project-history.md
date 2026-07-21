@@ -386,6 +386,12 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Remove `prompt-toolkit` from `pyproject.toml` dependencies and update `hosts.py` to return an actionable error if `prompt-toolkit` is requested.
 - Pass 98 focused host/CLI/Textual tests, 302 full suite, mypy clean, git diff check clean.
 
+### Ticket 14: stream OpenAI-compatible responses end to end
+
+- Add `StreamingModelProvider` protocol, `ModelStreamChunk`, `ToolCallDelta`, and SSE transport parsing to `provider_adapters.py`.
+- Support incremental stream consumption and tool call argument assembly in `run_task` / `CodingSession`, emitting `StreamDeltaEvent` through `TextualEventRouter`.
+- Pass 45 focused AI/agent tests, 304 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi

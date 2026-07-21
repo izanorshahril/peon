@@ -1,6 +1,6 @@
 """OpenAI-compatible provider adapters for Peon."""
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import json
 import os
@@ -9,7 +9,15 @@ from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition, Usage
+from peon.agent import (
+	AgentMessage,
+	ModelResponse,
+	ModelStreamChunk,
+	ToolCall,
+	ToolCallDelta,
+	ToolDefinition,
+	Usage,
+)
 
 from .provider_errors import ProviderError
 
@@ -34,6 +42,15 @@ class JsonTransport(Protocol):
         headers: Mapping[str, str],
     ) -> JsonObject:
         """Send one JSON GET request and return a JSON object response."""
+        ...
+
+    def stream_post(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+        payload: JsonObject,
+    ) -> Iterator[str]:
+        """Send one JSON POST request with streaming enabled and yield raw lines."""
         ...
 
 
@@ -75,6 +92,27 @@ class UrllibJsonTransport:
         if not isinstance(result, Mapping):
             raise ProviderError("provider response must be a JSON object")
         return result
+
+    def stream_post(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+        payload: JsonObject,
+    ) -> Iterator[str]:
+        req_headers = dict(headers)
+        req_headers["Accept"] = "text/event-stream"
+        try:
+            request = Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=req_headers,
+                method="POST",
+            )
+            with urlopen(request, timeout=60) as response:
+                for raw_line in response:
+                    yield raw_line.decode("utf-8")
+        except (HTTPError, URLError, OSError, ValueError) as error:
+            raise ProviderError(f"provider stream request failed: {url}") from error
 
 
 class OpenAICompatibleProvider:
@@ -127,6 +165,15 @@ class OpenAICompatibleProvider:
         model: str | None = None,
     ) -> ModelResponse:
         return self._client.complete(messages=messages, tools=tools, model=model)
+
+    def stream(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+    ) -> Iterator[ModelStreamChunk]:
+        return self._client.stream(messages=messages, tools=tools, model=model)
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +324,15 @@ class GitHubCopilotProvider:
     ) -> ModelResponse:
         return self._client.complete(messages=messages, tools=tools, model=model)
 
+    def stream(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+    ) -> Iterator[ModelStreamChunk]:
+        return self._client.stream(messages=messages, tools=tools, model=model)
+
 
 class _ChatCompletionsClient:
     def __init__(
@@ -337,18 +393,15 @@ class _ChatCompletionsClient:
             models.append(model_id)
         return tuple(models)
 
-    def complete(
+    def _build_payload(
         self,
         *,
         messages: Sequence[AgentMessage],
         tools: Sequence[ToolDefinition],
-        model: str | None,
-    ) -> ModelResponse:
-        selected_model = model or self._model
-        if not selected_model or not selected_model.strip():
-            raise ProviderError("provider model is required")
+        model: str,
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
-            "model": selected_model,
+            "model": model,
             "messages": (
                 [_serialize_message(message) for message in messages]
                 if self._supports_tools
@@ -381,6 +434,125 @@ class _ChatCompletionsClient:
             payload["max_tokens"] = self._max_tokens
         if self._response_format is not None:
             payload["response_format"] = {"type": self._response_format}
+        return payload
+
+    def stream(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+    ) -> Iterator[ModelStreamChunk]:
+        selected_model = model or self._model
+        if not selected_model or not selected_model.strip():
+            raise ProviderError("provider model is required")
+        payload = self._build_payload(
+            messages=messages, tools=tools, model=selected_model
+        )
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+
+        if not hasattr(self._transport, "stream_post"):
+            raise ProviderError("provider transport does not support streaming")
+
+        try:
+            lines = self._transport.stream_post(
+                _chat_url(self._base_url, self._supports_chat_completions),
+                self._headers(),
+                payload,
+            )
+        except ProviderError:
+            raise
+        except Exception as error:
+            raise ProviderError("provider stream request failed") from error
+
+        for line in lines:
+            line_str = line.strip()
+            if not line_str or line_str.startswith(":"):
+                continue
+            if line_str.startswith("data: "):
+                data_content = line_str[6:].strip()
+                if data_content == "[DONE]":
+                    break
+                try:
+                    chunk_json = json.loads(data_content)
+                except ValueError:
+                    continue
+
+                if not isinstance(chunk_json, Mapping):
+                    continue
+
+                usage_data = chunk_json.get("usage")
+                usage = _parse_usage(usage_data) if isinstance(usage_data, Mapping) else None
+
+                choices = chunk_json.get("choices")
+                if not choices or not isinstance(choices, Sequence):
+                    if usage is not None:
+                        yield ModelStreamChunk(usage=usage)
+                    continue
+
+                choice = choices[0]
+                if not isinstance(choice, Mapping):
+                    continue
+
+                finish_reason = choice.get("finish_reason")
+                finish_reason_str = str(finish_reason) if finish_reason else None
+
+                delta_data = choice.get("delta")
+                if not isinstance(delta_data, Mapping):
+                    if usage is not None or finish_reason_str is not None:
+                        yield ModelStreamChunk(usage=usage, finish_reason=finish_reason_str)
+                    continue
+
+                content_delta = delta_data.get("content")
+                content_str = str(content_delta) if isinstance(content_delta, str) else None
+
+                thinking_delta = (
+                    delta_data.get("thinking")
+                    or delta_data.get("reasoning_content")
+                    or delta_data.get("reasoning")
+                )
+                thinking_str = str(thinking_delta) if isinstance(thinking_delta, str) else None
+
+                tool_call_delta: ToolCallDelta | None = None
+                raw_tool_calls = delta_data.get("tool_calls")
+                if isinstance(raw_tool_calls, Sequence) and raw_tool_calls:
+                    tc0 = raw_tool_calls[0]
+                    if isinstance(tc0, Mapping):
+                        tc_idx = tc0.get("index")
+                        tc_id = tc0.get("id")
+                        fn = tc0.get("function")
+                        fn_name = fn.get("name") if isinstance(fn, Mapping) else None
+                        fn_args = fn.get("arguments") if isinstance(fn, Mapping) else None
+
+                        tool_call_delta = ToolCallDelta(
+                            index=int(tc_idx) if isinstance(tc_idx, int) else None,
+                            id=str(tc_id) if isinstance(tc_id, str) else None,
+                            name=str(fn_name) if isinstance(fn_name, str) else None,
+                            arguments_delta=str(fn_args) if isinstance(fn_args, str) else None,
+                        )
+
+                yield ModelStreamChunk(
+                    delta=content_str,
+                    thinking_delta=thinking_str,
+                    tool_call_delta=tool_call_delta,
+                    usage=usage,
+                    finish_reason=finish_reason_str,
+                )
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition],
+        model: str | None,
+    ) -> ModelResponse:
+        selected_model = model or self._model
+        if not selected_model or not selected_model.strip():
+            raise ProviderError("provider model is required")
+        payload = self._build_payload(
+            messages=messages, tools=tools, model=selected_model
+        )
 
         try:
             result = self._transport.post(

@@ -7,11 +7,13 @@ from .models import (
 	AgentContext,
 	AgentMessage,
 	ModelResponse,
+	ModelStreamChunk,
 	ToolCall,
+	ToolCallDelta,
 	ToolDefinition,
 	Usage,
 )
-from .provider_protocol import ModelProvider
+from .provider_protocol import ModelProvider, StreamingModelProvider
 from .tracing import TraceContext, TraceSink
 
 __all__ = [
@@ -21,7 +23,10 @@ __all__ = [
 	"LimitExceededError",
 	"ModelProvider",
 	"ModelResponse",
+	"ModelStreamChunk",
+	"StreamingModelProvider",
 	"ToolCall",
+	"ToolCallDelta",
 	"ToolDefinition",
 	"Usage",
 	"TraceContext",

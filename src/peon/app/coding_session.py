@@ -17,6 +17,7 @@ from peon.agent import (
     AgentMessage,
     LimitExceededError,
     ModelProvider,
+    ModelStreamChunk,
     ToolCall,
     ToolExecutionContext,
     ToolExecutor,
@@ -107,6 +108,14 @@ class MessageEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamDeltaEvent:
+    session_id: str
+    run_id: str
+    turn_id: str
+    chunk: ModelStreamChunk
+
+
+@dataclass(frozen=True, slots=True)
 class TurnFinishedEvent:
     session_id: str
     run_id: str
@@ -116,7 +125,7 @@ class TurnFinishedEvent:
 
 
 SessionEvent: TypeAlias = (
-    TurnStartedEvent | MessageEvent | TurnFinishedEvent
+    TurnStartedEvent | MessageEvent | StreamDeltaEvent | TurnFinishedEvent
 )
 EventHandler = Callable[[SessionEvent], None]
 logger = logging.getLogger(__name__)
@@ -299,6 +308,14 @@ class CodingSession:
                         turn_id,
                     ),
                     on_usage=usage.add,
+                    on_stream_chunk=lambda chunk: self._emit(
+                        StreamDeltaEvent(
+                            session_id=self._session_id,
+                            run_id=self._run_id,
+                            turn_id=turn_id,
+                            chunk=chunk,
+                        )
+                    ),
                     preserve_task_whitespace=preserve_task_whitespace,
                     execution_context=execution_context,
                     trace_sink=self._trace_sink,

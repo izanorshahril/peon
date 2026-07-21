@@ -88,6 +88,7 @@ from .sessions import (
 from .coding_session import (
     MessageEvent,
     SessionEvent,
+    StreamDeltaEvent,
     TurnFinishedEvent,
     TurnResult,
     TurnStartedEvent,
@@ -1038,6 +1039,7 @@ class TextualEventRouter:
         self._handlers: dict[type, Callable[[Any], None]] = {
             TurnStartedEvent: self._handle_turn_started,
             MessageEvent: self._handle_message,
+            StreamDeltaEvent: self._handle_stream_delta,
             TurnFinishedEvent: self._handle_turn_finished,
         }
 
@@ -1061,6 +1063,9 @@ class TextualEventRouter:
 
     def _handle_message(self, event: MessageEvent) -> None:
         self._host.call_from_thread(self._host._append_runtime_message, event.message)
+
+    def _handle_stream_delta(self, event: StreamDeltaEvent) -> None:
+        self._host.call_from_thread(self._host._on_stream_delta_event, event)
 
     def _handle_turn_finished(self, event: TurnFinishedEvent) -> None:
         self._host.call_from_thread(self._host._on_turn_finished_event, event)
@@ -1879,6 +1884,10 @@ class TextualPeonApp(App[int]):
 
     def _on_turn_started_event(self, event: TurnStartedEvent) -> None:
         self._set_processing(True)
+
+    def _on_stream_delta_event(self, event: StreamDeltaEvent) -> None:
+        if event.chunk.usage is not None:
+            self.session_usage = merge_usage(self.session_usage, event.chunk.usage)
 
     def _on_turn_finished_event(self, event: TurnFinishedEvent) -> None:
         pass
