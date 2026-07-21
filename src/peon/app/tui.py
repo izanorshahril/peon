@@ -64,8 +64,10 @@ from .session_controller import (
     HelpOutcome,
     PromptIntent,
     ReasoningOutcome,
+    ResumeOptionsOutcome,
     SessionController,
     SessionInfoOutcome,
+    SessionTransitionOutcome,
     SkillsOutcome,
     ToolsOutcome,
 )
@@ -1361,7 +1363,8 @@ def _dispatch_tui_controller_command(
 
     is_info_cmd = (
         name.startswith("/skill:")
-        or cmd_id in ("help", "tools", "skills", "session", "reasoning")
+        or cmd_id in ("help", "tools", "skills", "session", "reasoning", "new", "fork")
+        or (cmd_id == "resume" and bool(invocation.argument if invocation else None))
         or (invocation is not None and invocation.command.id.startswith("skill:"))
     )
     if not is_info_cmd:
@@ -1419,6 +1422,33 @@ def _dispatch_tui_controller_command(
                     pass
                 session = replace(session, config=updated_config)
             print(f"Reasoning effort set to {outcome.current}.", file=output)
+    elif isinstance(outcome, ResumeOptionsOutcome):
+        if not outcome.options:
+            print("No saved sessions available to resume.", file=output)
+        else:
+            print("Saved sessions:", file=output)
+            for opt in outcome.options:
+                name_part = f" · {opt.name}" if opt.name else ""
+                print(f"  {opt.option_id}. {opt.summary}{name_part}", file=output)
+    elif isinstance(outcome, SessionTransitionOutcome):
+        context = AgentContext(messages=list(outcome.messages))
+        if session.resources is not None:
+            apply_resource_prompt(context, session.resources)
+        session = replace(
+            session,
+            session_id=outcome.session_id,
+            context=context,
+            persisted_message_count=len(context.messages),
+            usage=None,
+        )
+        if outcome.action == "new":
+            print("Conversation cleared.", file=output)
+        elif outcome.action == "resume":
+            rec = outcome.record or session.session_store.load(outcome.session_id)
+            print(f"Resumed session: {format_session_summary(rec, delimiter=ui_config.session_list_delimiter)}", file=output)
+        elif outcome.action == "fork":
+            name_str = f" ({outcome.name})" if outcome.name else ""
+            print(f"Forked session: {outcome.session_id}{name_str}", file=output)
     elif isinstance(outcome, CommandErrorOutcome):
         print(f"peon: {outcome.error}", file=error)
 

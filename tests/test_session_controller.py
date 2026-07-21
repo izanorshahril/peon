@@ -24,11 +24,17 @@ from peon.app.coding_session import (
 from peon.app.session_controller import (
     CommandErrorOutcome,
     CommandIntent,
+    ForkSessionIntent,
     HelpOutcome,
+    NewSessionIntent,
     PromptIntent,
     ReasoningOutcome,
+    ResumeOptionsOutcome,
+    ResumeSelectIntent,
+    ResumeSessionIntent,
     SessionController,
     SessionInfoOutcome,
+    SessionTransitionOutcome,
     SkillsOutcome,
     ToolsOutcome,
 )
@@ -396,3 +402,88 @@ def test_dispatch_command_reserved():
     outcome = controller.dispatch_command(CommandIntent("/compact"))
     assert isinstance(outcome, CommandErrorOutcome)
     assert "reserved" in outcome.error
+
+
+def test_dispatch_new_session():
+    controller = _make_controller()
+    old_id = controller.session_id
+    outcome = controller.dispatch(NewSessionIntent())
+    assert isinstance(outcome, SessionTransitionOutcome)
+    assert outcome.action == "new"
+    assert outcome.session_id != old_id
+    assert outcome.parent_id == old_id
+    assert controller.session_id == outcome.session_id
+
+
+def test_dispatch_resume_session_list_and_select():
+    store = MemorySessionStore()
+    s1 = store.create()
+    store.append(s1.session_id, AgentMessage(role="user", content="hello session 1"))
+    s2 = store.create()
+    store.append(s2.session_id, AgentMessage(role="user", content="hello session 2"))
+
+    active = store.create()
+    controller = _make_controller(session_store=store, session_id=active.session_id)
+
+    # Request resume listing
+    outcome = controller.dispatch(ResumeSessionIntent())
+    assert isinstance(outcome, ResumeOptionsOutcome)
+    assert len(outcome.options) == 2
+    token = outcome.continuation_token
+
+    # Select via continuation token
+    select_outcome = controller.dispatch(ResumeSelectIntent(continuation_token=token, selection="1"))
+    assert isinstance(select_outcome, SessionTransitionOutcome)
+    assert select_outcome.action == "resume"
+    assert select_outcome.session_id in (s1.session_id, s2.session_id)
+    assert controller.session_id == select_outcome.session_id
+
+
+def test_dispatch_resume_single_use_token_reuse_fails():
+    store = MemorySessionStore()
+    s1 = store.create()
+    store.append(s1.session_id, AgentMessage(role="user", content="hello"))
+    active = store.create()
+    controller = _make_controller(session_store=store, session_id=active.session_id)
+
+    outcome = controller.dispatch(ResumeSessionIntent())
+    assert isinstance(outcome, ResumeOptionsOutcome)
+    token = outcome.continuation_token
+
+    # First use succeeds
+    succ = controller.dispatch(ResumeSelectIntent(continuation_token=token, selection="1"))
+    assert isinstance(succ, SessionTransitionOutcome)
+
+    # Reuse of same token fails
+    fail = controller.dispatch(ResumeSelectIntent(continuation_token=token, selection="1"))
+    assert isinstance(fail, CommandErrorOutcome)
+    assert "invalid, expired, or already used" in fail.error
+
+
+def test_dispatch_fork_session():
+    store = MemorySessionStore()
+    active = store.create()
+    store.append(active.session_id, AgentMessage(role="user", content="parent prompt"))
+    controller = _make_controller(session_store=store, session_id=active.session_id)
+
+    outcome = controller.dispatch(ForkSessionIntent(name="my-fork"))
+    assert isinstance(outcome, SessionTransitionOutcome)
+    assert outcome.action == "fork"
+    assert outcome.name == "my-fork"
+    assert outcome.parent_id == active.session_id
+    assert controller.session_id == outcome.session_id
+
+
+def test_dispatch_command_session_transitions():
+    store = MemorySessionStore()
+    active = store.create()
+    controller = _make_controller(session_store=store, session_id=active.session_id)
+
+    new_outcome = controller.dispatch_command(CommandIntent("/new"))
+    assert isinstance(new_outcome, SessionTransitionOutcome)
+    assert new_outcome.action == "new"
+
+    fork_outcome = controller.dispatch_command(CommandIntent("/fork branch"))
+    assert isinstance(fork_outcome, SessionTransitionOutcome)
+    assert fork_outcome.action == "fork"
+    assert fork_outcome.name == "branch"

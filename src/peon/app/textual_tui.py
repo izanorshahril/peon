@@ -88,8 +88,10 @@ from .session_controller import (
     HelpOutcome,
     PromptIntent,
     ReasoningOutcome,
+    ResumeOptionsOutcome,
     SessionController,
     SessionInfoOutcome,
+    SessionTransitionOutcome,
     SkillsOutcome,
     ToolsOutcome,
 )
@@ -3086,7 +3088,7 @@ class TextualPeonApp(App[int]):
 
         is_info_cmd = (
             name.startswith("/skill:")
-            or cmd_id in ("help", "tools", "skills", "session", "reasoning")
+            or cmd_id in ("help", "tools", "skills", "session", "reasoning", "new", "resume", "fork")
             or (invocation is not None and invocation.command.id.startswith("skill:"))
         )
         if not is_info_cmd:
@@ -3157,6 +3159,47 @@ class TextualPeonApp(App[int]):
                 if self.config is not None:
                     self.config = replace(self.config, reasoning_effort=outcome.current)
                 self._write(f"Reasoning effort set to {outcome.current}.")
+        elif isinstance(outcome, ResumeOptionsOutcome):
+            if not outcome.options:
+                self._write("No saved sessions.")
+            else:
+                valid_sessions = [
+                    self.session_store.load(opt.session_id)
+                    for opt in outcome.options
+                ]
+                self._show_choices(
+                    "session",
+                    "Select session:",
+                    [
+                        (session, f"{index}. {self._session_label(session)}")
+                        for index, session in enumerate(valid_sessions, 1)
+                    ],
+                )
+        elif isinstance(outcome, SessionTransitionOutcome):
+            if outcome.action == "new":
+                self.session_id = outcome.session_id
+                self.session_usage = None
+                self.context = AgentContext()
+                if self.resources is not None:
+                    apply_resource_prompt(self.context, self.resources)
+                self.persisted_message_count = len(self.context.messages)
+                self.query_one("#transcript", ChatMessage).clear_transcript()
+                self._append_startup_message()
+                self._write("✓ New session started", role="success")
+                self._set_status()
+            elif outcome.action == "resume":
+                record = outcome.record or self.session_store.load(outcome.session_id)
+                self._open_selected_session(record)
+            elif outcome.action == "fork":
+                self.session_id = outcome.session_id
+                self.session_usage = None
+                self.context = AgentContext(messages=list(outcome.messages))
+                if self.resources is not None:
+                    apply_resource_prompt(self.context, self.resources)
+                self.persisted_message_count = len(self.context.messages)
+                formatted_name = f" ({outcome.name})" if outcome.name else ""
+                self._write(f"✓ Forked session: {outcome.session_id}{formatted_name}", role="success")
+                self._set_status()
         elif isinstance(outcome, CommandErrorOutcome):
             self._write(outcome.error)
 

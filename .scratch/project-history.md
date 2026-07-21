@@ -342,6 +342,13 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Dispatch `/help`, `/tools`, `/skills`, `/session`, `/reasoning` through `controller.dispatch_command(...)` in Textual + prompt-toolkit hosts.
 - Pass 22 focused tests, 324 full suite, mypy clean, git diff check clean.
 
+### Ticket 07: move session transitions behind controller
+
+- Add `NewSessionIntent`, `ResumeSessionIntent`, `ResumeSelectIntent`, `ForkSessionIntent` + `ResumeOption`, `ResumeOptionsOutcome`, `SessionTransitionOutcome` to `SessionController`.
+- Add single-use continuation token validation for `/resume` selection.
+- Route `/new`, `/resume`, `/fork` through controller in Textual + prompt-toolkit hosts.
+- Pass 27 focused tests, 329 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi

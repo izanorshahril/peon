@@ -4,15 +4,15 @@
 
 **Blocked by:** 06 — Move informational commands behind controller.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] `/new`, `/resume`, and `/fork` execute through controller intents without host imports.
-- [ ] New sessions preserve empty-session cleanup, fresh context, resource reapplication, and usage reset behavior.
-- [ ] Resume selection exposes stable option IDs, prompt summaries, interaction counts, ages, names, and current-session exclusion as semantic data.
-- [ ] Fork preserves parent metadata, canonical conversation messages, resources, and optional name behavior.
-- [ ] Selection uses a single-use continuation token; stale, invalid, or reused tokens fail without state mutation.
-- [ ] Durable and in-memory stores work through the same controller interface.
-- [ ] Existing 0.2 session files load and transition without migration.
-- [ ] Textual retains current picker, search, focus, row layout, and resume-command behavior.
-- [ ] Headless tests complete new/resume/fork workflows entirely through intents and outcomes.
-- [ ] Focused controller/session/Textual, full pytest, static typing, and diff validation pass.
+- [x] `/new`, `/resume`, and `/fork` execute through controller intents without host imports.
+- [x] New sessions preserve empty-session cleanup, fresh context, resource reapplication, and usage reset behavior.
+- [x] Resume selection exposes stable option IDs, prompt summaries, interaction counts, ages, names, and current-session exclusion as semantic data.
+- [x] Fork preserves parent metadata, canonical conversation messages, resources, and optional name behavior.
+- [x] Selection uses a single-use continuation token; stale, invalid, or reused tokens fail without state mutation.
+- [x] Durable and in-memory stores work through the same controller interface.
+- [x] Existing 0.2 session files load and transition without migration.
+- [x] Textual retains current picker, search, focus, row layout, and resume-command behavior.
+- [x] Headless tests complete new/resume/fork workflows entirely through intents and outcomes.
+- [x] Focused controller/session/Textual, full pytest, static typing, and diff validation pass.

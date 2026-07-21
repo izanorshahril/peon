@@ -1,12 +1,13 @@
-"""Host-neutral session controller for prompt and command dispatch."""
+"""Host-neutral session controller for prompt, command, and session transition dispatch."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 import time
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, overload
 from uuid import uuid4
 
 from peon.agent import (
@@ -34,10 +35,22 @@ from .commands import (
 )
 from .resources import (
     ResourceInventory,
+    apply_resource_prompt,
     conversation_messages_without_resource_prompt,
     load_skill_into_context,
 )
-from .sessions import SessionRecord, SessionStore, SessionStoreError
+from .sessions import (
+    SessionRecord,
+    SessionStore,
+    SessionStoreError,
+    create_session,
+    discard_empty_session,
+    format_session_age,
+    format_session_summary,
+    select_session,
+    session_first_prompt,
+    session_interaction_count,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +69,35 @@ class CommandIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class NewSessionIntent:
+    """Typed request to create a fresh conversation session."""
+
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeSessionIntent:
+    """Typed request to list sessions for resuming or directly resume by target."""
+
+    target: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeSelectIntent:
+    """Typed request to select a session to resume using a single-use continuation token."""
+
+    continuation_token: str
+    selection: str
+
+
+@dataclass(frozen=True, slots=True)
+class ForkSessionIntent:
+    """Typed request to fork the active conversation session."""
+
+    name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ToolStatus:
     """Status of a tool registered with the controller."""
 
@@ -71,7 +113,7 @@ class SkillStatus:
 
     name: str
     status: Literal["loaded", "registered", "available", "unknown"]
-    path: str | None = None
+    path: str | Path | None = None
     content: str | None = None
 
 
@@ -120,6 +162,39 @@ class ReasoningOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class ResumeOption:
+    """A semantic choice for resuming a saved conversation session."""
+
+    option_id: str
+    session_id: str
+    summary: str
+    first_prompt: str
+    interaction_count: int
+    age_display: str
+    name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeOptionsOutcome:
+    """Outcome listing available sessions to resume with a continuation token."""
+
+    options: tuple[ResumeOption, ...]
+    continuation_token: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTransitionOutcome:
+    """Outcome of a session lifecycle transition (new, resume, fork)."""
+
+    action: Literal["new", "resume", "fork"]
+    session_id: str
+    parent_id: str | None = None
+    name: str | None = None
+    record: SessionRecord | None = None
+    messages: tuple[AgentMessage, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class CommandErrorOutcome:
     """Outcome when a command fails or is unavailable."""
 
@@ -133,17 +208,28 @@ CommandOutcome: TypeAlias = (
     | SkillsOutcome
     | SessionInfoOutcome
     | ReasoningOutcome
+    | ResumeOptionsOutcome
+    | SessionTransitionOutcome
     | CommandErrorOutcome
+)
+
+Intent: TypeAlias = (
+    PromptIntent
+    | CommandIntent
+    | NewSessionIntent
+    | ResumeSessionIntent
+    | ResumeSelectIntent
+    | ForkSessionIntent
 )
 
 
 class SessionController:
-    """Dispatch typed prompt and command intents through a host-neutral session boundary.
+    """Dispatch typed prompt, command, and session transition intents.
 
     Composes :class:`CodingSession` rather than duplicating the agent loop.
-    Every host (one-shot CLI, print, JSONL, embedded, Textual, prompt-toolkit)
-    dispatches prompts and commands through this controller to get equivalent
-    events, results, persistence, cancellation, resources, and tool behavior.
+    Every host dispatches prompts, commands, and transitions through this
+    controller to get equivalent events, results, persistence, cancellation,
+    resources, and tool behavior.
     """
 
     def __init__(
@@ -177,6 +263,8 @@ class SessionController:
         self._enabled_tools = tuple(enabled_tools) if enabled_tools is not None else None
         self._reasoning_effort = reasoning_effort
         self._reasoning_choices = tuple(reasoning_choices)
+        self._id_factory = id_factory
+        self._resume_tokens: dict[str, dict[str, str]] = {}
         self._session = CodingSession(
             provider=provider,
             session_store=session_store,
@@ -216,20 +304,59 @@ class SessionController:
         """
         return self._session
 
-    def dispatch(self, intent: PromptIntent) -> TurnResult:
-        """Dispatch one typed prompt intent and return a structured outcome."""
-        return self._session.prompt(
-            intent.text,
-            preserve_task_whitespace=intent.preserve_whitespace,
-        )
+    @overload
+    def dispatch(self, intent: PromptIntent) -> TurnResult: ...
+
+    @overload
+    def dispatch(self, intent: CommandIntent) -> CommandOutcome: ...
+
+    @overload
+    def dispatch(self, intent: NewSessionIntent) -> SessionTransitionOutcome: ...
+
+    @overload
+    def dispatch(
+        self, intent: ResumeSessionIntent
+    ) -> ResumeOptionsOutcome | SessionTransitionOutcome | CommandErrorOutcome: ...
+
+    @overload
+    def dispatch(
+        self, intent: ResumeSelectIntent
+    ) -> SessionTransitionOutcome | CommandErrorOutcome: ...
+
+    @overload
+    def dispatch(
+        self, intent: ForkSessionIntent
+    ) -> SessionTransitionOutcome | CommandErrorOutcome: ...
+
+    def dispatch(
+        self,
+        intent: Intent,
+    ) -> TurnResult | CommandOutcome | ResumeOptionsOutcome | SessionTransitionOutcome:
+        """Dispatch any typed intent to its corresponding handler."""
+        if isinstance(intent, PromptIntent):
+            return self._session.prompt(
+                intent.text,
+                preserve_task_whitespace=intent.preserve_whitespace,
+            )
+        if isinstance(intent, CommandIntent):
+            return self.dispatch_command(intent)
+        if isinstance(intent, NewSessionIntent):
+            return self.dispatch_new_session(intent)
+        if isinstance(intent, ResumeSessionIntent):
+            return self.dispatch_resume(intent)
+        if isinstance(intent, ResumeSelectIntent):
+            return self.dispatch_resume_select(intent)
+        if isinstance(intent, ForkSessionIntent):
+            return self.dispatch_fork(intent)
+        raise TypeError(f"Unknown intent type: {type(intent)}")
 
     def dispatch_command(self, intent: CommandIntent) -> CommandOutcome:
-        """Dispatch one informational command intent and return a typed outcome."""
+        """Dispatch one informational or transition command intent."""
         raw_cmd = intent.command.strip()
         name = raw_cmd.split(maxsplit=1)[0]
         normalized_name = name.casefold()
 
-        # Handle skill selection (/skill:<name>)
+        # Skill selection (/skill:<name>)
         if normalized_name.startswith("/skill:") and normalized_name != "/skill:":
             skill_name = name.split(":", maxsplit=1)[1]
             resource = (
@@ -287,11 +414,228 @@ class SessionController:
         if cmd_id == "reasoning":
             return self._execute_reasoning_command(invocation.argument)
 
-        return CommandErrorOutcome(command=raw_cmd, error=f"Command '{cmd_id}' is not an informational command.")
+        if cmd_id == "new":
+            return self.dispatch_new_session(NewSessionIntent())
+
+        if cmd_id == "resume":
+            return self.dispatch_resume(ResumeSessionIntent(invocation.argument or None))
+
+        if cmd_id == "fork":
+            return self.dispatch_fork(ForkSessionIntent(invocation.argument or None))
+
+        return CommandErrorOutcome(command=raw_cmd, error=f"Command '{cmd_id}' is not an informational or transition command.")
+
+    def dispatch_new_session(
+        self,
+        intent: NewSessionIntent | None = None,
+    ) -> SessionTransitionOutcome:
+        """Create a fresh conversation session, discarding empty previous sessions."""
+        del intent
+        if not any(message.role == "user" for message in self._context.messages):
+            discard_empty_session(self.session_store, self.session_id)
+
+        created = create_session(
+            self.session_store,
+            parent_id=self.session_id,
+        )
+
+        old_session_id = self.session_id
+        self._context = AgentContext()
+        if self._resources is not None:
+            apply_resource_prompt(self._context, self._resources)
+
+        self._session = CodingSession(
+            provider=self.provider,
+            session_store=self.session_store,
+            session_id=created.session_id,
+            run_id=self.run_id,
+            context=self._context,
+            executor=self._executor,
+            model=self._model,
+            resources=self._resources,
+            on_event=self._session._on_event,
+            on_tool_output=self._session._on_tool_output,
+            clock=self._session._clock,
+            id_factory=self._session._id_factory,
+        )
+        return SessionTransitionOutcome(
+            action="new",
+            session_id=created.session_id,
+            parent_id=old_session_id,
+            record=created,
+            messages=self.messages,
+        )
+
+    def dispatch_resume(
+        self,
+        intent: ResumeSessionIntent | None = None,
+    ) -> ResumeOptionsOutcome | SessionTransitionOutcome | CommandErrorOutcome:
+        """List sessions to resume or directly resume a target session."""
+        target = intent.target if intent is not None else None
+        if not target:
+            try:
+                sessions = self.session_store.list_sessions()
+            except (AttributeError, OSError, SessionStoreError):
+                sessions = ()
+
+            valid_sessions = [
+                s for s in sessions
+                if s.session_id != self.session_id and session_interaction_count(s) > 0
+            ]
+            options: list[ResumeOption] = []
+            token_map: dict[str, str] = {}
+            token = self._id_factory()
+
+            for idx, record in enumerate(valid_sessions, 1):
+                option_id = str(idx)
+                prompt = session_first_prompt(record) or ""
+                count = session_interaction_count(record)
+                age = format_session_age(record.created_at)
+                summary = format_session_summary(record)
+                opt = ResumeOption(
+                    option_id=option_id,
+                    session_id=record.session_id,
+                    summary=summary,
+                    first_prompt=prompt,
+                    interaction_count=count,
+                    age_display=age,
+                    name=record.name,
+                )
+                options.append(opt)
+                token_map[option_id] = record.session_id
+                token_map[record.session_id] = record.session_id
+                if record.name:
+                    token_map[record.name] = record.session_id
+
+            self._resume_tokens[token] = token_map
+            return ResumeOptionsOutcome(options=tuple(options), continuation_token=token)
+
+        try:
+            record = select_session(self.session_store, target)
+        except (OSError, SessionStoreError) as error:
+            return CommandErrorOutcome(command="resume", error=str(error))
+
+        return self._switch_to_session("resume", record)
+
+    def dispatch_resume_select(
+        self,
+        intent: ResumeSelectIntent,
+    ) -> SessionTransitionOutcome | CommandErrorOutcome:
+        """Select a session using a single-use continuation token."""
+        token_map = self._resume_tokens.pop(intent.continuation_token, None)
+        if token_map is None:
+            return CommandErrorOutcome(
+                command="resume",
+                error=f"Continuation token '{intent.continuation_token}' is invalid, expired, or already used.",
+            )
+
+        session_id = token_map.get(intent.selection)
+        if session_id is None:
+            try:
+                record = select_session(self.session_store, intent.selection)
+            except (OSError, SessionStoreError) as error:
+                return CommandErrorOutcome(command="resume", error=str(error))
+        else:
+            try:
+                record = self.session_store.load(session_id)
+            except (OSError, SessionStoreError) as error:
+                return CommandErrorOutcome(command="resume", error=str(error))
+
+        return self._switch_to_session("resume", record)
+
+    def dispatch_fork(
+        self,
+        intent: ForkSessionIntent | None = None,
+    ) -> SessionTransitionOutcome | CommandErrorOutcome:
+        """Fork the active session into a new child session."""
+        name = intent.name if intent is not None else None
+        try:
+            created = create_session(
+                self.session_store,
+                parent_id=self.session_id,
+                name=name or None,
+            )
+        except (OSError, SessionStoreError) as error:
+            return CommandErrorOutcome(command="fork", error=str(error))
+
+        non_resource_messages = tuple(
+            conversation_messages_without_resource_prompt(
+                self._context.messages,
+                self._resources,
+            )
+        )
+        for message in non_resource_messages:
+            try:
+                self.session_store.append(created.session_id, message)
+            except (OSError, SessionStoreError):
+                pass
+
+        self._context = AgentContext(messages=list(non_resource_messages))
+        if self._resources is not None:
+            apply_resource_prompt(self._context, self._resources)
+
+        old_session_id = self.session_id
+        self._session = CodingSession(
+            provider=self.provider,
+            session_store=self.session_store,
+            session_id=created.session_id,
+            run_id=self.run_id,
+            context=self._context,
+            executor=self._executor,
+            model=self._model,
+            resources=self._resources,
+            on_event=self._session._on_event,
+            on_tool_output=self._session._on_tool_output,
+            clock=self._session._clock,
+            id_factory=self._session._id_factory,
+        )
+
+        return SessionTransitionOutcome(
+            action="fork",
+            session_id=created.session_id,
+            parent_id=old_session_id,
+            name=name or None,
+            record=created,
+            messages=self.messages,
+        )
 
     def cancel(self) -> bool:
         """Request cancellation of the active prompt, if one is running."""
         return self._session.cancel()
+
+    def _switch_to_session(
+        self,
+        action: Literal["resume"],
+        record: SessionRecord,
+    ) -> SessionTransitionOutcome:
+        old_session_id = self.session_id
+        self._context = AgentContext(messages=list(record.messages))
+        if self._resources is not None:
+            apply_resource_prompt(self._context, self._resources)
+
+        self._session = CodingSession(
+            provider=self.provider,
+            session_store=self.session_store,
+            session_id=record.session_id,
+            run_id=self.run_id,
+            context=self._context,
+            executor=self._executor,
+            model=self._model,
+            resources=self._resources,
+            on_event=self._session._on_event,
+            on_tool_output=self._session._on_tool_output,
+            clock=self._session._clock,
+            id_factory=self._session._id_factory,
+        )
+
+        return SessionTransitionOutcome(
+            action=action,
+            session_id=record.session_id,
+            parent_id=record.parent_id,
+            name=record.name,
+            record=record,
+            messages=self.messages,
+        )
 
     def _execute_tools_command(self) -> ToolsOutcome:
         tools: list[ToolStatus] = []
