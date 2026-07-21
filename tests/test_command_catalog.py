@@ -19,6 +19,26 @@ def test_catalog_supports_migration_vocabulary() -> None:
     assert DEFAULT_COMMAND_CATALOG.search("config")[0].command.id == "settings"
 
 
+def test_catalog_separates_session_info_from_resume() -> None:
+    session = DEFAULT_COMMAND_CATALOG.resolve("/session")
+    resume = DEFAULT_COMMAND_CATALOG.resolve("/resume")
+
+    assert session is not None
+    assert session.command.id == "session"
+    assert resume is not None
+    assert resume.command.id == "resume"
+    assert DEFAULT_COMMAND_CATALOG.resolve("/continue") is not None
+    assert DEFAULT_COMMAND_CATALOG.resolve("/continue").command.id == "resume"
+
+
+def test_catalog_resolves_partial_command_names() -> None:
+    invocation = DEFAULT_COMMAND_CATALOG.resolve("/ess")
+
+    assert invocation is not None
+    assert invocation.command.id == "session"
+    assert DEFAULT_COMMAND_CATALOG.search("/ess")[0].command.id == "session"
+
+
 def test_catalog_exposes_reasoning_as_an_available_setting_command() -> None:
     invocation = DEFAULT_COMMAND_CATALOG.resolve("/reasoning high")
 

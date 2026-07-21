@@ -143,9 +143,16 @@ class CommandCatalog:
             for command in self._commands
             if self._is_prefix_of_direct_name(normalized_name, command)
         ]
-        if not prefix_matches:
+        if prefix_matches:
+            return CommandInvocation(prefix_matches[0], "", is_direct=False)
+        substring_matches = [
+            command
+            for command in self._commands
+            if self._contains_direct_name(normalized_name, command)
+        ]
+        if not substring_matches:
             return None
-        return CommandInvocation(prefix_matches[0], "", is_direct=False)
+        return CommandInvocation(substring_matches[0], "", is_direct=False)
 
     def help_text(self) -> str:
         """Render the public command inventory for either terminal shell."""
@@ -204,6 +211,16 @@ class CommandCatalog:
         )
 
     @staticmethod
+    def _contains_direct_name(
+        normalized_name: str,
+        command: CommandDefinition,
+    ) -> bool:
+        return any(
+            normalized_name in _normalize(name)
+            for name in (command.name, *command.aliases)
+        )
+
+    @staticmethod
     def _match(
         command: CommandDefinition,
         normalized_query: str,
@@ -230,6 +247,8 @@ class CommandCatalog:
             return CommandMatch(command, 0, "canonical-exact")
         if " " not in normalized_query and canonical.startswith(normalized_query):
             return CommandMatch(command, 1, "canonical-prefix")
+        if " " not in normalized_query and normalized_query in canonical:
+            return CommandMatch(command, 2, "canonical-prefix")
         if normalized_query in candidates:
             return CommandMatch(command, 2, "candidate-exact")
         if " " not in normalized_query and any(
@@ -346,9 +365,16 @@ _COMMAND_DEFINITIONS.extend(
         _command(
             "session",
             "/session",
-            "list or resume conversations",
-            candidate_names=("sessions", "resume", "continue"),
-            search_terms=("history", "resume", "continue"),
+            "show current session information",
+            argument_policy="none",
+            search_terms=("session info", "conversation details"),
+        ),
+        _command(
+            "resume",
+            "/resume",
+            "resume a saved conversation",
+            aliases=("/continue", "/sessions"),
+            search_terms=("history", "saved session", "open conversation"),
         ),
         _command(
             "compact",

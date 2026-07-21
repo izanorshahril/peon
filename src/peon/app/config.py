@@ -29,8 +29,10 @@ class UiConfig:
     tool_output_color: str = "#808080"
     command_selected_color: str = "#000000"
     text_format: str = "normal"
+    system_text_format: str = "normal"
     hide_thinking: bool = False
     render_tool_markdown: bool = False
+    session_list_delimiter: bool = True
     reasoning_shortcut: str = "shift+tab"
     thinking_shortcut: str = "ctrl+t"
     tools_shortcut: str = "ctrl+o"
@@ -66,6 +68,7 @@ UI_SETTING_SPECS = (
         "command_selected_color",
     ),
     ("text-format", "Text format", "text_format"),
+    ("system-text-format", "System text format", "system_text_format"),
 )
 
 GENERAL_SETTING_SPECS = (
@@ -74,6 +77,11 @@ GENERAL_SETTING_SPECS = (
         "render-tool-markdown",
         "Render tool output as Markdown",
         "render_tool_markdown",
+    ),
+    (
+        "session-list-delimiter",
+        "Session list dot delimiters",
+        "session_list_delimiter",
     ),
     ("reserved-auto-compaction", "Auto-compaction", None),
 )
@@ -112,11 +120,13 @@ def update_ui_setting(config: UiConfig, setting: str, value: str) -> UiConfig:
         if field_name == "user_bottom_blank_lines":
             return replace(config, user_bottom_blank_lines=parsed_value)
         return replace(config, message_left_padding=parsed_value)
-    if field_name == "text_format":
+    if field_name in {"text_format", "system_text_format"}:
         lowered_value = value.lower()
         if lowered_value not in {"normal", "bold", "italic"}:
             raise ValueError("text format must be normal, bold, or italic")
-        return replace(config, text_format=lowered_value)
+        if field_name == "text_format":
+            return replace(config, text_format=lowered_value)
+        return replace(config, system_text_format=lowered_value)
     if not value.startswith("#") or len(value) not in {4, 7}:
         raise ValueError("colors must use #RGB or #RRGGBB")
     try:
@@ -156,7 +166,9 @@ def update_general_setting(config: UiConfig, setting: str, value: str) -> UiConf
         raise ValueError("general setting must be true or false")
     if field_name == "hide_thinking":
         return replace(config, hide_thinking=lowered_value == "true")
-    return replace(config, render_tool_markdown=lowered_value == "true")
+    if field_name == "render_tool_markdown":
+        return replace(config, render_tool_markdown=lowered_value == "true")
+    return replace(config, session_list_delimiter=lowered_value == "true")
 
 
 def update_shortcut_setting(config: UiConfig, setting: str, value: str) -> UiConfig:

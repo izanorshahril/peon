@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from peon.agent import AgentMessage, ToolCall
+from peon.agent import AgentMessage, ToolCall, Usage
 
 
 class SessionStoreError(Exception):
@@ -27,6 +27,211 @@ class SessionRecord:
     name: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SessionMessageStats:
+    total: int
+    user: int
+    assistant: int
+    tool_calls: int
+    tool_results: int
+
+
+def session_file_label(store: object, session_id: str) -> str:
+    """Return the durable file path or a memory label for session info."""
+    directory = getattr(store, "directory", None)
+    if isinstance(directory, Path):
+        return str(directory / f"{session_id}.jsonl")
+    return "(memory session)"
+
+
+def _format_count(value: int | None) -> str:
+    return "n/a" if value is None else f"{value:,}"
+
+
+def _format_cost(usage: Usage | None) -> str:
+    if usage is None or usage.cost is None:
+        return "n/a"
+    prefix = "$" if usage.currency in {None, "USD"} else f"{usage.currency} "
+    return f"{prefix}{usage.cost:.3f}"
+
+
+def format_session_info(
+    session: SessionRecord,
+    *,
+    store: object,
+    usage: Usage | None = None,
+) -> tuple[str, ...]:
+    """Render Pi-style detailed session information lines."""
+    stats = session_message_stats(session)
+    input_tokens = usage.input_tokens if usage is not None else None
+    output_tokens = usage.output_tokens if usage is not None else None
+    total_tokens = (
+        input_tokens + output_tokens
+        if input_tokens is not None and output_tokens is not None
+        else None
+    )
+    return (
+        "Session Info",
+        "",
+        "File:",
+        session_file_label(store, session.session_id),
+        f"ID: {session.session_id}",
+        "",
+        "Messages",
+        f"Total: {stats.total}",
+        f"User: {stats.user}",
+        f"Assistant: {stats.assistant}",
+        f"Tools: {stats.tool_calls} calls, {stats.tool_results} results",
+        "",
+        "Tokens",
+        f"Input: {_format_count(input_tokens)}",
+        f"Output: {_format_count(output_tokens)}",
+        f"Total: {_format_count(total_tokens)}",
+        "",
+        "Cost",
+        f"Total: {_format_cost(usage)}",
+    )
+
+
+def session_message_stats(session: SessionRecord) -> SessionMessageStats:
+    """Count persisted messages and tool activity for session info."""
+    return SessionMessageStats(
+        total=len(session.messages),
+        user=sum(message.role == "user" for message in session.messages),
+        assistant=sum(
+            message.role == "assistant" for message in session.messages
+        ),
+        tool_calls=sum(
+            message.tool_call is not None for message in session.messages
+        ),
+        tool_results=sum(message.role == "tool" for message in session.messages),
+    )
+
+
+def merge_usage(total: Usage | None, added: Usage | None) -> Usage | None:
+    """Accumulate usage values across turns for the active host session."""
+    if total is None:
+        return added
+    if added is None:
+        return total
+
+    def add_optional(left: int | None, right: int | None) -> int | None:
+        if left is None:
+            return right
+        if right is None:
+            return left
+        return left + right
+
+    currencies = {
+        currency
+        for currency in (total.currency, added.currency)
+        if currency
+    }
+    currency = total.currency if total.currency == added.currency else None
+    cost: float | None
+    if total.cost is not None and added.cost is not None and len(currencies) <= 1:
+        cost = total.cost + added.cost
+    elif total.cost is None:
+        cost = added.cost
+    elif added.cost is None:
+        cost = total.cost
+    else:
+        cost = None
+    return Usage(
+        input_tokens=add_optional(total.input_tokens, added.input_tokens),
+        output_tokens=add_optional(total.output_tokens, added.output_tokens),
+        cache_tokens=add_optional(total.cache_tokens, added.cache_tokens),
+        cost=cost,
+        currency=currency,
+    )
+
+
+def session_interaction_count(session: SessionRecord) -> int:
+    """Count user prompts recorded in a session."""
+    return sum(message.role == "user" for message in session.messages)
+
+
+def session_first_prompt(session: SessionRecord) -> str | None:
+    """Return the first user prompt recorded in a session."""
+    return next(
+        (
+            message.content.strip()
+            for message in session.messages
+            if message.role == "user" and message.content.strip()
+        ),
+        None,
+    )
+
+
+def format_session_metadata(
+    session: SessionRecord,
+    *,
+    delimiter: bool = True,
+    now: str | datetime | None = None,
+) -> str:
+    """Format interaction count and age for a session row."""
+    separator = " · " if delimiter else " "
+    return separator.join(
+        (
+            str(session_interaction_count(session)),
+            format_session_age(session.created_at, now=now),
+        )
+    )
+
+
+def format_session_age(
+    created_at: str | None,
+    *,
+    now: str | datetime | None = None,
+) -> str:
+    """Format a session timestamp as a compact relative age."""
+    if not created_at:
+        return "unknown"
+    try:
+        created = datetime.fromisoformat(created_at)
+        current = (
+            datetime.fromisoformat(now)
+            if isinstance(now, str)
+            else now
+        ) or datetime.now(timezone.utc)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        seconds = max(0.0, (current - created).total_seconds())
+    except (TypeError, ValueError):
+        return "unknown"
+    if seconds < 60:
+        return "now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    if seconds < 2592000:
+        return f"{int(seconds // 86400)}d"
+    if seconds < 31536000:
+        return f"{int(seconds // 2592000)}mo"
+    return f"{int(seconds // 31536000)}y"
+
+
+def format_session_summary(
+    session: SessionRecord,
+    *,
+    delimiter: bool = True,
+    now: str | datetime | None = None,
+) -> str:
+    """Format the compact prompt, interaction, and age session row."""
+    prompt = session_first_prompt(session) or "(no prompt)"
+    prompt = " ".join(prompt.split())
+    if len(prompt) > 72:
+        prompt = prompt[:69].rstrip() + "..."
+    separator = " · " if delimiter else " "
+    return (
+        f"{prompt}{separator}"
+        f"{format_session_metadata(session, delimiter=delimiter, now=now)}"
+    )
+
+
 class SessionStore(Protocol):
     def create(
         self,
@@ -38,6 +243,9 @@ class SessionStore(Protocol):
 
     def append(self, session_id: str, message: AgentMessage) -> None:
         """Append one provider-neutral message to a session."""
+
+    def delete(self, session_id: str) -> None:
+        """Delete a session that has no durable conversation messages."""
 
     def load(self, session_id: str) -> SessionRecord:
         """Load one session by ID."""
@@ -111,6 +319,24 @@ def create_session(
     return store.create(**keyword_arguments)
 
 
+def discard_empty_session(store: SessionStore, session_id: str) -> bool:
+    """Delete a session when its durable record contains no user prompts."""
+    try:
+        record = store.load(session_id)
+    except (OSError, SessionStoreError):
+        return False
+    if session_interaction_count(record) != 0:
+        return False
+    delete = getattr(store, "delete", None)
+    if not callable(delete):
+        return False
+    try:
+        delete(session_id)
+    except (OSError, SessionStoreError):
+        return False
+    return True
+
+
 class JsonlSessionStore:
     """Store each conversation as a separate append-only JSONL file."""
 
@@ -164,6 +390,15 @@ class JsonlSessionStore:
         }
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+    def delete(self, session_id: str) -> None:
+        path = self._path_for(session_id)
+        try:
+            path.unlink()
+        except FileNotFoundError as error:
+            raise SessionStoreError(
+                f"session '{session_id}' does not exist"
+            ) from error
 
     def load(self, session_id: str) -> SessionRecord:
         path = self._path_for(session_id)
@@ -292,6 +527,13 @@ class MemorySessionStore:
             self.records[session_id].append(message)
         except KeyError as error:
             raise SessionStoreError(f"session '{session_id}' does not exist") from error
+
+    def delete(self, session_id: str) -> None:
+        if session_id not in self.records:
+            raise SessionStoreError(f"session '{session_id}' does not exist")
+        del self.records[session_id]
+        self.metadata.pop(session_id, None)
+        self.order[:] = [item for item in self.order if item != session_id]
 
     def load(self, session_id: str) -> SessionRecord:
         try:

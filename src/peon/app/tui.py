@@ -18,6 +18,7 @@ from peon.agent import (
     AgentContext,
     ModelProvider,
     ToolExecutionContext,
+    Usage,
 )
 from peon.ai import ProviderError
 from peon.extensions import (
@@ -71,7 +72,12 @@ from .sessions import (
     SessionStore,
     SessionStoreError,
     create_session,
+    discard_empty_session,
+    format_session_info,
+    format_session_summary,
+    merge_usage,
     select_session,
+    session_interaction_count,
 )
 
 InputFunction = Callable[[str], str]
@@ -131,6 +137,7 @@ class TuiSession:
     session_store: SessionStore = field(default_factory=MemorySessionStore)
     persisted_message_count: int = 0
     run_id: str = ""
+    usage: Usage | None = None
 
 
 def _terminal_rule() -> str:
@@ -311,14 +318,20 @@ def run_tui(
             error=error,
             config_store=active_config_store,
         )
+        discarded = _discard_empty_active_session(session)
         _print_footer(session, output=output)
-        _print_resume_command(session, output=output)
+        if not discarded:
+            _print_resume_command(session, output=output)
         return result
     except (EOFError, KeyboardInterrupt):
+        if session is not None:
+            discarded = _discard_empty_active_session(session)
+        else:
+            discarded = discard_empty_session(active_session_store, session_id)
         _print_resume_command(
-            session,
+            None if discarded else session,
             output=output,
-            session_id=session_id,
+            session_id=None if discarded else session_id,
             session_store=active_session_store,
         )
         print("\nGoodbye.", file=output)
@@ -370,8 +383,33 @@ def _load_starting_session(
 
 def _session_label(session: SessionRecord) -> str:
     name = f" · {session.name}" if session.name else ""
-    timestamp = session.created_at or "unknown time"
-    return f"{session.session_id} · {timestamp}{name}"
+    return f"{format_session_summary(session)}{name}"
+
+
+def _print_session_info(
+    session: TuiSession,
+    *,
+    output: TextIO,
+    error: TextIO,
+) -> None:
+    try:
+        record = session.session_store.load(session.session_id)
+    except (OSError, SessionStoreError) as caught:
+        print(f"peon: could not inspect session: {caught}", file=error)
+        return
+    messages = tuple(
+        conversation_messages_without_resource_prompt(
+            session.context.messages,
+            session.resources,
+        )
+    )
+    record = replace(record, messages=messages)
+    for line in format_session_info(
+        record,
+        store=session.session_store,
+        usage=session.usage,
+    ):
+        print(line, file=output)
 
 
 def _select_session_for_tui(
@@ -381,6 +419,8 @@ def _select_session_for_tui(
     input_fn: InputFunction,
     output: TextIO,
     error: TextIO,
+    delimiter: bool = True,
+    current_session_id: str | None = None,
 ) -> SessionRecord | None:
     if argument:
         try:
@@ -389,7 +429,12 @@ def _select_session_for_tui(
             print(f"peon: could not open saved session: {caught}", file=error)
             return None
     try:
-        sessions = store.list_sessions()
+        sessions = tuple(
+            saved
+            for saved in store.list_sessions()
+            if session_interaction_count(saved) > 0
+            and saved.session_id != current_session_id
+        )
     except (OSError, SessionStoreError) as caught:
         print(f"peon: could not list saved sessions: {caught}", file=error)
         return None
@@ -398,7 +443,11 @@ def _select_session_for_tui(
         return None
     print("Saved sessions:", file=output)
     for index, saved in enumerate(sessions, 1):
-        print(f"  {index}. {_session_label(saved)}", file=output)
+        print(
+            f"  {index}. {format_session_summary(saved, delimiter=delimiter)}"
+            + (f" · {saved.name}" if saved.name else ""),
+            file=output,
+        )
     selection = input_fn("Session (blank to cancel): ").strip()
     if not selection:
         print("Session selection cancelled.", file=output)
@@ -413,6 +462,11 @@ def _select_session_for_tui(
 
 
 def _open_session(session: TuiSession, selected: SessionRecord) -> TuiSession:
+    if (
+        selected.session_id != session.session_id
+        and not any(message.role == "user" for message in session.context.messages)
+    ):
+        discard_empty_session(session.session_store, session.session_id)
     context = AgentContext(messages=list(selected.messages))
     if session.resources is not None:
         apply_resource_prompt(context, session.resources)
@@ -421,6 +475,7 @@ def _open_session(session: TuiSession, selected: SessionRecord) -> TuiSession:
         context=context,
         session_id=selected.session_id,
         persisted_message_count=len(context.messages),
+        usage=None,
     )
 
 
@@ -450,6 +505,7 @@ def _fork_session(
         context=context,
         session_id=created.session_id,
         persisted_message_count=len(context.messages),
+        usage=None,
     )
 
 
@@ -468,6 +524,12 @@ def _print_resume_command(
             f"Resume with: peon --session {session_id}",
             file=output,
         )
+
+
+def _discard_empty_active_session(session: TuiSession) -> bool:
+    if any(message.role == "user" for message in session.context.messages):
+        return False
+    return discard_empty_session(session.session_store, session.session_id)
 
 
 def _configure_session(
@@ -1264,6 +1326,7 @@ def _conversation_loop(
         )
         session.run_id = coding_session.run_id
         response = coding_session.prompt(task)
+        session.usage = merge_usage(session.usage, response.usage)
         if response.status != "success":
             print(
                 f"peon: {response.error or 'task failed'}",
@@ -1429,6 +1492,8 @@ def _handle_command(
                 print(f"- {tool.name} ({state}): {tool.description}", file=output)
         return session, False
     if definition.id == "new":
+        if not any(message.role == "user" for message in session.context.messages):
+            discard_empty_session(session.session_store, session.session_id)
         try:
             created = create_session(
                 session.session_store,
@@ -1445,21 +1510,31 @@ def _handle_command(
             context=context,
             session_id=created.session_id,
             persisted_message_count=len(context.messages),
+            usage=None,
         )
         print("Conversation cleared.", file=output)
         return session, False
     if definition.id == "session":
+        _print_session_info(session, output=output, error=error)
+        return session, False
+    if definition.id == "resume":
+        ui_config = load_ui_config(config_store)
         selected_session = _select_session_for_tui(
             session.session_store,
             argument=invocation.argument,
             input_fn=input_fn,
             output=output,
             error=error,
+            delimiter=ui_config.session_list_delimiter,
+            current_session_id=session.session_id,
         )
         if selected_session is None:
             return session, False
         session = _open_session(session, selected_session)
-        print(f"Resumed session: {_session_label(selected_session)}", file=output)
+        print(
+            f"Resumed session: {format_session_summary(selected_session, delimiter=ui_config.session_list_delimiter)}",
+            file=output,
+        )
         return session, False
     if definition.id == "fork":
         name = invocation.argument or input_fn("Fork name (blank for unnamed): ").strip()

@@ -29,6 +29,7 @@ from peon.agent import (
     ModelProvider,
     ToolCall,
     ToolExecutionContext,
+    Usage,
 )
 from peon.ai import ProviderError
 from peon.extensions import ExtensionRegistry, discover_skill_names
@@ -71,7 +72,14 @@ from .sessions import (
     SessionStore,
     SessionStoreError,
     create_session,
+    discard_empty_session,
+    format_session_info,
+    format_session_metadata,
+    format_session_summary,
+    merge_usage,
     select_session,
+    session_first_prompt,
+    session_interaction_count,
 )
 from .coding_session import CodingSession, MessageEvent, SessionEvent, TurnResult
 from .resources import (
@@ -219,6 +227,7 @@ class _TranscriptBlock:
     text: str
     call_text: Text | None = None
     tool_call_id: str | None = None
+    rich_text: Text | None = None
 
 
 _PROVIDER_OPTIONS = (
@@ -492,6 +501,7 @@ class ChatMessage(TextArea):
         user_message_background: str = USER_BACKGROUND,
         assistant_message_color: str = "#e0e0e0",
         text_format: str = "normal",
+        system_text_format: str = "normal",
         tool_message_background: str = TOOL_BACKGROUND,
         tool_output_color: str = TOOL_OUTPUT_FOREGROUND,
         render_tool_markdown: bool = False,
@@ -516,6 +526,7 @@ class ChatMessage(TextArea):
         self.user_message_background = user_message_background
         self.assistant_message_color = assistant_message_color
         self.text_format = text_format
+        self.system_text_format = system_text_format
         self.tool_message_background = tool_message_background
         self.tool_output_color = tool_output_color
         self.render_tool_markdown = render_tool_markdown
@@ -542,6 +553,7 @@ class ChatMessage(TextArea):
             self._refresh_blocks()
             return
         plain_text = text.plain if isinstance(text, Text) else text
+        rich_text = text.copy() if isinstance(text, Text) else None
         if role == "tool" and self._blocks:
             previous = self._blocks[-1]
             if previous.role == "tool-call" and (
@@ -571,7 +583,12 @@ class ChatMessage(TextArea):
                 self._refresh_blocks()
                 return
         self._blocks.append(
-            _TranscriptBlock(role=role, text=plain_text, tool_call_id=tool_call_id)
+            _TranscriptBlock(
+                role=role,
+                text=plain_text,
+                tool_call_id=tool_call_id,
+                rich_text=rich_text,
+            )
         )
         self._refresh_blocks()
 
@@ -669,11 +686,14 @@ class ChatMessage(TextArea):
                     + ["tool-message-padding"]
                 )
             else:
-                block_lines = (
-                    [Text(line, end="") for line in text.split("\n") or [""]]
-                    if role == "user"
-                    else _render_markdown_lines(text)
-                )
+                if role == "system" and block.rich_text is not None:
+                    block_lines = list(block.rich_text.split("\n")) or [Text(end="")]
+                elif role in {"user", "system"}:
+                    block_lines = [
+                        Text(line, end="") for line in text.split("\n") or [""]
+                    ]
+                else:
+                    block_lines = _render_markdown_lines(text)
                 block_roles = [role] * len(block_lines)
             if role in {"user", "assistant"}:
                 block_lines = (
@@ -733,7 +753,17 @@ class ChatMessage(TextArea):
             )
         elif role == "assistant":
             line.stylize(Style(color=self.assistant_message_color))
-        elif role in {"system", "thinking"}:
+        elif role == "system":
+            if not line.spans:
+                line.stylize(Style(color=self.THINKING_FOREGROUND))
+            if self.system_text_format != "normal":
+                line.stylize(
+                    Style(
+                        bold=self.system_text_format == "bold",
+                        italic=self.system_text_format == "italic",
+                    )
+                )
+        elif role == "thinking":
             line.stylize(Style(color=self.THINKING_FOREGROUND, italic=True))
         elif role in {
             "tool-message-call",
@@ -812,9 +842,14 @@ class ChatMessage(TextArea):
         content = strip.crop(0, content_width)
         if role_style is not None:
             content = Strip(
-                Segment.apply_style(content, post_style=role_style),
+                Segment.apply_style(content, style=role_style),
                 cell_length=content.cell_length,
             )
+        selection_start, selection_end = sorted(self.selection)
+        line_selected = (
+            selection_start != selection_end
+            and selection_start[0] <= line_index <= selection_end[0]
+        )
         padded_roles = {
             "user",
             "assistant",
@@ -861,6 +896,20 @@ class ChatMessage(TextArea):
             )
         else:
             strip = content
+        if line_selected:
+            if not self.document[line_index]:
+                strip = Strip.blank(
+                    strip.cell_length,
+                    Style(color="#000000", bgcolor="#ffffff"),
+                )
+            else:
+                strip = Strip(
+                    Segment.apply_style(
+                        strip,
+                        post_style=Style(color="#000000", bgcolor="#ffffff"),
+                    ),
+                    cell_length=strip.cell_length,
+                )
         return strip
 
     def _snap_selection_to_lines(self, selection: Selection) -> Selection:
@@ -893,8 +942,13 @@ class ChatMessage(TextArea):
         text = self.selected_text
         if text:
             cast(TextualPeonApp, self.app).copy_to_clipboard(text)
+        cast(TextualPeonApp, self.app).query_one("#prompt", PeonInput).focus()
         event.stop()
         event.prevent_default()
+
+    async def _on_mouse_up(self, event: MouseUp) -> None:
+        await super()._on_mouse_up(event)
+        cast(TextualPeonApp, self.app).query_one("#prompt", PeonInput).focus()
 
     def on_key(self, event: Key) -> None:
         app = cast(TextualPeonApp, self.app)
@@ -957,12 +1011,6 @@ class TextualPeonApp(App[int]):
     CSS = """
     Screen {
         layout: vertical;
-    }
-
-    #startup {
-        height: auto;
-        padding: 1 2 0 2;
-        color: #8bd5ff;
     }
 
     #conversation {
@@ -1104,6 +1152,7 @@ class TextualPeonApp(App[int]):
         self.resources = resources
         self.session_id = ""
         self.run_id = ""
+        self.session_usage: Usage | None = None
         self.persisted_message_count = 0
         discovered_skill_names = (
             tuple(skill.name for skill in resources.skills)
@@ -1167,10 +1216,6 @@ class TextualPeonApp(App[int]):
         self.coding_session: CodingSession | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static(
-            _render_startup(self.resources),
-            id="startup",
-        )
         with VerticalScroll(id="conversation"):
             yield ChatMessage(
                 id="transcript",
@@ -1184,6 +1229,7 @@ class TextualPeonApp(App[int]):
                 tool_output_color=self.ui_config.tool_output_color,
                 render_tool_markdown=self.ui_config.render_tool_markdown,
                 text_format=self.ui_config.text_format,
+                system_text_format=self.ui_config.system_text_format,
             )
         yield ChoiceSearchInput(placeholder="> ", id="choice-search")
         yield Static("", id="setup-label")
@@ -1246,9 +1292,13 @@ class TextualPeonApp(App[int]):
             if self.resources is not None:
                 apply_resource_prompt(self.context, self.resources)
             self.persisted_message_count = len(self.context.messages)
-        transcript = self.query_one("#transcript", ChatMessage)
+        self._append_startup_message()
         for message in self.context.messages:
             self._append_context_message(message)
+
+    def _append_startup_message(self) -> None:
+        transcript = self.query_one("#transcript", ChatMessage)
+        transcript.append_message(_render_startup(self.resources), role="system")
 
     def _append_context_message(self, message: object) -> None:
         if not hasattr(message, "role"):
@@ -1297,6 +1347,7 @@ class TextualPeonApp(App[int]):
         transcript.tool_output_color = self.ui_config.tool_output_color
         transcript.set_tool_markdown(self.ui_config.render_tool_markdown)
         transcript.text_format = self.ui_config.text_format
+        transcript.system_text_format = self.ui_config.system_text_format
         transcript.set_thinking_visible(not self.ui_config.hide_thinking)
         transcript.set_tools_expanded(self.tools_expanded)
         transcript.refresh()
@@ -1549,10 +1600,14 @@ class TextualPeonApp(App[int]):
                 rendered.append("\n")
             selected = index == self.choice_selected_index
             rendered.append("> " if selected else "  ", style="dim")
-            rendered.append(
-                label,
-                style=self._selected_command_style() if selected else "bold",
-            )
+            value = self.choice_values[index]
+            if self.choice_kind == "session" and isinstance(value, SessionRecord):
+                rendered.append(self._render_session_choice(value, selected))
+            else:
+                rendered.append(
+                    label,
+                    style=self._selected_command_style() if selected else "bold",
+                )
         self.query_one("#choices", Static).update(rendered)
         count = (
             f"({self.choice_selected_index + 1}/{len(self.choice_values)})"
@@ -1563,6 +1618,43 @@ class TextualPeonApp(App[int]):
         self.query_one("#choice-hint", Static).update(
             "Type to search · Enter/Space to change · Esc back · hold Esc close"
         )
+
+    def _render_session_choice(
+        self,
+        session: SessionRecord,
+        selected: bool,
+    ) -> Text:
+        title = " ".join((session_first_prompt(session) or "(no prompt)").split())
+        metadata = format_session_metadata(
+            session,
+            delimiter=self.ui_config.session_list_delimiter,
+        )
+        choices = self.query_one("#choices", Static)
+        width = choices.size.width
+        if width <= 0:
+            # Reserve the conversation and choices horizontal insets before
+            # the first layout pass reports the widget width.
+            width = max(1, self.size.width - 4)
+        content_width = max(1, width - 2 - 2)
+        title_width = max(1, content_width - len(metadata) - 1)
+        if len(title) > title_width:
+            title = (
+                title[: max(0, title_width - 3)].rstrip() + "..."
+                if title_width > 3
+                else "." * title_width
+            )
+        gap = max(1, content_width - len(title) - len(metadata))
+        row = Text(end="")
+        row.append(
+            title,
+            style=self._selected_command_style() if selected else "bold",
+        )
+        row.append(" " * gap)
+        row.append(
+            metadata,
+            style=self._selected_command_style() if selected else "dim",
+        )
+        return row
 
     def _selected_command_style(self) -> Style:
         return Style(
@@ -1690,8 +1782,11 @@ class TextualPeonApp(App[int]):
                 self._begin_quit_confirmation()
 
     def _quit_with_resume(self) -> None:
+        discarded = False
+        if not any(message.role == "user" for message in self.context.messages):
+            discarded = discard_empty_session(self.session_store, self.session_id)
         resume_command = self._resume_command()
-        if resume_command is not None:
+        if resume_command is not None and not discarded:
             self._write(resume_command)
         self.exit(0)
 
@@ -1849,6 +1944,7 @@ class TextualPeonApp(App[int]):
         if event.state == WorkerState.SUCCESS:
             result = event.worker.result
             if isinstance(result, TurnResult):
+                self.session_usage = merge_usage(self.session_usage, result.usage)
                 if result.status == "cancelled":
                     self._write("Task cancelled.", role="system")
                 elif result.status == "error":
@@ -2365,8 +2461,33 @@ class TextualPeonApp(App[int]):
 
     def _session_label(self, session: SessionRecord) -> str:
         name = f" · {session.name}" if session.name else ""
-        timestamp = session.created_at or "unknown time"
-        return f"{session.session_id} · {timestamp}{name}"
+        return (
+            f"{format_session_summary(session, delimiter=self.ui_config.session_list_delimiter)}"
+            f"{name}"
+        )
+
+    def _show_session_info(self) -> None:
+        try:
+            record = self.session_store.load(self.session_id)
+        except (OSError, SessionStoreError) as caught:
+            self._write(f"Could not inspect session: {caught}")
+            return
+        messages = tuple(
+            conversation_messages_without_resource_prompt(
+                self.context.messages,
+                self.resources,
+            )
+        )
+        record = replace(record, messages=messages)
+        self._write(
+            "\n".join(
+                format_session_info(
+                    record,
+                    store=self.session_store,
+                    usage=self.session_usage,
+                )
+            )
+        )
 
     def _show_session_picker(self, argument: str) -> None:
         if argument:
@@ -2378,7 +2499,12 @@ class TextualPeonApp(App[int]):
             self._open_selected_session(selected)
             return
         try:
-            sessions = self.session_store.list_sessions()
+            sessions = tuple(
+                session
+                for session in self.session_store.list_sessions()
+                if session_interaction_count(session) > 0
+                and session.session_id != self.session_id
+            )
         except (OSError, SessionStoreError) as caught:
             self._write(f"Could not list saved sessions: {caught}")
             return
@@ -2395,13 +2521,20 @@ class TextualPeonApp(App[int]):
         )
 
     def _open_selected_session(self, selected: SessionRecord) -> None:
+        if (
+            selected.session_id != self.session_id
+            and not any(message.role == "user" for message in self.context.messages)
+        ):
+            discard_empty_session(self.session_store, self.session_id)
         self.session_id = selected.session_id
+        self.session_usage = None
         self.context = AgentContext(messages=list(selected.messages))
         if self.resources is not None:
             apply_resource_prompt(self.context, self.resources)
         self.persisted_message_count = len(self.context.messages)
         transcript = self.query_one("#transcript", ChatMessage)
         transcript.clear_transcript()
+        self._append_startup_message()
         for message in self.context.messages:
             self._append_context_message(message)
         self._write(f"Resumed session: {self._session_label(selected)}")
@@ -2426,6 +2559,7 @@ class TextualPeonApp(App[int]):
             self._write(f"Could not fork conversation: {caught}")
             return
         self.session_id = created.session_id
+        self.session_usage = None
         self.context = AgentContext(messages=list(messages))
         if self.resources is not None:
             apply_resource_prompt(self.context, self.resources)
@@ -2937,10 +3071,14 @@ class TextualPeonApp(App[int]):
         elif definition.id == "settings":
             self._show_settings()
         elif definition.id == "session":
+            self._show_session_info()
+        elif definition.id == "resume":
             self._show_session_picker(invocation.argument)
         elif definition.id == "fork":
             self._fork_current_session(invocation.argument)
         elif definition.id == "new":
+            if not any(message.role == "user" for message in self.context.messages):
+                discard_empty_session(self.session_store, self.session_id)
             try:
                 created = create_session(
                     self.session_store,
@@ -2950,11 +3088,13 @@ class TextualPeonApp(App[int]):
                 self._write(f"Could not start a new conversation: {caught}")
                 return
             self.session_id = created.session_id
+            self.session_usage = None
             self.context = AgentContext()
             if self.resources is not None:
                 apply_resource_prompt(self.context, self.resources)
             self.persisted_message_count = len(self.context.messages)
             self.query_one("#transcript", ChatMessage).clear_transcript()
+            self._append_startup_message()
             self._write("✓ New session started", role="success")
             self._set_status()
         elif definition.id == "tools":

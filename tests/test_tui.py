@@ -2,13 +2,20 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from io import StringIO
 
-from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
+from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition, Usage
 from peon.app import JsonProviderConfigStore, ProviderConfig, UiConfig
 from peon.app import tui as tui_module
 from peon.app.coding_session import TurnResult
 from peon.app.resources import ResourceLoader
 from peon.app.tui import SlashCommandCompleter, run_tui
-from peon.app.sessions import JsonlSessionStore, MemorySessionStore
+from peon.app.sessions import (
+    JsonlSessionStore,
+    MemorySessionStore,
+    format_session_age,
+    format_session_info,
+    format_session_summary,
+    merge_usage,
+)
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
@@ -441,7 +448,7 @@ def test_tui_session_picker_can_be_cancelled() -> None:
     output = StringIO()
     result = run_tui(
         provider_factory=ProviderFactory(),
-        input_fn=scripted_input(["/session", "", "task", "/quit"]),
+        input_fn=scripted_input(["/resume", "", "task", "/quit"]),
         secret_input=scripted_secret([]),
         output=output,
         config_store=MemoryConfigStore(
@@ -455,7 +462,83 @@ def test_tui_session_picker_can_be_cancelled() -> None:
     )
 
     assert result == 0
-    assert "Session selection cancelled." in output.getvalue()
+    assert "No saved sessions." in output.getvalue()
+
+
+def test_tui_session_shows_info_and_resume_opens_picker() -> None:
+    config = ProviderConfig(
+        name="openai-compatible",
+        model="first-model",
+        base_url="https://example.test/v1",
+    )
+    store = MemorySessionStore()
+    saved = store.create(name="release")
+    store.append(saved.session_id, AgentMessage(role="user", content="old task"))
+    other = store.create(name="other")
+    store.append(other.session_id, AgentMessage(role="user", content="other task"))
+    output = StringIO()
+
+    result = run_tui(
+        provider_factory=ProviderFactory(),
+        input_fn=scripted_input(
+            ["/resume release", "/ess", "/resume", "", "task", "/quit"]
+        ),
+        secret_input=scripted_secret([]),
+        output=output,
+        config_store=MemoryConfigStore(config),
+        session_store=store,
+    )
+
+    assert result == 0
+    rendered = output.getvalue()
+    assert "Session Info" in rendered
+    assert f"ID: {saved.session_id}" in rendered
+    assert "Messages" in rendered
+    assert "Total: 1" in rendered
+    assert "User: 1" in rendered
+    assert "Assistant: 0" in rendered
+    assert "Tools: 0 calls, 0 results" in rendered
+    assert "Tokens" in rendered
+    assert "Input: n/a" in rendered
+    assert "Cost" in rendered
+    assert "Saved sessions:" in rendered
+
+
+def test_session_summary_includes_prompt_count_and_relative_age() -> None:
+    store = MemorySessionStore()
+    saved = store.create(name="release")
+    store.append(saved.session_id, AgentMessage(role="user", content="old task"))
+    store.append(saved.session_id, AgentMessage(role="assistant", content="answer"))
+
+    summary = format_session_summary(store.load(saved.session_id), now=saved.created_at)
+
+    assert "old task" in summary
+    assert "1" in summary
+    assert format_session_age(saved.created_at, now=saved.created_at) == "now"
+    assert format_session_summary(store.load(saved.session_id), delimiter=False) == (
+        "old task 1 now"
+    )
+
+
+def test_session_info_formats_usage_totals_like_pi() -> None:
+    store = MemorySessionStore()
+    saved = store.create()
+    store.append(saved.session_id, AgentMessage(role="user", content="task"))
+    usage = merge_usage(
+        Usage(input_tokens=7_418, output_tokens=100, cost=0.005, currency="USD"),
+        Usage(input_tokens=0, output_tokens=11, cost=0.001, currency="USD"),
+    )
+
+    lines = format_session_info(
+        store.load(saved.session_id),
+        store=store,
+        usage=usage,
+    )
+
+    assert "Input: 7,418" in lines
+    assert "Output: 111" in lines
+    assert "Total: 7,529" in lines
+    assert "Total: $0.006" in lines
 
 
 def test_tui_can_exit_before_session_configuration(tmp_path) -> None:
@@ -481,8 +564,8 @@ def test_tui_can_exit_before_session_configuration(tmp_path) -> None:
 
     assert result == 0
     sessions = session_store.list_sessions()
-    assert len(sessions) == 1
-    assert f"Resume with: peon --session {sessions[0].session_id}" in output.getvalue()
+    assert sessions == ()
+    assert "Goodbye." in output.getvalue()
     assert "Goodbye." in output.getvalue()
 
 
@@ -590,7 +673,7 @@ def test_tui_resume_reapplies_current_resource_prompt(tmp_path) -> None:
 
     result = run_tui(
         provider_factory=factory,
-        input_fn=scripted_input(["/session release", "new task", "/quit"]),
+        input_fn=scripted_input(["/resume release", "new task", "/quit"]),
         secret_input=scripted_secret([]),
         output=StringIO(),
         config_store=config_store,
@@ -739,7 +822,7 @@ def test_tui_resumes_sessions_and_new_preserves_previous_conversation() -> None:
         AgentMessage(role="assistant", content="first response"),
         AgentMessage(role="user", content="second task"),
     )
-    assert len(session_store.order) == 2
+    assert len(session_store.order) == 1
     assert session_store.load(first_session.session_id).messages == (
         *first_session.messages,
         AgentMessage(role="user", content="second task"),
@@ -747,8 +830,8 @@ def test_tui_resumes_sessions_and_new_preserves_previous_conversation() -> None:
     )
     latest = session_store.load_latest()
     assert latest is not None
-    assert latest.session_id != first_session.session_id
-    assert latest.messages == ()
+    assert latest.session_id == first_session.session_id
+    assert latest.messages == session_store.load(first_session.session_id).messages
 
 
 def test_tui_resumes_jsonl_session_after_process_restart(tmp_path) -> None:

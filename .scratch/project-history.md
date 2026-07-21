@@ -1,6 +1,6 @@
 # Peon Project History and Source of Truth
 
-Updated: 2026-07-20
+Updated: 2026-07-21
 
 ## Purpose
 
@@ -12,7 +12,8 @@ contracts, user-visible commands, current capabilities, or planned Pi parity.
 Keep current truth separate from historical decisions. Verify implementation
 claims against source and tests before changing status. Do not create another
 scratch spec, ticket set, command inventory, or research note; add concise,
-deduplicated findings here.
+deduplicated findings here. The former host-neutral session ticket files were
+consolidated into this document on 2026-07-21.
 
 ## Product Direction
 
@@ -120,8 +121,12 @@ app -> extensions -> agent
 - `--continue` loads newest valid session for current working directory.
 - `--session` accepts ID, unique name, or explicit JSONL path.
 - `--session-name` names a new session; `--no-session` is ephemeral.
-- `/new`, `/session`, and `/fork [name]` preserve prior records and parent
-  metadata. Durable exit prints a resume command.
+- `/new`, `/session`, `/resume`, and `/fork [name]` preserve prior records and
+  parent metadata. `/session` reports active-session details; `/resume` opens
+  current-project history. Session rows show first prompt, user interaction
+  count, and relative age; empty sessions are discarded on exit and new-session
+  transitions. The `session-list-delimiter` setting switches dot delimiters to
+  single spaces. Durable exit prints a resume command for non-empty sessions.
 - Print mode is ephemeral unless durable session flags are explicit.
 
 ### Tools and extensions
@@ -150,9 +155,11 @@ app -> extensions -> agent
 - Startup resource display follows Pi's compact layout: context filenames first,
   then comma-separated skill names; YAML folded skill descriptions and optional
   front-matter fields load without false malformed diagnostics.
-- Startup headings use Pi-like section colors and spacing; `Ctrl+C` clears the
-  composer, while `!command` runs `bash` and sends output to the model and
-  `!!command` keeps output out of model context.
+- Startup headings use Pi-like section colors and spacing and are inserted as
+  the first selectable transcript block, so later output pushes them upward;
+  system text is normal by default with optional `system-text-format` styling.
+  `Ctrl+C` clears the composer, while `!command` runs `bash` and sends output
+  to the model and `!!command` keeps output out of model context.
 - Effective prompt includes compact skill metadata, not every full body.
   `/skill:<name>` progressively injects a selected body once.
 - Prompt assembly occurs at provider boundary; portable agent loop does not
@@ -161,14 +168,17 @@ app -> extensions -> agent
 
 ### Textual interaction
 
-- Single selectable transcript, fixed composer, Pi-like low-chrome layout.
+- Single selectable transcript, fixed composer, Pi-like low-chrome layout;
+  right-click copy returns focus to the composer and transcript selection uses
+  a high-contrast black-on-white highlight.
 - Assistant Markdown, separate thinking blocks, role-aware colors/padding,
   collapsed tool output, optional tool Markdown, and restored-session blocks.
 - Slash palette supports ranked search, aliases, keyboard selection, Tab
   completion, picker search, retained nested settings, and Escape backtracking.
 - `Ctrl+C` confirms exit, `Ctrl+D` exits, `Ctrl+T` toggles thinking,
   `Shift+Tab` cycles reasoning, and `Ctrl+O` toggles tool output by default.
-- Settings persist UI spacing/colors/text style, provider mappings, reasoning,
+- Settings persist UI spacing/colors/text style, optional system text style,
+  provider mappings, reasoning,
   thinking visibility, tool rendering/availability, and shortcuts.
 - Footer shows cwd, provider/model, context count, and reasoning. Token usage is
   available through the host-neutral turn result and JSON event contract;
@@ -191,7 +201,8 @@ Available canonical commands:
 /skills     list skills
 /logout     remove selected provider
 /quit       exit (`/exit`, `/close`, `/q` aliases)
-/session    list/resume current-project conversations
+/session    show active session information
+/resume     resume a saved current-project conversation
 /fork       fork current conversation
 ```
 
@@ -312,8 +323,9 @@ uv run mypy src/peon
 Run focused tests beside each changed boundary before full suite. Dated
 2026-07-20 evidence, not a permanent expected count: `uv run pytest
 --collect-only -q` collected 240 tests; `uv run pytest
-tests/test_textual_tui.py --collect-only -q` collected 44. Full suite completed
-without failures before documentation-only housekeeping.
+tests/test_textual_tui.py --collect-only -q` collected 44. Later UX validation
+on 2026-07-21 passed `uv run pytest -q tests` with 302 tests and
+`uv run mypy src/peon` with no issues.
 
 ### Durable renderer gotchas
 
@@ -340,6 +352,28 @@ These corrections are permanent unless implementation changes:
 - `/models` is an alias of `/model`; candidate vocabulary is not always alias.
 - Ticket 20 was research only and proves no runtime feature by itself.
 - Remote/tracker blockers from old planning notes no longer apply.
+
+### Ticket 01: print mode through `CodingSession`
+
+- Routed a complete print-mode turn through the host-neutral session boundary,
+  preserving task and piped-input output, resource application, tool execution,
+  persistence modes, cancellation, and structured outcomes.
+- Kept provider, tool, store, event, clock, and ID dependencies injectable;
+  the provider-neutral agent loop remains independent of application hosts.
+- Completed in `b4c4435`. Focused session/print compatibility tests and the
+  subsequent full suite passed.
+
+### Ticket 02: JSON events from session lifecycle
+
+- Made JSON mode serialize the typed lifecycle events emitted by
+  `CodingSession`, removing duplicate execution, resource, tool, and
+  persistence orchestration while preserving event meaning and ordering.
+- Added deterministic schema, session, run, turn, and tool-call correlation;
+  every started turn ends with exactly one success, error, or cancellation
+  outcome.
+- Completed in `f7eda87` (`feat(cli): serialize events from session lifecycle`).
+  Focused validation passed with `44` tests, the full suite passed with `260`
+  tests, and mypy reported no issues in `24` source files.
 
 ### Ticket 03: normalized provider usage
 
@@ -436,6 +470,25 @@ These corrections are permanent unless implementation changes:
 - Preserved the linear session format and existing conversation files; no
   migration is required for the 0.2.0 release.
 - Final validation passed: `296` tests and `mypy src/peon` with no issues.
+
+### Pi parity UX follow-up
+
+- Split `/session` into active-session information and `/resume` into the
+  saved-session picker. Session rows now show the first prompt, interaction
+  count, relative age, configurable delimiters, and right-aligned metadata;
+  empty sessions are removed on exit and new-session transitions.
+- Moved version, commands, context, and skills from a pinned startup widget
+  into the selectable transcript. Startup Rich colors and spacing are
+  preserved, while system text is normal by default with optional formatting.
+- Right-click copy and mouse-up after selection return focus to the composer.
+  Transcript selection is rendered as a full-row black-on-white highlight,
+  including blank selected rows, after role and padding styles are composed.
+- Remaining minor flicker and highlight-tracing behavior is known and
+  non-blocking; it is intentionally deferred for a later session.
+- Latest validation: focused Textual interaction tests passed (`5` tests), the
+  Textual/resource/bash suite passed (`53` tests), the full suite passed
+  (`302` tests), mypy passed for `28` source files, and `git diff --check`
+  reported no findings.
 
 ## Primary Upstream Sources
 

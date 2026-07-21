@@ -107,7 +107,7 @@ def test_textual_resume_reapplies_resource_prompt(tmp_path: Path) -> None:
 
         async with app.run_test() as pilot:
             await pilot.pause()
-            app._handle_command("/session release")
+            app._handle_command("/resume release")
             assert app.context.messages == [
                 AgentMessage(role="system", content="current project rules"),
                 AgentMessage(role="user", content="old task"),

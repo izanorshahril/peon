@@ -64,8 +64,11 @@ Set `PEON_SESSION_DIR` to override location.
 ```
 
 Print mode is ephemeral unless durable session flags are explicit. `/new`
-starts a fresh session, `/session` opens current-project history, and
-`/fork [name]` creates a child with parent metadata.
+starts a fresh session, `/session` shows the active session details, `/resume`
+opens current-project history, and `/fork [name]` creates a child with parent
+metadata. Session history rows show the first prompt, interaction count, and
+relative age. Set the `session-list-delimiter` general setting to `false` for
+single-space Pi-style rows instead of dot delimiters.
 
 ## Tools and Resources
 
@@ -85,7 +88,8 @@ resource prompts are not persisted as conversation messages.
 Type `/help` for current available and reserved commands. Main workflows cover
 new/resumed/forked sessions, model/provider switching, settings, reasoning,
 tools, skills, and logout. Provider-field commands remain hidden compatibility
-aliases managed through `/settings`. Textual shortcuts default to `Ctrl+T` for
+aliases managed through `/settings`. Use the `system-text-format` UI setting to
+choose normal, bold, or italic startup/system text. Textual shortcuts default to `Ctrl+T` for
 thinking visibility, `Shift+Tab` for reasoning, and `Ctrl+O` for tool output.
 
 ## Scope

@@ -15,6 +15,7 @@ from peon.app.config import (
     update_general_setting,
     update_shortcut_setting,
     update_tool_setting,
+    update_ui_setting,
 )
 from peon.agent import ToolDefinition, ToolExecutionContext
 
@@ -148,6 +149,7 @@ def test_json_store_round_trips_expanded_provider_and_ui_settings(tmp_path) -> N
         text_format="italic",
         hide_thinking=True,
         render_tool_markdown=True,
+        session_list_delimiter=False,
         reasoning_shortcut="alt+r",
         thinking_shortcut="alt+t",
         tools_shortcut="alt+o",
@@ -227,10 +229,18 @@ def test_general_and_shortcut_settings_validate_and_update() -> None:
 
     hidden = update_general_setting(config, "hide-thinking", "true")
     markdown = update_general_setting(hidden, "render-tool-markdown", "true")
+    system_italic = update_ui_setting(config, "system-text-format", "italic")
+    no_delimiters = update_general_setting(
+        markdown,
+        "session-list-delimiter",
+        "false",
+    )
     updated = update_shortcut_setting(markdown, "tools", "Alt+O")
 
     assert updated.hide_thinking is True
     assert updated.render_tool_markdown is True
+    assert system_italic.system_text_format == "italic"
+    assert no_delimiters.session_list_delimiter is False
     assert updated.tools_shortcut == "alt+o"
 
     with pytest.raises(ValueError, match="reserved"):

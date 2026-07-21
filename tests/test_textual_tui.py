@@ -135,20 +135,48 @@ def test_textual_startup_styles_sections_and_spaces_context() -> None:
 
     async def exercise() -> None:
         async with app.run_test():
-            startup = app.query_one("#startup", Static).renderable
-            assert startup.plain.index("\n\n[Context]") >= 0
-            assert "[Skills]\n  notes" in startup.plain
-            context_offset = startup.plain.index("[Context]")
-            skills_offset = startup.plain.index("[Skills]")
+            transcript = app.query_one("#transcript", ChatMessage)
+            assert "peon v0.2.0" in transcript.text
+            assert "\n\n[Context]" in transcript.text
+            assert "[Skills]\n  notes" in transcript.text
+            assert "#startup" not in {widget.id for widget in app.query("Static")}
+            peon_line = transcript.get_line(0)
             assert any(
-                span.start <= context_offset < span.end
-                and str(span.style) == "#f2c94c"
-                for span in startup.spans
+                span.style is not None
+                and str(span.style) == "#8bd5ff"
+                for span in peon_line.spans
             )
+            context_index = next(
+                index
+                for index, line in enumerate(transcript._styled_lines)
+                if line.plain == "[Context]"
+            )
+            context_line = transcript.get_line(context_index)
             assert any(
-                span.start <= skills_offset < span.end
+                span.style is not None
                 and str(span.style) == "#f2c94c"
-                for span in startup.spans
+                for span in context_line.spans
+            )
+
+            transcript.selection = Selection((0, 0), (0, len(peon_line)))
+            startup_rows = [
+                transcript.render_line(row)
+                for row in range(transcript.size.height)
+                if "peon v0.2.0" in "".join(
+                    segment.text for segment in transcript.render_line(row)
+                )
+            ]
+            assert any(
+                segment.style is not None
+                and segment.style.color == Color.parse("#000000")
+                and segment.style.bgcolor == Color.parse("#ffffff")
+                for row in startup_rows
+                for segment in row
+            )
+
+            transcript.append_message("later output", role="assistant")
+            assert transcript.text.index("peon v0.2.0") < transcript.text.index(
+                "later output"
             )
 
     asyncio.run(exercise())
@@ -282,8 +310,8 @@ def test_textual_mounts_stable_layout_and_command_suggestions() -> None:
             app._write("copy this text", role="user")
             message = app.query_one("#transcript", ChatMessage)
             assert message.read_only
-            assert message.text == "\ncopy this text\n"
-            assert message._line_roles == ["user", "user", "user"]
+            assert message.text.endswith("\ncopy this text\n")
+            assert message._line_roles[-3:] == ["user", "user", "user"]
             assert conversation.styles.align_vertical == "bottom"
             prompt = app.query_one("#prompt")
             prompt.value = "/mo"
@@ -369,7 +397,7 @@ def test_textual_picker_search_and_focus_loss_keep_selection_safe() -> None:
             await pilot.pause()
 
             assert app.choice_kind == "settings-ui"
-            assert str(app.query_one("#choice-count").renderable) == "(1/12)"
+            assert str(app.query_one("#choice-count").renderable) == "(1/13)"
             assert "Type to search" in str(app.query_one("#choice-hint").renderable)
             assert str(app.query_one("#choices").renderable).startswith("> User top spacing")
 
@@ -633,7 +661,14 @@ def test_textual_message_background_and_padding_fill_role_rows() -> None:
             app._write("hello", role="user")
             await pilot.pause()
             transcript = app.query_one("#transcript", ChatMessage)
-            row = transcript.render_line(0)
+            user_row = next(
+                row
+                for row in range(transcript.size.height)
+                if "hello" in "".join(
+                    segment.text for segment in transcript.render_line(row)
+                )
+            )
+            row = transcript.render_line(user_row)
             background = Color.parse(transcript.user_message_background)
             colored_cells = sum(
                 segment.cell_length
@@ -915,8 +950,8 @@ def test_textual_empty_transcript_uses_screen_background() -> None:
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             transcript = app.query_one("#transcript", ChatMessage)
-            assert not transcript.text
-            assert not transcript.display
+            assert "peon v0.2.0" in transcript.text
+            assert transcript.display
 
     asyncio.run(exercise())
 
@@ -940,14 +975,25 @@ def test_textual_right_click_copies_message_text() -> None:
             app._write("copy by right click", role="assistant")
             await pilot.pause()
             message = app.query_one("#transcript", ChatMessage)
-            message.selection = Selection((0, 0), (2, len("copy by right click")))
+            message_index = next(
+                index
+                for index, line in enumerate(message._styled_lines)
+                if "copy by right click" in line.plain
+            )
+            message.selection = Selection(
+                (message_index, 0),
+                (message_index, len("copy by right click")),
+            )
             await pilot.pause()
             await pilot._post_mouse_events(
                 [MouseDown],
                 widget=message,
                 button=3,
             )
-            assert copied == ["\ncopy by right click\n"]
+            assert copied == ["copy by right click"]
+            assert app.focused is app.query_one("#prompt")
+            await pilot.press("x")
+            assert app.query_one("#prompt").value == "x"
 
     asyncio.run(exercise())
 
@@ -1005,10 +1051,42 @@ def test_textual_selection_spans_messages_and_snaps_to_lines() -> None:
             app._write("hello peon", role="user")
             app._write("hello user", role="assistant")
             transcript = app.query_one("#transcript", ChatMessage)
-            transcript.selection = Selection((0, 3), (2, 4))
+            user_index = next(
+                index
+                for index, line in enumerate(transcript._styled_lines)
+                if line.plain == "hello peon"
+            )
+            assistant_index = next(
+                index
+                for index, line in enumerate(transcript._styled_lines)
+                if line.plain == "hello user"
+            )
+            transcript.selection = Selection(
+                (user_index, 3),
+                (assistant_index, 4),
+            )
             await pilot.pause()
-            assert transcript.selection == Selection((0, 0), (2, len("hello user")))
+            assert transcript.selection == Selection(
+                (user_index, 0),
+                (assistant_index, len("hello user")),
+            )
             assert transcript.selected_text == "hello peon\n\nhello user"
+            selected_rows = [
+                transcript.render_line(row)
+                for row in range(transcript.size.height)
+                if "hello peon" in "".join(
+                    segment.text for segment in transcript.render_line(row)
+                )
+            ]
+            assert selected_rows
+            assert all(
+                segment.style is not None
+                and segment.style.color == Color.parse("#000000")
+                and segment.style.bgcolor == Color.parse("#ffffff")
+                for row in selected_rows
+                for segment in row
+                if segment.cell_length
+            )
 
     asyncio.run(exercise())
 
@@ -1030,10 +1108,19 @@ def test_textual_renders_assistant_markdown() -> None:
             app._write("# Hello\n\n**bold** and `code`", role="assistant")
             transcript = app.query_one("#transcript", ChatMessage)
             await pilot.pause()
-            assert transcript.text == "\nHello\n\nbold and code\n"
-            assert transcript._styled_lines[1].plain == "Hello"
-            assert transcript._styled_lines[1].spans
-            assert transcript._styled_lines[3].spans
+            assert transcript.text.endswith("\nHello\n\nbold and code\n")
+            hello_index = next(
+                index
+                for index, line in enumerate(transcript._styled_lines)
+                if line.plain == "Hello"
+            )
+            code_index = next(
+                index
+                for index, line in enumerate(transcript._styled_lines)
+                if line.plain == "bold and code"
+            )
+            assert transcript._styled_lines[hello_index].spans
+            assert transcript._styled_lines[code_index].spans
 
     asyncio.run(exercise())
 
@@ -1056,7 +1143,12 @@ def test_textual_renders_response_immediately_after_user_message() -> None:
             app._write("response one", role="assistant")
             transcript = app.query_one("#transcript", ChatMessage)
             await pilot.pause()
-            rendered = transcript.render_line(5)
+            response_index = next(
+                index
+                for index, line in enumerate(transcript._styled_lines)
+                if "response one" in line.plain
+            )
+            rendered = transcript.render_line(response_index)
             assert "response one" in "".join(segment.text for segment in rendered)
 
     asyncio.run(exercise())
@@ -1213,10 +1305,13 @@ def test_textual_clear_shows_new_session_success_message() -> None:
             prompt.value = "/clear"
             await pilot.press("enter")
             transcript = app.query_one("#transcript", ChatMessage)
-            assert transcript.text == "✓ New session started"
-            assert transcript._line_roles == ["success"]
-            assert transcript._styled_lines[0].plain == "✓ New session started"
-            rendered = transcript.render_line(0)
+            assert "peon v0.2.0" in transcript.text
+            assert transcript.text.endswith("✓ New session started")
+            success_index = transcript._line_roles.index("success")
+            assert transcript._styled_lines[success_index].plain == (
+                "✓ New session started"
+            )
+            rendered = transcript.render_line(success_index)
             assert any(
                 segment.style is not None
                 and segment.style.color == Color.parse(ChatMessage.SUCCESS_FOREGROUND)
@@ -1249,34 +1344,41 @@ def test_textual_user_blocks_have_configurable_spacing_and_left_inset() -> None:
             transcript = app.query_one("#transcript", ChatMessage)
             await pilot.pause()
             assert transcript.styles.background == app.screen.styles.background
-            assert transcript.text == "\n\nhello\n\n\n\n\n\nanswer\n\n"
-            assert transcript._line_roles == [
-                "user",
-                "user",
-                "user",
-                "user",
-                "user",
-                "spacer",
-                "assistant",
-                "assistant",
-                "assistant",
-                "assistant",
-                "assistant",
-            ]
-            assert transcript.render_line(2).text.startswith("   ")
-            assert transcript.render_line(7).text.startswith("   ")
-            assert all(
-                segment.style is not None
-                and segment.style.bgcolor
-                == transcript.styles.background.rich_color
-                for segment in transcript.render_line(5)
-                if segment.cell_length
+            assert transcript.text.endswith("\n\nhello\n\n\n\n\n\nanswer\n\n")
+            hello_row = next(
+                row
+                for row in range(transcript.size.height)
+                if "hello" in "".join(
+                    segment.text for segment in transcript.render_line(row)
+                )
+            )
+            answer_row = next(
+                row
+                for row in range(transcript.size.height)
+                if "answer" in "".join(
+                    segment.text for segment in transcript.render_line(row)
+                )
+            )
+            assert transcript.render_line(hello_row).text.startswith("   ")
+            assert transcript.render_line(answer_row).text.startswith("   ")
+            background = transcript.styles.background.rich_color
+            assert any(
+                not "".join(
+                    segment.text for segment in transcript.render_line(row)
+                ).strip()
+                and all(
+                    segment.style is not None
+                    and segment.style.bgcolor == background
+                    for segment in transcript.render_line(row)
+                    if segment.cell_length
+                )
+                for row in range(hello_row + 1, answer_row)
             )
             assert all(
                 segment.style is not None
                 and segment.style.bgcolor
                 == transcript.styles.background.rich_color
-                for segment in transcript.render_line(7)
+                for segment in transcript.render_line(answer_row)
                 if segment.cell_length
             )
 
@@ -1357,11 +1459,11 @@ def test_textual_header_color_and_bottom_anchor() -> None:
         async with app.run_test(size=(100, 30)) as pilot:
             app._write("first output", role="assistant")
             await pilot.pause()
-            startup = app.query_one("#startup", Static)
-            assert startup.renderable.spans[0].start == 0
-            assert startup.renderable.spans[0].end == len("peon")
             conversation = app.query_one("#conversation")
             transcript = app.query_one("#transcript", ChatMessage)
+            assert "peon v0.2.0" in transcript.text
+            assert "first output" in transcript.text
+            assert not app.query("#startup")
             assert conversation.styles.align_vertical == "bottom"
             assert transcript.region.bottom == conversation.region.bottom - 1
 
@@ -1504,15 +1606,28 @@ def test_textual_session_picker_opens_named_session_and_fork_records_parent() ->
 
         async with app.run_test() as pilot:
             prompt = app.query_one("#prompt", Input)
-            prompt.value = "/session"
+            prompt.value = "/resume"
             await pilot.press("enter")
             await pilot.pause()
             assert app.choice_kind == "session"
+            assert any("old task" in label for label in app.choice_all_labels)
+            assert any(" · 1 · " in label for label in app.choice_all_labels)
             await pilot.press("down", "enter")
             assert app.session_id == source.session_id
             assert app.context.messages == [
                 AgentMessage(role="user", content="old task")
             ]
+
+            prompt.value = "/session"
+            await pilot.press("enter")
+            await pilot.pause()
+            transcript = app.query_one("#transcript", ChatMessage)
+            assert "Session Info" in transcript.text
+            assert f"ID: {source.session_id}" in transcript.text
+            assert "Messages" in transcript.text
+            assert "Total: 1" in transcript.text
+            assert "User: 1" in transcript.text
+            assert "Tools: 0 calls, 0 results" in transcript.text
 
             prompt.value = "/fork branch"
             await pilot.press("enter")
@@ -1527,6 +1642,47 @@ def test_textual_session_picker_opens_named_session_and_fork_records_parent() ->
             assert session_store.load(source.session_id).messages == (
                 AgentMessage(role="user", content="old task")
             ,)
+
+    asyncio.run(exercise())
+
+
+def test_textual_session_rows_truncate_prompt_and_align_metadata() -> None:
+    async def exercise() -> None:
+        config = ProviderConfig(
+            name="openai-compatible",
+            model="alpha",
+            base_url="https://example.test/v1",
+        )
+        config_store = MemoryConfigStore((config,))
+        config_store.save_ui(UiConfig(session_list_delimiter=False))
+        session_store = MemorySessionStore()
+        source = session_store.create(name="source")
+        session_store.append(
+            source.session_id,
+            AgentMessage(
+                role="user",
+                content=(
+                    "This is a deliberately long first prompt that should be "
+                    "truncated to the available terminal width"
+                ),
+            ),
+        )
+        app = TextualPeonApp(
+            provider_factory=provider_factory,
+            config_store=config_store,
+            registry=ExtensionRegistry(),
+            session_store=session_store,
+        )
+
+        async with app.run_test(size=(48, 20)) as pilot:
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "/resume"
+            await pilot.press("enter")
+            await pilot.pause()
+            rendered = str(app.query_one("#choices", Static).renderable)
+            assert "..." in rendered
+            assert "1 now" in rendered
+            assert " · " not in rendered
 
     asyncio.run(exercise())
 
@@ -1550,7 +1706,8 @@ def test_textual_quit_displays_resume_command_for_durable_session(tmp_path) -> N
             prompt.value = "/quit"
             await pilot.press("enter")
             transcript = app.query_one("#transcript", ChatMessage)
-            assert f"Resume with: peon --session {app.session_id}" in transcript.text
+            assert "peon v0.2.0" in transcript.text
+            assert app.session_store.list_sessions() == ()
 
     asyncio.run(exercise())
 
