@@ -4,7 +4,7 @@
 
 **Blocked by:** 03 — Expose headless event iterators and validated history; 04 — Unify tool lifecycle events.
 
-**Status:** ready-for-agent
+**Status:** completed
 
 - [x] The controller accepts one typed prompt intent and exposes immutable current session state, runtime events, a terminal result, and cancellation.
 - [x] The controller composes the existing coding-session seam rather than duplicating the agent loop.
