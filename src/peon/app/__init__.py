@@ -51,6 +51,7 @@ _EXPORTS = {
 	"SkillsOutcome": (".session_controller", "SkillsOutcome"),
 	"StopReason": (".coding_session", "StopReason"),
 	"ToolsOutcome": (".session_controller", "ToolsOutcome"),
+	"TextualEventRouter": (".textual_tui", "TextualEventRouter"),
 	"ProviderConfig": (".cli", "ProviderConfig"),
 	"ProviderConfigStore": (".config", "ProviderConfigStore"),
 	"SessionRecord": (".sessions", "SessionRecord"),

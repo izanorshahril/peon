@@ -374,6 +374,12 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Enforce provider-call, tool-call, elapsed-time, token, and cost bounds with precise machine-readable `stop_reason` values on `TurnResult`.
 - Pass 51 focused tests, 342 full suite, mypy clean, git diff check clean.
 
+### Ticket 12: complete thin Textual migration
+
+- Add `TextualEventRouter` to `textual_tui.py` with explicit handlers for `TurnStartedEvent`, `MessageEvent`, `TurnFinishedEvent`, and diagnostic fallbacks for unhandled events.
+- Ensure all host interactions dispatch via `SessionController` intents.
+- Pass 50 focused Textual tests, 343 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi

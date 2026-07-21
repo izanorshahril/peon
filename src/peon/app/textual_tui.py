@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
+import logging
 import time
 from pathlib import Path
 from dataclasses import dataclass, replace
-from typing import Literal, cast
+from typing import Any, Literal, cast
+
+logger = logging.getLogger(__name__)
 
 from rich.color import Color as RichColor
 from rich.console import Console
@@ -81,7 +85,13 @@ from .sessions import (
     session_first_prompt,
     session_interaction_count,
 )
-from .coding_session import MessageEvent, SessionEvent, TurnResult
+from .coding_session import (
+    MessageEvent,
+    SessionEvent,
+    TurnFinishedEvent,
+    TurnResult,
+    TurnStartedEvent,
+)
 from .session_controller import (
     CommandErrorOutcome,
     CommandIntent,
@@ -1019,6 +1029,47 @@ class ProcessingStatus(Static):
         )
 
 
+class TextualEventRouter:
+    """Explicit router for typed session runtime events in the Textual presentation host."""
+
+    def __init__(self, host: TextualPeonApp) -> None:
+        self._host = host
+        self.unhandled_events: list[object] = []
+        self._handlers: dict[type, Callable[[Any], None]] = {
+            TurnStartedEvent: self._handle_turn_started,
+            MessageEvent: self._handle_message,
+            TurnFinishedEvent: self._handle_turn_finished,
+        }
+
+    def register_handler(
+        self, event_type: type, handler: Callable[[Any], None]
+    ) -> None:
+        """Register or override an explicit event handler."""
+        self._handlers[event_type] = handler
+
+    def dispatch(self, event: object) -> None:
+        """Dispatch a typed event to its registered handler or safe fallback."""
+        event_type = type(event)
+        handler = self._handlers.get(event_type)
+        if handler is not None:
+            handler(event)
+        else:
+            self._fallback(event)
+
+    def _handle_turn_started(self, event: TurnStartedEvent) -> None:
+        self._host.call_from_thread(self._host._on_turn_started_event, event)
+
+    def _handle_message(self, event: MessageEvent) -> None:
+        self._host.call_from_thread(self._host._append_runtime_message, event.message)
+
+    def _handle_turn_finished(self, event: TurnFinishedEvent) -> None:
+        self._host.call_from_thread(self._host._on_turn_finished_event, event)
+
+    def _fallback(self, event: object) -> None:
+        self.unhandled_events.append(event)
+        logger.debug("TextualEventRouter received unhandled typed event: %r", event)
+
+
 class TextualPeonApp(App[int]):
     """Stable terminal UI with a scrollable transcript and fixed composer."""
 
@@ -1230,6 +1281,7 @@ class TextualPeonApp(App[int]):
         self.task_worker: Worker[TurnResult | str] | None = None
         self.execution_context: ToolExecutionContext | None = None
         self.controller: SessionController | None = None
+        self.event_router = TextualEventRouter(self)
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="conversation"):
@@ -1823,11 +1875,13 @@ class TextualPeonApp(App[int]):
             prompt.focus()
 
     def _on_session_event(self, event: SessionEvent) -> None:
-        if isinstance(event, MessageEvent):
-            self.call_from_thread(
-                self._append_runtime_message,
-                event.message,
-            )
+        self.event_router.dispatch(event)
+
+    def _on_turn_started_event(self, event: TurnStartedEvent) -> None:
+        self._set_processing(True)
+
+    def _on_turn_finished_event(self, event: TurnFinishedEvent) -> None:
+        pass
 
     def _build_controller(self) -> None:
         assert self.provider is not None
