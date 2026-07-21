@@ -61,6 +61,7 @@ class PromptIntent:
 
     text: str
     preserve_whitespace: bool = False
+    on_event: EventHandler | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,6 +502,7 @@ class SessionController:
             return self._session.prompt(
                 intent.text,
                 preserve_task_whitespace=intent.preserve_whitespace,
+                on_event=intent.on_event,
             )
         if isinstance(intent, CommandIntent):
             return self.dispatch_command(intent)

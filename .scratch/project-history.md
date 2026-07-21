@@ -392,6 +392,12 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Support incremental stream consumption and tool call argument assembly in `run_task` / `CodingSession`, emitting `StreamDeltaEvent` through `TextualEventRouter`.
 - Pass 45 focused AI/agent tests, 304 full suite, mypy clean, git diff check clean.
 
+### Ticket 15: bound streaming iterator delivery
+
+- Add `BoundedEventQueue`, `iter_events()`, and `aiter_events()` to `embedded.py` with finite buffer bounds and worker thread cleanup.
+- Support turn-level `on_event` callback parameter in `PromptIntent` and `CodingSession.prompt`.
+- Pass 20 focused embedded/session tests, 305 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi

@@ -241,6 +241,7 @@ class CodingSession:
         ) = self._stored_message_count()
         self._persistence_error: str | None = None
         self._state_lock = Lock()
+        self._active_on_event: EventHandler | None = None
 
     @property
     def session_id(self) -> str:
@@ -263,6 +264,7 @@ class CodingSession:
         task: str,
         *,
         preserve_task_whitespace: bool = False,
+        on_event: EventHandler | None = None,
     ) -> TurnResult:
         """Run one prompt and return a structured terminal outcome."""
         execution_context = ToolExecutionContext(on_output=self._on_tool_output)
@@ -277,6 +279,7 @@ class CodingSession:
                     error="session is already running",
                 )
             self._active_execution_context = execution_context
+            self._active_on_event = on_event
 
         started_at = self._clock()
         usage = _UsageAccumulator()
@@ -420,6 +423,7 @@ class CodingSession:
         finally:
             with self._state_lock:
                 self._active_execution_context = None
+                self._active_on_event = None
 
 
     def cancel(self) -> bool:
@@ -511,7 +515,11 @@ class CodingSession:
                 self._on_event(event)
             except Exception:
                 logger.exception("coding session event handler failed")
-                return
+        if self._active_on_event is not None:
+            try:
+                self._active_on_event(event)
+            except Exception:
+                logger.exception("turn event handler failed")
 
 
 def _utc_now() -> datetime:
