@@ -10,8 +10,10 @@ from peon.app.cli import (
     update_provider_setting,
 )
 from peon.app.config import (
+    active_capability_profile,
     filter_enabled_tools,
     filter_tool_executor,
+    set_capability_profile,
     update_general_setting,
     update_shortcut_setting,
     update_tool_setting,
@@ -327,3 +329,22 @@ def test_json_store_keeps_ui_settings_after_last_provider_is_deleted(tmp_path) -
 
     assert store.load_all() == ()
     assert store.load_ui() == ui
+
+
+def test_capability_profiles_active_and_set() -> None:
+    config = UiConfig()
+    assert active_capability_profile(config) == "coding"
+
+    read_only_config = set_capability_profile(config, "read-only")
+    assert active_capability_profile(read_only_config) == "read-only"
+    assert read_only_config.enabled_tools == ("read", "list", "grep", "find")
+
+    none_config = set_capability_profile(config, "none")
+    assert active_capability_profile(none_config) == "none"
+    assert none_config.enabled_tools == ()
+
+    custom_config = update_tool_setting(config, "sample", "true")
+    assert active_capability_profile(custom_config) == "custom"
+
+    with pytest.raises(ValueError, match="Unknown capability profile"):
+        set_capability_profile(config, "invalid")

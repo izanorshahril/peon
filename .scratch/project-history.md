@@ -362,6 +362,12 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Route `!` and `!!` in Textual and prompt-toolkit hosts through `SessionController.dispatch_shell(...)`.
 - Pass 36 focused tests, 338 full suite, mypy clean, git diff check clean.
 
+### Ticket 10: apply explicit capability profiles across hosts
+
+- Add `CAPABILITY_PROFILES` (`none`, `read-only`, `coding`, `custom`), `active_capability_profile`, `set_capability_profile` to `config.py`.
+- Consistently filter model-facing tools and execution across CLI, TUI, and embedded hosts.
+- Pass 55 focused tests, 340 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi

@@ -633,3 +633,17 @@ def test_dispatch_shell_with_registry():
     assert visible_outcome.hidden is False
     assert visible_outcome.turn_result is not None
     assert visible_outcome.turn_result.status == "success"
+
+
+def test_dispatch_shell_disabled_tool():
+    registry = ExtensionRegistry()
+    registry.register_tool(
+        name="bash",
+        description="exec",
+        parameters={},
+        handler=lambda args: "executed",
+    )
+    controller = _make_controller(executor=registry, enabled_tools=("read", "write"))
+    outcome = controller.dispatch(ShellIntent(command="echo hello"))
+    assert isinstance(outcome, ShellErrorOutcome)
+    assert outcome.error == "tool 'bash' is disabled"
