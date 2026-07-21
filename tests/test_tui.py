@@ -275,13 +275,13 @@ def test_tui_configures_provider_and_keeps_context_between_tasks() -> None:
 def test_tui_delegates_prompts_to_coding_session(monkeypatch) -> None:
     submitted: list[str] = []
 
-    class RecordingSession:
+    class RecordingController:
         def __init__(self, **kwargs: object) -> None:
             del kwargs
             self.run_id = "run-1"
 
-        def prompt(self, task: str) -> TurnResult:
-            submitted.append(task)
+        def dispatch(self, intent: object) -> TurnResult:
+            submitted.append(intent.text)  # type: ignore[attr-defined]
             return TurnResult(
                 status="success",
                 session_id="session-1",
@@ -290,7 +290,7 @@ def test_tui_delegates_prompts_to_coding_session(monkeypatch) -> None:
                 content="session response",
             )
 
-    monkeypatch.setattr(tui_module, "CodingSession", RecordingSession)
+    monkeypatch.setattr(tui_module, "SessionController", RecordingController)
     output = StringIO()
 
     result = run_tui(

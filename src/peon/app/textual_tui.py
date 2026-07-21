@@ -81,7 +81,8 @@ from .sessions import (
     session_first_prompt,
     session_interaction_count,
 )
-from .coding_session import CodingSession, MessageEvent, SessionEvent, TurnResult
+from .coding_session import MessageEvent, SessionEvent, TurnResult
+from .session_controller import PromptIntent, SessionController
 from .resources import (
     ResourceInventory,
     apply_resource_prompt,
@@ -1213,7 +1214,7 @@ class TextualPeonApp(App[int]):
         self.message_left_padding = self.ui_config.message_left_padding
         self.task_worker: Worker[TurnResult | str] | None = None
         self.execution_context: ToolExecutionContext | None = None
-        self.coding_session: CodingSession | None = None
+        self.controller: SessionController | None = None
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="conversation"):
@@ -1712,8 +1713,8 @@ class TextualPeonApp(App[int]):
                 return
             return
         self._last_escape_at = None
-        if self.coding_session is not None and self.task_worker is not None:
-            if self.coding_session.cancel():
+        if self.controller is not None and self.task_worker is not None:
+            if self.controller.cancel():
                 self._write("Task cancellation requested.", role="system")
                 return
         if self.execution_context is not None and not self.execution_context.cancelled:
@@ -1723,8 +1724,8 @@ class TextualPeonApp(App[int]):
         self.query_one("#prompt", PeonInput).action_clear()
 
     def action_clear_input(self) -> None:
-        if self.coding_session is not None and self.task_worker is not None:
-            if self.coding_session.cancel():
+        if self.controller is not None and self.task_worker is not None:
+            if self.controller.cancel():
                 self._write("Task cancellation requested.", role="system")
                 return
         if self.execution_context is not None and not self.execution_context.cancelled:
@@ -1813,10 +1814,10 @@ class TextualPeonApp(App[int]):
                 event.message,
             )
 
-    def _build_coding_session(self) -> None:
+    def _build_controller(self) -> None:
         assert self.provider is not None
         assert self.config is not None
-        self.coding_session = CodingSession(
+        self.controller = SessionController(
             provider=self.provider,
             session_store=self.session_store,
             session_id=self.session_id,
@@ -1833,16 +1834,16 @@ class TextualPeonApp(App[int]):
                 chunk,
             ),
         )
-        self.run_id = self.coding_session.run_id
+        self.run_id = self.controller.run_id
 
     def _run_task(self, task: str) -> TurnResult:
-        assert self.coding_session is not None
-        return self.coding_session.prompt(task)
+        assert self.controller is not None
+        return self.controller.dispatch(PromptIntent(task))
 
     def _start_task(self, task: str) -> None:
         self._set_processing(True)
         self.execution_context = None
-        self._build_coding_session()
+        self._build_controller()
         self.task_worker = cast(
             Worker[TurnResult | str],
             self.run_worker(
@@ -1875,7 +1876,7 @@ class TextualPeonApp(App[int]):
         )
         self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
         self._set_processing(True)
-        self.coding_session = None
+        self.controller = None
         execution_context = ToolExecutionContext(
             on_output=lambda stream, chunk: self.call_from_thread(
                 self._append_bash_output,
@@ -1918,7 +1919,7 @@ class TextualPeonApp(App[int]):
         self.call_from_thread(self._append_shell_result, result, call_id)
         if not send_to_model:
             return result
-        self._build_coding_session()
+        self._build_controller()
         return self._run_task(
             f"Shell command `{command}` output:\n{result}"
         )

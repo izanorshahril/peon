@@ -92,12 +92,12 @@ def test_command_runs_task_through_injected_provider_factory() -> None:
 def test_default_task_uses_coding_session(monkeypatch) -> None:
     submitted: list[str] = []
 
-    class RecordingSession:
+    class RecordingController:
         def __init__(self, **kwargs: object) -> None:
             del kwargs
 
-        def prompt(self, task: str) -> TurnResult:
-            submitted.append(task)
+        def dispatch(self, intent: object) -> TurnResult:
+            submitted.append(intent.text)  # type: ignore[attr-defined]
             return TurnResult(
                 status="success",
                 session_id="session-1",
@@ -106,7 +106,7 @@ def test_default_task_uses_coding_session(monkeypatch) -> None:
                 content="session response",
             )
 
-    monkeypatch.setattr(cli_module, "CodingSession", RecordingSession)
+    monkeypatch.setattr(cli_module, "SessionController", RecordingController)
     output = StringIO()
 
     result = main(

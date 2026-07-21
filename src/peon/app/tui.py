@@ -57,7 +57,8 @@ from .config import (
     update_ui_setting,
 )
 from .commands import DEFAULT_COMMAND_CATALOG, CommandDefinition
-from .coding_session import CodingSession, TurnResult
+from .coding_session import TurnResult
+from .session_controller import PromptIntent, SessionController
 from .hosts import HostUnavailableError, resolve_host
 from .resources import (
     ResourceInventory,
@@ -1311,7 +1312,7 @@ def _conversation_loop(
                 continue
             task = f"Shell command `{command.strip()}` output:\n{result}"
 
-        coding_session = CodingSession(
+        controller = SessionController(
             provider=session.provider,
             session_store=session.session_store,
             session_id=session.session_id,
@@ -1324,8 +1325,8 @@ def _conversation_loop(
             model=session.config.model,
             resources=session.resources,
         )
-        session.run_id = coding_session.run_id
-        response = coding_session.prompt(task)
+        session.run_id = controller.run_id
+        response = controller.dispatch(PromptIntent(task))
         session.usage = merge_usage(session.usage, response.usage)
         if response.status != "success":
             print(

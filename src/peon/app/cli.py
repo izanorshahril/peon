@@ -32,11 +32,11 @@ from peon.extensions import (
 )
 
 from .coding_session import (
-    CodingSession,
     MessageEvent,
     SessionEvent,
     TurnFinishedEvent,
 )
+from .session_controller import PromptIntent, SessionController
 from .hosts import HostUnavailableError, resolve_host
 from .observability import JsonlTraceSink
 from .sessions import MemorySessionStore, SessionStore
@@ -658,14 +658,14 @@ def main(
         provider = (provider_factory or create_provider)(config)
         active_store = MemorySessionStore()
         session_record = active_store.create()
-        session = CodingSession(
+        controller = SessionController(
             provider=provider,
             session_store=active_store,
             session_id=session_record.session_id,
             model=config.model,
             resources=_load_resources(args),
         )
-        result = session.prompt(task)
+        result = controller.dispatch(PromptIntent(task))
         if result.status != "success":
             raise CommandError(result.error or "task failed")
         response = result.content or ""
@@ -864,7 +864,7 @@ def _run_print_mode(
         if not args.provider:
             raise CommandError("provider is not configured")
         provider = (provider_factory or create_provider)(config)
-        session = CodingSession(
+        controller = SessionController(
             provider=provider,
             session_store=active_store,
             session_id=session_id,
@@ -879,9 +879,8 @@ def _run_print_mode(
             trace_sink=trace_sink,
             trace_provider=args.provider_name or args.provider,
         )
-        result = session.prompt(
-            task,
-            preserve_task_whitespace=True,
+        result = controller.dispatch(
+            PromptIntent(task, preserve_whitespace=True),
         )
     except (
         AgentError,
