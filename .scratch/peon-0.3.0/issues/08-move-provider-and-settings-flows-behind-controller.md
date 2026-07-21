@@ -4,15 +4,15 @@
 
 **Blocked by:** 06 — Move informational commands behind controller.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] `/model`, `/provider`, `/settings`, and `/logout` execute through controller intents without widgets or terminal input functions.
-- [ ] Provider discovery and saved-provider/model choices are represented as semantic option data with stable IDs.
-- [ ] Secret input requests never place entered secrets in runtime events, logs, traces, session files, or error text.
-- [ ] Continuation tokens are single-use and reject stale, invalid, cross-session, or replayed responses without state mutation.
-- [ ] Provider creation, validation, persistence, model switching, logout replacement, and reasoning capability behavior remain compatible.
-- [ ] Reusable provider/tool/resource policy is separated from Textual-only colors, spacing, rendering, and shortcuts.
-- [ ] Textual retains current nested settings, backtracking, picker search, password input, and focus behavior.
-- [ ] Headless tests can drive complete provider/model/settings/logout workflows through intents and supplied responses.
-- [ ] Provider failures return typed outcomes and do not leave partially updated active or persisted configuration.
-- [ ] Focused controller/config/provider/Textual, full pytest, static typing, and diff validation pass.
+- [x] `/model`, `/provider`, `/settings`, and `/logout` execute through controller intents without widgets or terminal input functions.
+- [x] Provider discovery and saved-provider/model choices are represented as semantic option data with stable IDs.
+- [x] Secret input requests never place entered secrets in runtime events, logs, traces, session files, or error text.
+- [x] Continuation tokens are single-use and reject stale, invalid, cross-session, or replayed responses without state mutation.
+- [x] Provider creation, validation, persistence, model switching, logout replacement, and reasoning capability behavior remain compatible.
+- [x] Reusable provider/tool/resource policy is separated from Textual-only colors, spacing, rendering, and shortcuts.
+- [x] Textual retains current nested settings, backtracking, picker search, password input, and focus behavior.
+- [x] Headless tests can drive complete provider/model/settings/logout workflows through intents and supplied responses.
+- [x] Provider failures return typed outcomes and do not leave partially updated active or persisted configuration.
+- [x] Focused controller/config/provider/Textual, full pytest, static typing, and diff validation pass.

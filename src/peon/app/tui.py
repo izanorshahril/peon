@@ -64,8 +64,13 @@ from .session_controller import (
     HelpOutcome,
     PromptIntent,
     ReasoningOutcome,
+    ResumeOptionsOutcome,
     SessionController,
     SessionInfoOutcome,
+    SessionTransitionOutcome,
+    ShellErrorOutcome,
+    ShellIntent,
+    ShellResultOutcome,
     SkillsOutcome,
     ToolsOutcome,
 )
@@ -1302,25 +1307,44 @@ def _conversation_loop(
         if task.startswith("!"):
             hidden = task.startswith("!!")
             command = task[2:] if hidden else task[1:]
-            if not command.strip():
-                print("bash command is required", file=error)
+            ui_config = load_ui_config(config_store)
+            controller = SessionController(
+                provider=session.provider,
+                session_store=session.session_store,
+                session_id=session.session_id,
+                run_id=session.run_id or None,
+                context=session.context,
+                executor=filter_tool_executor(
+                    ui_config,
+                    session.registry,
+                ),
+                model=session.config.model,
+                resources=session.resources,
+                enabled_tools=ui_config.enabled_tools,
+            )
+            session.run_id = controller.run_id
+            outcome = controller.dispatch_shell(
+                ShellIntent(command=command, hidden=hidden),
+                ToolExecutionContext(),
+            )
+            if isinstance(outcome, ShellErrorOutcome):
+                print(outcome.error, file=error)
                 continue
-            if not any(tool.name == "bash" for tool in session.registry.tools):
-                print("bash tool is not registered", file=error)
+
+            print(outcome.output, file=output)
+            if hidden or outcome.turn_result is None:
                 continue
-            try:
-                result = session.registry.invoke_with_context(
-                    "bash",
-                    {"command": command.strip()},
-                    ToolExecutionContext(),
+
+            response = outcome.turn_result
+            session.usage = merge_usage(session.usage, response.usage)
+            if response.status != "success":
+                print(
+                    f"peon: {response.error or 'task failed'}",
+                    file=error,
                 )
-            except Exception as caught:
-                print(str(caught), file=error)
                 continue
-            print(result, file=output)
-            if hidden:
-                continue
-            task = f"Shell command `{command.strip()}` output:\n{result}"
+            print(f"peon> {response.content or ''}", file=output)
+            continue
 
         controller = SessionController(
             provider=session.provider,
@@ -1361,7 +1385,8 @@ def _dispatch_tui_controller_command(
 
     is_info_cmd = (
         name.startswith("/skill:")
-        or cmd_id in ("help", "tools", "skills", "session", "reasoning")
+        or cmd_id in ("help", "tools", "skills", "session", "reasoning", "new", "fork")
+        or (cmd_id == "resume" and bool(invocation.argument if invocation else None))
         or (invocation is not None and invocation.command.id.startswith("skill:"))
     )
     if not is_info_cmd:
@@ -1419,6 +1444,33 @@ def _dispatch_tui_controller_command(
                     pass
                 session = replace(session, config=updated_config)
             print(f"Reasoning effort set to {outcome.current}.", file=output)
+    elif isinstance(outcome, ResumeOptionsOutcome):
+        if not outcome.options:
+            print("No saved sessions available to resume.", file=output)
+        else:
+            print("Saved sessions:", file=output)
+            for opt in outcome.options:
+                name_part = f" · {opt.name}" if opt.name else ""
+                print(f"  {opt.option_id}. {opt.summary}{name_part}", file=output)
+    elif isinstance(outcome, SessionTransitionOutcome):
+        context = AgentContext(messages=list(outcome.messages))
+        if session.resources is not None:
+            apply_resource_prompt(context, session.resources)
+        session = replace(
+            session,
+            session_id=outcome.session_id,
+            context=context,
+            persisted_message_count=len(context.messages),
+            usage=None,
+        )
+        if outcome.action == "new":
+            print("Conversation cleared.", file=output)
+        elif outcome.action == "resume":
+            rec = outcome.record or session.session_store.load(outcome.session_id)
+            print(f"Resumed session: {format_session_summary(rec, delimiter=ui_config.session_list_delimiter)}", file=output)
+        elif outcome.action == "fork":
+            name_str = f" ({outcome.name})" if outcome.name else ""
+            print(f"Forked session: {outcome.session_id}{name_str}", file=output)
     elif isinstance(outcome, CommandErrorOutcome):
         print(f"peon: {outcome.error}", file=error)
 
