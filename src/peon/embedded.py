@@ -7,7 +7,6 @@ from uuid import uuid4
 
 from peon.agent import AgentContext, AgentMessage, ModelProvider, ToolExecutor
 from peon.app.coding_session import (
-    CodingSession,
     MessageEvent,
     SessionEvent,
     TurnFinishedEvent,
@@ -15,6 +14,7 @@ from peon.app.coding_session import (
     TurnStartedEvent,
 )
 from peon.app.resources import ResourceInventory
+from peon.app.session_controller import PromptIntent, SessionController
 from peon.app.sessions import MemorySessionStore, SessionStore
 
 SessionEventHandler: TypeAlias = Callable[[SessionEvent], None]
@@ -42,7 +42,7 @@ class EmbeddedSession:
         active_session_id = session_id
         if active_session_id is None:
             active_session_id = active_store.create().session_id
-        self._session = CodingSession(
+        self._controller = SessionController(
             provider=provider,
             session_store=active_store,
             session_id=active_session_id,
@@ -58,23 +58,23 @@ class EmbeddedSession:
 
     @property
     def session_id(self) -> str:
-        return self._session.session_id
+        return self._controller.session_id
 
     @property
     def run_id(self) -> str:
-        return self._session.run_id
+        return self._controller.run_id
 
     @property
     def messages(self) -> tuple[AgentMessage, ...]:
-        return self._session.messages
+        return self._controller.messages
 
     def submit(self, text: str) -> TurnResult:
         """Submit one text prompt and return its structured turn result."""
-        return self._session.prompt(text)
+        return self._controller.dispatch(PromptIntent(text))
 
     def cancel(self) -> bool:
         """Request cancellation of the active prompt, if one is running."""
-        return self._session.cancel()
+        return self._controller.cancel()
 
 
 __all__ = [
