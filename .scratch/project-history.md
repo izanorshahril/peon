@@ -362,6 +362,54 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Route `!` and `!!` in Textual and prompt-toolkit hosts through `SessionController.dispatch_shell(...)`.
 - Pass 36 focused tests, 338 full suite, mypy clean, git diff check clean.
 
+### Ticket 10: apply explicit capability profiles across hosts
+
+- Add `CAPABILITY_PROFILES` (`none`, `read-only`, `coding`, `custom`), `active_capability_profile`, `set_capability_profile` to `config.py`.
+- Consistently filter model-facing tools and execution across CLI, TUI, and embedded hosts.
+- Pass 55 focused tests, 340 full suite, mypy clean, git diff check clean.
+
+### Ticket 11: enforce run limits and stop reasons
+
+- Add `RunLimits`, `LimitExceededError`, and `StopReason` to runtime loop, `CodingSession`, `SessionController`, and `EmbeddedSession`.
+- Enforce provider-call, tool-call, elapsed-time, token, and cost bounds with precise machine-readable `stop_reason` values on `TurnResult`.
+- Pass 51 focused tests, 342 full suite, mypy clean, git diff check clean.
+
+### Ticket 12: complete thin Textual migration
+
+- Add `TextualEventRouter` to `textual_tui.py` with explicit handlers for `TurnStartedEvent`, `MessageEvent`, `TurnFinishedEvent`, and diagnostic fallbacks for unhandled events.
+- Ensure all host interactions dispatch via `SessionController` intents.
+- Pass 50 focused Textual tests, 343 full suite, mypy clean, git diff check clean.
+
+### Ticket 13: retire prompt-toolkit host
+
+- Remove `src/peon/app/tui.py` and `tests/test_tui.py`, making Textual the sole maintained interactive TUI.
+- Remove `prompt-toolkit` from `pyproject.toml` dependencies and update `hosts.py` to return an actionable error if `prompt-toolkit` is requested.
+- Pass 98 focused host/CLI/Textual tests, 302 full suite, mypy clean, git diff check clean.
+
+### Ticket 14: stream OpenAI-compatible responses end to end
+
+- Add `StreamingModelProvider` protocol, `ModelStreamChunk`, `ToolCallDelta`, and SSE transport parsing to `provider_adapters.py`.
+- Support incremental stream consumption and tool call argument assembly in `run_task` / `CodingSession`, emitting `StreamDeltaEvent` through `TextualEventRouter`.
+- Pass 45 focused AI/agent tests, 304 full suite, mypy clean, git diff check clean.
+
+### Ticket 15: bound streaming iterator delivery
+
+- Add `BoundedEventQueue`, `iter_events()`, and `aiter_events()` to `embedded.py` with finite buffer bounds and worker thread cleanup.
+- Support turn-level `on_event` callback parameter in `PromptIntent` and `CodingSession.prompt`.
+- Pass 20 focused embedded/session tests, 305 full suite, mypy clean, git diff check clean.
+
+### Ticket 16: add optional redacted event journal
+
+- Add `EventJournalSink` protocol, `FileEventJournalSink`, `serialize_event()`, `RedactionHook`, and `JournalWriteError` to `observability.py`.
+- Integrate `journal_sink` into `CodingSession` and `SessionController` `_emit()` with strict vs non-strict error modes while preserving canonical message state.
+- Pass 61 focused observability/session tests, 309 full suite, mypy clean, git diff check clean.
+
+### Ticket 17: split headless, TUI, and serve packaging
+
+- Move `textual` and `textual-serve` out of core dependencies in `pyproject.toml` into `[project.optional-dependencies]` `tui` and `serve`.
+- Catch missing `textual` during host resolution and CLI interactive startup, returning concise actionable guidance (`pip install "peon[tui]"` / `uv add "peon[tui]"`) without traceback.
+- Pass 58 focused host/CLI/embedded tests, 310 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi

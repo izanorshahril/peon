@@ -271,3 +271,107 @@ def test_disabled_tracing_does_not_call_trace_clock() -> None:
     )
 
     assert response == "Done."
+
+
+def test_file_event_journal_sink_writes_schema_v2_events() -> None:
+    from peon.app.observability import FileEventJournalSink
+    from peon.app.coding_session import TurnStartedEvent
+
+    output = StringIO()
+    sink = FileEventJournalSink(output)
+
+    event = TurnStartedEvent(
+        session_id="session-1",
+        run_id="run-1",
+        turn_id="turn-1",
+        started_at=100.0,
+    )
+    sink.write_event(event)
+
+    records = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert len(records) == 1
+    assert records[0]["schema_version"] == 2
+    assert records[0]["event_type"] == "turn_started"
+    assert records[0]["session_id"] == "session-1"
+
+
+def test_file_event_journal_sink_applies_redaction_hook() -> None:
+    from peon.app.observability import FileEventJournalSink
+    from peon.app.coding_session import MessageEvent
+
+    output = StringIO()
+
+    def redact_secret(evt: object) -> object:
+        if isinstance(evt, MessageEvent):
+            return MessageEvent(
+                session_id=evt.session_id,
+                run_id=evt.run_id,
+                turn_id=evt.turn_id,
+                message=AgentMessage(role=evt.message.role, content="[REDACTED]"),
+            )
+        return evt
+
+    sink = FileEventJournalSink(output, redaction_hook=redact_secret)
+    event = MessageEvent(
+        session_id="session-1",
+        run_id="run-1",
+        turn_id="turn-1",
+        message=AgentMessage(role="user", content="my secret password is 12345"),
+    )
+    sink.write_event(event)
+
+    records = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert records[0]["message"]["content"] == "[REDACTED]"
+    assert "12345" not in output.getvalue()
+
+
+def test_file_event_journal_sink_handles_strict_and_non_strict_failures() -> None:
+    from peon.app.observability import FileEventJournalSink, JournalWriteError
+    from peon.app.coding_session import TurnStartedEvent
+
+    class FailingIO(StringIO):
+        def write(self, s: str) -> int:
+            raise OSError("disk full")
+
+    event = TurnStartedEvent(
+        session_id="s1", run_id="r1", turn_id="t1", started_at=1.0
+    )
+
+    # Non-strict failure (logs warning, does not raise)
+    non_strict_sink = FileEventJournalSink(FailingIO(), strict=False)
+    non_strict_sink.write_event(event)
+
+    # Strict failure (raises JournalWriteError)
+    strict_sink = FileEventJournalSink(FailingIO(), strict=True)
+    with pytest.raises(JournalWriteError, match="disk full"):
+        strict_sink.write_event(event)
+
+
+def test_coding_session_integrates_event_journal_separate_from_canonical_history() -> None:
+    from peon.app.observability import FileEventJournalSink
+
+    output = StringIO()
+    journal_sink = FileEventJournalSink(output)
+    store = MemorySessionStore()
+    record = store.create()
+
+    session = CodingSession(
+        provider=FakeProvider(),
+        session_store=store,
+        session_id=record.session_id,
+        journal_sink=journal_sink,
+    )
+
+    result = session.prompt("hello journal")
+    assert result.status == "success"
+
+    # Journal has schema_version 2 events
+    records = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert len(records) >= 2
+    assert all(r["schema_version"] == 2 for r in records)
+
+    # Canonical message store has canonical messages only
+    messages = store.load(session.session_id).messages
+    assert len(messages) == 2
+    assert messages[0].role == "user"
+    assert messages[1].role == "assistant"

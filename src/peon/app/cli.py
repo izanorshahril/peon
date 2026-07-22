@@ -621,10 +621,19 @@ def main(
         elif mode == "minimal":
             if task:
                 raise CommandError("minimal mode does not accept a task argument")
-            from .tui import run_tui
+            from .config import JsonProviderConfigStore
+            try:
+                from .textual_tui import run_textual_tui
+            except ImportError as caught:
+                raise CommandError(
+                    "Interactive TUI requires the 'tui' optional extra. "
+                    "Install with: pip install \"peon[tui]\" or uv add \"peon[tui]\""
+                ) from caught
 
-            return (tui_runner or run_tui)(
+            return (tui_runner or run_textual_tui)(
                 provider_factory=provider_factory,
+                config_store=JsonProviderConfigStore(),
+                registry=registry or ExtensionRegistry(),
                 output=output,
                 error=error,
                 user_top_blank_lines=args.user_top_blank_lines,

@@ -11,6 +11,7 @@ from peon.app.resources import ContextResource, ResourceInventory, SkillResource
 from peon.app.textual_tui import (
     ChatMessage,
     PeonInput,
+    TextualEventRouter,
     TextualPeonApp,
     _format_tool_call,
 )
@@ -1993,3 +1994,29 @@ def test_textual_model_picker_aggregates_profiles_and_preserves_context() -> Non
             assert context.messages == [AgentMessage(role="user", content="prior")]
 
     asyncio.run(exercise())
+
+
+def test_textual_event_router_handles_events_and_fallback() -> None:
+    app = TextualPeonApp(
+        provider_factory=provider_factory,
+        config_store=MemoryConfigStore(()),
+        registry=ExtensionRegistry(),
+    )
+    router = TextualEventRouter(app)
+    custom_events: list[object] = []
+
+    class CustomEvent:
+        pass
+
+    router.register_handler(CustomEvent, lambda event: custom_events.append(event))
+
+    custom = CustomEvent()
+    router.dispatch(custom)
+    assert custom_events == [custom]
+
+    class UnknownEvent:
+        pass
+
+    unknown = UnknownEvent()
+    router.dispatch(unknown)
+    assert router.unhandled_events == [unknown]

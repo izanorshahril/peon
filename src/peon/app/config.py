@@ -198,6 +198,35 @@ def update_shortcut_setting(config: UiConfig, setting: str, value: str) -> UiCon
     return replace(config, tools_shortcut=normalized_value)
 
 
+CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
+    "none": (),
+    "read-only": ("read", "list", "grep", "find"),
+    "coding": ("read", "write", "edit", "bash"),
+}
+
+
+def active_capability_profile(config: UiConfig) -> str:
+    """Return active capability profile name based on enabled_tools."""
+    enabled_set = set(config.enabled_tools)
+    for profile_name, tools in CAPABILITY_PROFILES.items():
+        if enabled_set == set(tools):
+            return profile_name
+    return "custom"
+
+
+def set_capability_profile(config: UiConfig, profile_name: str) -> UiConfig:
+    """Return updated UiConfig with specified capability profile."""
+    normalized = profile_name.strip().lower()
+    if normalized in CAPABILITY_PROFILES:
+        tools = CAPABILITY_PROFILES[normalized]
+        return replace(config, enabled_tools=tools)
+    if normalized == "custom":
+        return config
+    raise ValueError(
+        f"Unknown capability profile '{profile_name}'. Valid profiles: none, read-only, coding, custom."
+    )
+
+
 def enabled_tool_names(config: UiConfig) -> tuple[str, ...]:
     """Return the configured model-facing tools in stable order."""
     return config.enabled_tools

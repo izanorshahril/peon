@@ -2,12 +2,23 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
+import json
+import time
+from typing import Any, cast
 
-from .runtime_errors import AgentError
+from .runtime_errors import AgentError, LimitExceededError
 
 from .executor import ToolExecutionContext, ToolExecutor
-from .models import AgentContext, AgentMessage, ToolCall, ToolDefinition, Usage
-from .provider_protocol import ModelProvider
+from .models import (
+	AgentContext,
+	AgentMessage,
+	ModelResponse,
+	ModelStreamChunk,
+	ToolCall,
+	ToolDefinition,
+	Usage,
+)
+from .provider_protocol import ModelProvider, StreamingModelProvider
 from .tracing import TraceContext, TraceSink, emit_trace
 
 
@@ -22,6 +33,7 @@ def run_task(
     model: str | None = None,
     on_message: Callable[[AgentMessage], None] | None = None,
     on_usage: Callable[[Usage | None], None] | None = None,
+    on_stream_chunk: Callable[[ModelStreamChunk], None] | None = None,
     trace_sink: TraceSink | None = None,
     trace_context: TraceContext | None = None,
     trace_provider: str | None = None,
@@ -30,6 +42,7 @@ def run_task(
     trace_utc_clock: Callable[[], datetime] | None = None,
     preserve_task_whitespace: bool = False,
     execution_context: ToolExecutionContext | None = None,
+    limits: Any = None,
 ) -> str | ToolCall:
     """Run one task against an injected provider and return its response."""
     normalized_task = task if preserve_task_whitespace else task.strip()
@@ -46,22 +59,104 @@ def run_task(
     available_tools = tuple(tools)
     if executor is not None and not available_tools:
         available_tools = tuple(executor.tools)
+    provider_calls = 0
     tool_calls = 0
+    acc_input_tokens = 0
+    acc_output_tokens = 0
+    acc_total_tokens = 0
     active_trace_clock = (
         trace_clock
         if trace_sink is not None and trace_clock is not None
         else None
     )
+    clock_fn = active_trace_clock or time.monotonic
+    start_time = (
+        clock_fn()
+        if (limits is not None and limits.max_elapsed_seconds is not None)
+        else 0.0
+    )
     while True:
+        if limits is not None:
+            if limits.max_elapsed_seconds is not None:
+                now_time = clock_fn()
+                if (now_time - start_time) > limits.max_elapsed_seconds:
+                    raise LimitExceededError(
+                        "max_elapsed_seconds_exceeded", "elapsed time limit exceeded"
+                    )
+            if (
+                limits.max_provider_calls is not None
+                and provider_calls >= limits.max_provider_calls
+            ):
+                raise LimitExceededError(
+                    "max_provider_calls_exceeded",
+                    "maximum provider-call limit exceeded",
+                )
+
         provider_started_at = (
             active_trace_clock() if active_trace_clock is not None else 0.0
         )
+        provider_calls += 1
         try:
-            response = provider.complete(
-                messages=active_context.messages,
-                tools=available_tools,
-                model=model,
-            )
+            if hasattr(provider, "stream") and callable(getattr(provider, "stream")):
+                streaming_provider = cast(StreamingModelProvider, provider)
+                content_parts: list[str] = []
+                thinking_parts: list[str] = []
+                tool_calls_map: dict[int, dict[str, str]] = {}
+                final_usage: Usage | None = None
+
+                chunks = streaming_provider.stream(
+                    messages=active_context.messages,
+                    tools=available_tools,
+                    model=model,
+                )
+                for chunk in chunks:
+                    if chunk.delta:
+                        content_parts.append(chunk.delta)
+                    if chunk.thinking_delta:
+                        thinking_parts.append(chunk.thinking_delta)
+                    if chunk.tool_call_delta:
+                        tcd = chunk.tool_call_delta
+                        idx = tcd.index if tcd.index is not None else 0
+                        if idx not in tool_calls_map:
+                            tool_calls_map[idx] = {"id": "", "name": "", "args": ""}
+                        if tcd.id:
+                            tool_calls_map[idx]["id"] = tcd.id
+                        if tcd.name:
+                            tool_calls_map[idx]["name"] = tcd.name
+                        if tcd.arguments_delta:
+                            tool_calls_map[idx]["args"] += tcd.arguments_delta
+                    if chunk.usage:
+                        final_usage = chunk.usage
+
+                    if on_stream_chunk is not None:
+                        on_stream_chunk(chunk)
+
+                assembled_tool_call: ToolCall | None = None
+                if tool_calls_map:
+                    tc_dict = tool_calls_map[min(tool_calls_map.keys())]
+                    raw_args = tc_dict["args"]
+                    try:
+                        parsed_args = json.loads(raw_args) if raw_args.strip() else {}
+                    except ValueError:
+                        parsed_args = {}
+                    assembled_tool_call = ToolCall(
+                        name=tc_dict["name"],
+                        arguments=parsed_args if isinstance(parsed_args, dict) else {},
+                        call_id=tc_dict["id"] or None,
+                    )
+
+                response = ModelResponse(
+                    content="".join(content_parts),
+                    thinking="".join(thinking_parts),
+                    tool_call=assembled_tool_call,
+                    usage=final_usage,
+                )
+            else:
+                response = provider.complete(
+                    messages=active_context.messages,
+                    tools=available_tools,
+                    model=model,
+                )
         except Exception as error:
             if active_trace_clock is not None:
                 emit_trace(
@@ -94,11 +189,30 @@ def run_task(
         if on_usage is not None:
             on_usage(response.usage)
 
+        if limits is not None and response.usage is not None:
+            u = response.usage
+            if limits.max_input_tokens is not None and u.input_tokens is not None:
+                acc_input_tokens += u.input_tokens
+                if acc_input_tokens > limits.max_input_tokens:
+                    raise LimitExceededError("max_input_tokens_exceeded", "input token limit exceeded")
+            if limits.max_output_tokens is not None and u.output_tokens is not None:
+                acc_output_tokens += u.output_tokens
+                if acc_output_tokens > limits.max_output_tokens:
+                    raise LimitExceededError("max_output_tokens_exceeded", "output token limit exceeded")
+            if limits.max_total_tokens is not None:
+                tot = (u.input_tokens or 0) + (u.output_tokens or 0)
+                acc_total_tokens += tot
+                if acc_total_tokens > limits.max_total_tokens:
+                    raise LimitExceededError("max_total_tokens_exceeded", "total token limit exceeded")
+
         if response.tool_call is not None:
             if executor is None:
                 return response.tool_call
             tool_calls += 1
-            if tool_calls > max_tool_calls:
+            max_allowed = limits.max_tool_calls if limits is not None and limits.max_tool_calls is not None else max_tool_calls
+            if tool_calls > max_allowed:
+                if limits is not None and limits.max_tool_calls is not None:
+                    raise LimitExceededError("max_tool_calls_exceeded", "maximum tool-call limit exceeded")
                 raise AgentError("maximum tool-call limit exceeded")
             _continue_with_tool_call(
                 active_context,

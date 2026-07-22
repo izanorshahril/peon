@@ -24,7 +24,9 @@ from .coding_session import (
     CodingSession,
     EventHandler,
     MessageEvent,
+    RunLimits,
     SessionEvent,
+    StopReason,
     TurnFinishedEvent,
     TurnResult,
     TurnStartedEvent,
@@ -59,6 +61,7 @@ class PromptIntent:
 
     text: str
     preserve_whitespace: bool = False
+    on_event: EventHandler | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,6 +389,8 @@ class SessionController:
         trace_sink: TraceSink | None = None,
         trace_provider: str | None = None,
         trace_utc_clock: Callable[[], datetime] | None = None,
+        limits: RunLimits | None = None,
+        journal_sink: Any | None = None,
     ) -> None:
         self.provider = provider
         self.session_store = session_store
@@ -397,6 +402,8 @@ class SessionController:
         self._reasoning_effort = reasoning_effort
         self._reasoning_choices = tuple(reasoning_choices)
         self._id_factory = id_factory
+        self._limits = limits
+        self._journal_sink = journal_sink
         self._resume_tokens: dict[str, dict[str, str]] = {}
         self._continuation_tokens: dict[str, dict[str, object]] = {}
         self._session = CodingSession(
@@ -415,6 +422,8 @@ class SessionController:
             trace_sink=trace_sink,
             trace_provider=trace_provider,
             trace_utc_clock=trace_utc_clock,
+            limits=limits,
+            journal_sink=journal_sink,
         )
 
     @property
@@ -496,6 +505,7 @@ class SessionController:
             return self._session.prompt(
                 intent.text,
                 preserve_task_whitespace=intent.preserve_whitespace,
+                on_event=intent.on_event,
             )
         if isinstance(intent, CommandIntent):
             return self.dispatch_command(intent)

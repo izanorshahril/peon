@@ -15,6 +15,7 @@ from peon.agent import (
 from peon.app.coding_session import (
     CodingSession,
     MessageEvent,
+    RunLimits,
     TurnFinishedEvent,
     TurnStartedEvent,
     TurnResult,
@@ -542,3 +543,33 @@ def test_coding_session_reports_provider_and_persistence_failures() -> None:
     assert result.error is not None
     assert "provider request failed" in result.error
     assert "persistence failed" in result.error
+
+
+def test_coding_session_enforces_max_provider_calls_limit() -> None:
+    store = MemorySessionStore()
+    record = store.create()
+    session = CodingSession(
+        provider=CapturingProvider(),
+        session_store=store,
+        session_id=record.session_id,
+        limits=RunLimits(max_provider_calls=0),
+    )
+
+    result = session.prompt("first task")
+    assert result.status == "error"
+    assert result.stop_reason == "max_provider_calls_exceeded"
+    assert "maximum provider-call limit exceeded" in (result.error or "")
+
+
+def test_coding_session_stop_reason_default() -> None:
+    store = MemorySessionStore()
+    record = store.create()
+    session = CodingSession(
+        provider=CapturingProvider(),
+        session_store=store,
+        session_id=record.session_id,
+    )
+
+    result = session.prompt("first task")
+    assert result.status == "success"
+    assert result.stop_reason == "completed"

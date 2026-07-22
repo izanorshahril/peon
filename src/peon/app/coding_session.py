@@ -8,14 +8,16 @@ from datetime import datetime, timezone
 import logging
 from threading import Lock
 import time
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 from uuid import uuid4
 
 from peon.agent import (
     AgentContext,
     AgentError,
     AgentMessage,
+    LimitExceededError,
     ModelProvider,
+    ModelStreamChunk,
     ToolCall,
     ToolExecutionContext,
     ToolExecutor,
@@ -31,6 +33,38 @@ from .resources import (
 )
 from .sessions import SessionStore
 
+StopReason: TypeAlias = Literal[
+    "completed",
+    "cancelled",
+    "max_provider_calls_exceeded",
+    "max_tool_calls_exceeded",
+    "max_elapsed_seconds_exceeded",
+    "max_input_tokens_exceeded",
+    "max_output_tokens_exceeded",
+    "max_total_tokens_exceeded",
+    "max_cost_exceeded",
+    "provider_error",
+    "tool_error",
+    "persistence_error",
+    "consumer_error",
+    "internal_error",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RunLimits:
+    """Immutable run policy bounds for automation and hosted execution."""
+
+    max_provider_calls: int | None = None
+    max_tool_calls: int | None = None
+    max_elapsed_seconds: float | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_total_tokens: int | None = None
+    max_cost: float | None = None
+    currency: str | None = None
+
+
 TurnStatus = Literal["success", "error", "cancelled"]
 
 
@@ -43,6 +77,18 @@ class TurnResult:
     content: str | None = None
     error: str | None = None
     usage: Usage | None = None
+    stop_reason: StopReason | str | None = None
+
+    def __post_init__(self) -> None:
+        if self.stop_reason is None:
+            default_reason = (
+                "completed"
+                if self.status == "success"
+                else "cancelled"
+                if self.status == "cancelled"
+                else "provider_error"
+            )
+            object.__setattr__(self, "stop_reason", default_reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +108,14 @@ class MessageEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamDeltaEvent:
+    session_id: str
+    run_id: str
+    turn_id: str
+    chunk: ModelStreamChunk
+
+
+@dataclass(frozen=True, slots=True)
 class TurnFinishedEvent:
     session_id: str
     run_id: str
@@ -71,7 +125,7 @@ class TurnFinishedEvent:
 
 
 SessionEvent: TypeAlias = (
-    TurnStartedEvent | MessageEvent | TurnFinishedEvent
+    TurnStartedEvent | MessageEvent | StreamDeltaEvent | TurnFinishedEvent
 )
 EventHandler = Callable[[SessionEvent], None]
 logger = logging.getLogger(__name__)
@@ -160,6 +214,8 @@ class CodingSession:
         trace_sink: TraceSink | None = None,
         trace_provider: str | None = None,
         trace_utc_clock: Callable[[], datetime] | None = None,
+        limits: RunLimits | None = None,
+        journal_sink: Any | None = None,
     ) -> None:
         self.provider = provider
         self.session_store = session_store
@@ -178,6 +234,8 @@ class CodingSession:
         self._trace_sink = trace_sink
         self._trace_provider = trace_provider
         self._trace_utc_clock = trace_utc_clock
+        self._limits = limits
+        self._journal_sink = journal_sink
         self._active_execution_context: ToolExecutionContext | None = None
         (
             self._persisted_message_count,
@@ -185,6 +243,7 @@ class CodingSession:
         ) = self._stored_message_count()
         self._persistence_error: str | None = None
         self._state_lock = Lock()
+        self._active_on_event: EventHandler | None = None
 
     @property
     def session_id(self) -> str:
@@ -207,6 +266,7 @@ class CodingSession:
         task: str,
         *,
         preserve_task_whitespace: bool = False,
+        on_event: EventHandler | None = None,
     ) -> TurnResult:
         """Run one prompt and return a structured terminal outcome."""
         execution_context = ToolExecutionContext(on_output=self._on_tool_output)
@@ -221,6 +281,7 @@ class CodingSession:
                     error="session is already running",
                 )
             self._active_execution_context = execution_context
+            self._active_on_event = on_event
 
         started_at = self._clock()
         usage = _UsageAccumulator()
@@ -252,6 +313,14 @@ class CodingSession:
                         turn_id,
                     ),
                     on_usage=usage.add,
+                    on_stream_chunk=lambda chunk: self._emit(
+                        StreamDeltaEvent(
+                            session_id=self._session_id,
+                            run_id=self._run_id,
+                            turn_id=turn_id,
+                            chunk=chunk,
+                        )
+                    ),
                     preserve_task_whitespace=preserve_task_whitespace,
                     execution_context=execution_context,
                     trace_sink=self._trace_sink,
@@ -264,6 +333,17 @@ class CodingSession:
                         if self._trace_sink is not None
                         else None
                     ),
+                    limits=self._limits,
+                )
+            except LimitExceededError as error:
+                result = TurnResult(
+                    status="error",
+                    session_id=self._session_id,
+                    run_id=self._run_id,
+                    turn_id=turn_id,
+                    error=str(error),
+                    usage=usage.result(),
+                    stop_reason=error.stop_reason,
                 )
             except Exception as error:
                 result = TurnResult(
@@ -345,6 +425,7 @@ class CodingSession:
         finally:
             with self._state_lock:
                 self._active_execution_context = None
+                self._active_on_event = None
 
 
     def cancel(self) -> bool:
@@ -431,12 +512,23 @@ class CodingSession:
             return 0, str(error)
 
     def _emit(self, event: SessionEvent) -> None:
+        if self._journal_sink is not None:
+            try:
+                self._journal_sink.write_event(event)
+            except Exception:
+                if getattr(self._journal_sink, "strict", False):
+                    raise
+                logger.exception("event journal sink failed")
         if self._on_event is not None:
             try:
                 self._on_event(event)
             except Exception:
                 logger.exception("coding session event handler failed")
-                return
+        if self._active_on_event is not None:
+            try:
+                self._active_on_event(event)
+            except Exception:
+                logger.exception("turn event handler failed")
 
 
 def _utc_now() -> datetime:

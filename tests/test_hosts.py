@@ -9,7 +9,6 @@ from peon.app.hosts import HostUnavailableError, resolve_host
         ("print", "print"),
         ("jsonl", "events"),
         ("textual", "interactive"),
-        ("prompt-toolkit", "interactive"),
         ("embedded", "embedded"),
     ],
 )
@@ -24,6 +23,11 @@ def test_builtin_hosts_have_stable_ids_and_roles(
     assert host.available is True
 
 
+def test_retired_prompt_toolkit_host_returns_actionable_error() -> None:
+    with pytest.raises(HostUnavailableError, match="prompt-toolkit host has been retired"):
+        resolve_host("prompt-toolkit")
+
+
 @pytest.mark.parametrize("host_id", ["fullscreen", "webapp"])
 def test_reserved_hosts_fail_before_startup(host_id: str) -> None:
     with pytest.raises(HostUnavailableError, match=f"{host_id} host is not available"):
@@ -33,3 +37,13 @@ def test_reserved_hosts_fail_before_startup(host_id: str) -> None:
 def test_unknown_hosts_report_their_identifier() -> None:
     with pytest.raises(HostUnavailableError, match="unknown host 'robot'"):
         resolve_host("robot")
+
+
+def test_resolve_textual_host_when_textual_is_missing_raises_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "textual", None)
+    with pytest.raises(HostUnavailableError, match="Interactive TUI requires the 'tui' optional extra"):
+        resolve_host("textual")

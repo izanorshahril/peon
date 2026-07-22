@@ -208,9 +208,7 @@ import sys
 from peon.embedded import EmbeddedSession
 
 assert "textual" not in sys.modules
-assert "prompt_toolkit" not in sys.modules
 assert "peon.app.textual_tui" not in sys.modules
-assert "peon.app.tui" not in sys.modules
 """
     completed = subprocess.run(
         [sys.executable, "-c", script],
@@ -221,3 +219,27 @@ assert "peon.app.tui" not in sys.modules
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_embedded_session_sync_and_async_event_iterators() -> None:
+    import asyncio
+
+    session = EmbeddedSession(
+        provider=FakeProvider(),
+        session_store=MemorySessionStore(),
+    )
+
+    sync_events = list(session.iter_events("hello"))
+    assert len(sync_events) >= 2
+    assert isinstance(sync_events[0], TurnStartedEvent)
+    assert isinstance(sync_events[-1], TurnFinishedEvent)
+
+    async def _exercise_async() -> None:
+        async_events: list[object] = []
+        async for event in session.aiter_events("world"):
+            async_events.append(event)
+        assert len(async_events) >= 2
+        assert isinstance(async_events[0], TurnStartedEvent)
+        assert isinstance(async_events[-1], TurnFinishedEvent)
+
+    asyncio.run(_exercise_async())

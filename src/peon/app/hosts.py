@@ -33,6 +33,18 @@ _BUILTIN_HOSTS = {
 
 def resolve_host(identifier: str) -> Host:
     """Resolve a stable built-in host identifier before startup work."""
+    if identifier == "prompt-toolkit":
+        raise HostUnavailableError(
+            "prompt-toolkit host has been retired; use 'textual' for interactive mode"
+        )
+    if identifier == "textual":
+        try:
+            import textual  # noqa: F401
+        except ImportError as caught:
+            raise HostUnavailableError(
+                "Interactive TUI requires the 'tui' optional extra. "
+                "Install with: pip install \"peon[tui]\" or uv add \"peon[tui]\""
+            ) from caught
     host = _BUILTIN_HOSTS.get(identifier)
     if host is None:
         raise HostUnavailableError(f"unknown host '{identifier}'")
