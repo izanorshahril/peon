@@ -44,116 +44,26 @@ from .sessions import MemorySessionStore, SessionStore
 from .resources import ResourceInventory, ResourceLoader
 
 
-REASONING_EFFORTS = ("none", "low", "medium", "high")
-PROVIDER_REASONING_CAPABILITIES = {
-    "openai-compatible": REASONING_EFFORTS,
-    "custom": REASONING_EFFORTS,
-}
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderConfig:
-    name: str
-    model: str | None = None
-    base_url: str | None = None
-    api_key: str | None = None
-    copilot_token: str | None = None
-    models: tuple[str, ...] = ()
-    provider_type: str | None = None
-    reasoning_effort_field: str = "reasoningEffort"
-    reasoning_effort: str | None = "low"
-    temperature_field: str = "temperature"
-    temperature: float | None = 1
-    max_response_tokens_field: str = "maxResponseTokens"
-    max_response_tokens: int | None = 4096
-    max_output_tokens_field: str = "maxOutputTokens"
-    max_output_tokens: int | None = None
-    max_tokens_field: str = "maxTokens"
-    max_tokens: int | None = None
-    response_format_field: str = "responseFormat"
-    response_format: str | None = "text"
-    response_content_field: str = "completion"
-    response_thinking_field: str = "thinking"
-    tool_prompt_role: str = "developer"
-    supports_tools: bool | None = None
-    supports_stream: bool = False
-    supports_chat_completions: bool = True
-
-    def __post_init__(self) -> None:
-        if self.supports_tools is None:
-            provider_type = self.provider_type or self.name
-            object.__setattr__(self, "supports_tools", provider_type != "custom")
-
-
-def reasoning_effort_choices(config: ProviderConfig) -> tuple[str, ...]:
-    provider_type = config.provider_type or config.name
-    return PROVIDER_REASONING_CAPABILITIES.get(provider_type, ())
+from .config import (
+    CONFIG_SETTING_SPECS,
+    PROFILE_SETTING_SPECS,
+    PROVIDER_REASONING_CAPABILITIES,
+    REASONING_EFFORTS,
+    ProviderConfig,
+    ProviderSettingSpec,
+    SavedModel,
+    cycle_reasoning_effort as _cycle_reasoning_effort_config,
+    reasoning_effort_choices,
+    saved_model_choices,
+    select_saved_model as _select_saved_model_config,
+)
 
 
 def cycle_reasoning_effort(config: ProviderConfig, direction: int = 1) -> str:
-    choices = reasoning_effort_choices(config)
-    if not choices:
-        raise CommandError("reasoning effort is not supported by this provider")
-    current = config.reasoning_effort or "none"
     try:
-        index = choices.index(current)
-    except ValueError:
-        index = -1 if direction > 0 else 0
-    return choices[(index + direction) % len(choices)]
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderSettingSpec:
-    key: str
-    label: str
-    field_name: str
-    value_kind: Literal["text", "secret", "integer", "temperature", "choice", "toggle"]
-    choices: tuple[str, ...] = ()
-
-
-PROFILE_SETTING_SPECS = (
-    ProviderSettingSpec("name", "Name", "name", "text"),
-)
-CONFIG_SETTING_SPECS = (
-    ProviderSettingSpec("base-url", "Base URL", "base_url", "text"),
-    ProviderSettingSpec("api-key", "API key", "api_key", "secret"),
-    ProviderSettingSpec(
-        "max-completion-tokens",
-        "Max completion tokens",
-        "max_response_tokens",
-        "integer",
-    ),
-    ProviderSettingSpec(
-        "max-output-tokens", "Max output tokens", "max_output_tokens", "integer"
-    ),
-    ProviderSettingSpec("max-tokens", "Max tokens", "max_tokens", "integer"),
-    ProviderSettingSpec(
-        "reasoning",
-        "Reasoning",
-        "reasoning_effort",
-        "choice",
-        ("none", "low", "medium", "high"),
-    ),
-    ProviderSettingSpec("supports-tools", "Supports tools", "supports_tools", "toggle"),
-    ProviderSettingSpec(
-        "tool-prompt-role",
-        "Tool prompt role",
-        "tool_prompt_role",
-        "choice",
-        ("developer", "system"),
-    ),
-    ProviderSettingSpec(
-        "supports-stream", "Supports stream", "supports_stream", "toggle"
-    ),
-    ProviderSettingSpec(
-        "supports-chat-completions",
-        "Supports /chat/completions",
-        "supports_chat_completions",
-        "toggle",
-    ),
-    ProviderSettingSpec("temperature", "Temperature", "temperature", "temperature"),
-    ProviderSettingSpec("response-format", "Response format", "response_format", "text"),
-)
+        return _cycle_reasoning_effort_config(config, direction)
+    except ValueError as error:
+        raise CommandError(str(error)) from error
 
 
 def provider_config_setting_specs(
@@ -322,40 +232,14 @@ class CommandError(Exception):
     """An operator-facing command boundary error."""
 
 
-@dataclass(frozen=True, slots=True)
-class SavedModel:
-    config: ProviderConfig
-    model: str
-
-    @property
-    def label(self) -> str:
-        return f"{self.model} [{self.config.name}]"
-
-
-def saved_model_choices(
-    configs: Sequence[ProviderConfig],
-) -> tuple[SavedModel, ...]:
-    return tuple(
-        SavedModel(config=config, model=model)
-        for config in configs
-        for model in config.models
-    )
-
-
 def select_saved_model(
     selection: str,
     choices: tuple[SavedModel, ...],
 ) -> SavedModel:
-    if selection.isdigit():
-        index = int(selection) - 1
-        if 0 <= index < len(choices):
-            return choices[index]
-    matches = tuple(choice for choice in choices if choice.model == selection)
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        raise CommandError("select model by number when model IDs repeat")
-    raise CommandError("select a model by number or exact model ID")
+    try:
+        return _select_saved_model_config(selection, choices)
+    except ValueError as error:
+        raise CommandError(str(error)) from error
 
 
 def build_parser() -> argparse.ArgumentParser:

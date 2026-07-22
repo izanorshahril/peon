@@ -365,6 +365,19 @@ Completed 2026-07-22:
   0 xfailed); `uv run mypy src/peon` clean across 28 files; `git diff --check`
   clean.
 
+### 0.3.1 Ticket 05: complete controller provider and settings flows
+
+Completed 2026-07-22:
+
+- Moved `ProviderConfig`, `SavedModel`, `saved_model_choices`, `select_saved_model`,
+  `reasoning_effort_choices`, `cycle_reasoning_effort`, `ProviderSettingSpec`,
+  `PROFILE_SETTING_SPECS`, `CONFIG_SETTING_SPECS` into `peon.app.config`.
+- Removed all imports from `peon.app.cli` inside `SessionController`, ensuring strict host-neutral boundary separation.
+- Fully implemented multi-step `/provider` setup, `/model` selection, `/settings` inspection/update, and `/logout` behind typed controller intents, outcomes (`ProviderSetupStepOutcome`, `ProviderSuccessOutcome`, `SettingsOptionsOutcome`, `SettingsUpdatedOutcome`, `LogoutOptionsOutcome`, `LogoutSuccessOutcome`), and single-use continuation tokens.
+- Secret inputs (API keys, Copilot tokens) flag `is_secret=True` and are masked in all outcomes and logs.
+- Added `tests/test_controller_provider_settings.py` headless unit test suite verifying all provider, model, settings, logout, and token single-use workflows.
+- Evidence: 352 total tests passing in full pytest suite (0 failures, 0 errors); `uv run mypy src/peon` clean across 28 files; `git diff --check` clean.
+
 ## Remaining Pi Gaps
 
 Use as feature discovery, verify upstream before work:

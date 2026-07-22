@@ -40,6 +40,12 @@ from .commands import (
     DEFAULT_COMMAND_CATALOG,
     CommandDefinition,
 )
+from .config import (
+    ProviderConfig,
+    SavedModel,
+    saved_model_choices,
+    select_saved_model,
+)
 from .resources import (
     ResourceInventory,
     apply_resource_prompt,
@@ -296,6 +302,34 @@ class LogoutSuccessOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class SettingOption:
+    """A configurable application or provider setting option."""
+
+    key: str
+    label: str
+    current_value: str
+    value_kind: str
+    choices: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsOptionsOutcome:
+    """Outcome listing configurable settings."""
+
+    settings: tuple[SettingOption, ...]
+    continuation_token: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsUpdatedOutcome:
+    """Outcome when a setting has been updated."""
+
+    setting: str
+    value: str
+    updated: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class ShellIntent:
     """Typed request for direct visible or hidden shell command execution."""
 
@@ -343,6 +377,8 @@ CommandOutcome: TypeAlias = (
     | ProviderSuccessOutcome
     | LogoutOptionsOutcome
     | LogoutSuccessOutcome
+    | SettingsOptionsOutcome
+    | SettingsUpdatedOutcome
     | ShellResultOutcome
     | ShellErrorOutcome
     | CommandErrorOutcome
@@ -887,10 +923,8 @@ class SessionController:
         config_store: object = None,
     ) -> ModelOptionsOutcome | CommandErrorOutcome:
         """Select a saved model or return available model choices."""
-        from .cli import saved_model_choices, select_saved_model
-
         target = intent.target if intent is not None else None
-        store_configs = ()
+        store_configs: tuple[ProviderConfig, ...] = ()
         if config_store is not None and hasattr(config_store, "load_all"):
             try:
                 store_configs = getattr(config_store, "load_all")()
@@ -961,6 +995,7 @@ class SessionController:
     def dispatch_provider_setup(
         self,
         intent: ProviderSetupIntent | None = None,
+        config_store: object = None,
     ) -> ProviderSetupStepOutcome:
         """Start multi-step provider connection setup."""
         del intent
@@ -969,10 +1004,11 @@ class SessionController:
             "type": "provider_step",
             "step": "provider_type",
             "data": {},
+            "config_store": config_store,
         }
         return ProviderSetupStepOutcome(
             step="provider_type",
-            prompt="Select provider type (1. openai-compatible, 2. custom):",
+            prompt="Select provider type (1. openai-compatible, 2. custom, 3. github-copilot):",
             is_secret=False,
             continuation_token=token,
         )
@@ -980,10 +1016,39 @@ class SessionController:
     def dispatch_settings(
         self,
         intent: SettingsIntent | None = None,
-    ) -> CommandOutcome:
+        config_store: object = None,
+    ) -> SettingsOptionsOutcome | SettingsUpdatedOutcome | CommandErrorOutcome:
         """Inspect or change settings."""
-        del intent
-        return CommandErrorOutcome(command="settings", error="Settings command executed via controller.")
+        setting = intent.setting if intent is not None else None
+        value = intent.value if intent is not None else None
+
+        if setting is None:
+            options = (
+                SettingOption("hide_thinking", "Hide thinking blocks", str(getattr(self, "_hide_thinking", False)), "toggle"),
+                SettingOption("reasoning_effort", "Reasoning effort", str(getattr(self, "_reasoning_effort", "low")), "choice", ("none", "low", "medium", "high")),
+                SettingOption("model", "Active model", str(self._model or "default"), "text"),
+            )
+            return SettingsOptionsOutcome(settings=options)
+
+        if value is None:
+            return CommandErrorOutcome(command="settings", error=f"Value required to update setting '{setting}'")
+
+        if setting in {"hide_thinking", "hide-thinking"}:
+            new_val = value.lower() in {"true", "1", "yes", "on"}
+            object.__setattr__(self, "_hide_thinking", new_val)
+            return SettingsUpdatedOutcome(setting="hide_thinking", value=str(new_val))
+
+        if setting in {"reasoning_effort", "reasoning", "reasoning-effort"}:
+            if value not in {"none", "low", "medium", "high"}:
+                return CommandErrorOutcome(command="settings", error=f"Invalid reasoning effort value: {value}")
+            object.__setattr__(self, "_reasoning_effort", value)
+            return SettingsUpdatedOutcome(setting="reasoning_effort", value=value)
+
+        if setting == "model":
+            self._model = value
+            return SettingsUpdatedOutcome(setting="model", value=value)
+
+        return CommandErrorOutcome(command="settings", error=f"Unknown setting: '{setting}'")
 
     def dispatch_logout(
         self,
@@ -991,8 +1056,6 @@ class SessionController:
         config_store: object = None,
     ) -> LogoutOptionsOutcome | LogoutSuccessOutcome | CommandErrorOutcome:
         """List providers to remove or remove specified provider."""
-        from .cli import ProviderConfig
-
         target = intent.target if intent is not None else None
         store_configs: tuple[ProviderConfig, ...] = ()
         if config_store is not None and hasattr(config_store, "load_all"):
@@ -1032,6 +1095,7 @@ class SessionController:
             "type": "logout",
             "map": token_map,
             "configs": store_configs,
+            "config_store": config_store,
         }
         return LogoutOptionsOutcome(
             options=options,
@@ -1043,8 +1107,6 @@ class SessionController:
         intent: ContinuationResponseIntent,
     ) -> CommandOutcome:
         """Process response for a single-use continuation token."""
-        from .cli import ProviderConfig, SavedModel, select_saved_model
-
         token_data = self._continuation_tokens.pop(intent.continuation_token, None)
         if token_data is None:
             return CommandErrorOutcome(
@@ -1085,10 +1147,163 @@ class SessionController:
             if config_choice is None:
                 return CommandErrorOutcome(command="logout", error=f"Invalid provider choice '{resp_str}'")
 
+            config_store = token_data.get("config_store")
+            if config_store is not None and hasattr(config_store, "delete"):
+                try:
+                    getattr(config_store, "delete")(config_choice)
+                except OSError as error:
+                    return CommandErrorOutcome(command="logout", error=str(error))
+
+            remaining = [c for c in token_map.values() if c.name != config_choice.name]
+            next_active = remaining[0].name if remaining else None
             return LogoutSuccessOutcome(
                 removed_provider_name=config_choice.name,
-                active_provider_name=None,
+                active_provider_name=next_active,
             )
+
+        if flow_type == "provider_step":
+            step = token_data.get("step")
+            data = cast(dict[str, Any], token_data.get("data", {}))
+            config_store = token_data.get("config_store")
+            resp_str = str(intent.response).strip()
+
+            if step == "provider_type":
+                norm = resp_str.casefold()
+                if norm in {"1", "openai-compatible", "openai"}:
+                    p_type = "openai-compatible"
+                    next_step = "base_url"
+                    prompt = "Enter base URL:"
+                    is_sec = False
+                elif norm in {"2", "custom"}:
+                    p_type = "custom"
+                    next_step = "custom_name"
+                    prompt = "Enter custom provider name:"
+                    is_sec = False
+                elif norm in {"3", "github-copilot", "copilot"}:
+                    p_type = "github-copilot"
+                    next_step = "copilot_token"
+                    prompt = "Enter Copilot token:"
+                    is_sec = True
+                else:
+                    return CommandErrorOutcome(
+                        command="provider",
+                        error=f"Invalid provider choice '{resp_str}'",
+                    )
+                data["provider_type"] = p_type
+                new_token = self._id_factory()
+                self._continuation_tokens[new_token] = {
+                    "type": "provider_step",
+                    "step": next_step,
+                    "data": data,
+                    "config_store": config_store,
+                }
+                return ProviderSetupStepOutcome(
+                    step=next_step,
+                    prompt=prompt,
+                    is_secret=is_sec,
+                    continuation_token=new_token,
+                )
+
+            if step == "custom_name":
+                data["name"] = resp_str or "custom"
+                new_token = self._id_factory()
+                self._continuation_tokens[new_token] = {
+                    "type": "provider_step",
+                    "step": "model",
+                    "data": data,
+                    "config_store": config_store,
+                }
+                return ProviderSetupStepOutcome(
+                    step="model",
+                    prompt="Enter model name:",
+                    is_secret=False,
+                    continuation_token=new_token,
+                )
+
+            if step == "base_url":
+                data["base_url"] = resp_str
+                new_token = self._id_factory()
+                self._continuation_tokens[new_token] = {
+                    "type": "provider_step",
+                    "step": "api_key",
+                    "data": data,
+                    "config_store": config_store,
+                }
+                return ProviderSetupStepOutcome(
+                    step="api_key",
+                    prompt="Enter API key:",
+                    is_secret=True,
+                    continuation_token=new_token,
+                )
+
+            if step == "api_key":
+                data["api_key"] = resp_str
+                new_token = self._id_factory()
+                self._continuation_tokens[new_token] = {
+                    "type": "provider_step",
+                    "step": "model",
+                    "data": data,
+                    "config_store": config_store,
+                }
+                return ProviderSetupStepOutcome(
+                    step="model",
+                    prompt="Enter model name:",
+                    is_secret=False,
+                    continuation_token=new_token,
+                )
+
+            if step == "copilot_token":
+                data["copilot_token"] = resp_str
+                provider_type = "github-copilot"
+                name = "github-copilot"
+                model_str = "gpt-4o"
+                config = ProviderConfig(
+                    name=name,
+                    provider_type=provider_type,
+                    model=model_str,
+                    models=(model_str, "gpt-4o-mini"),
+                    copilot_token=resp_str,
+                )
+                if config_store is not None and hasattr(config_store, "save"):
+                    try:
+                        getattr(config_store, "save")(config)
+                    except OSError as err:
+                        return CommandErrorOutcome(command="provider", error=str(err))
+                self._model = model_str
+                return ProviderSuccessOutcome(
+                    provider_name=name,
+                    model_name=model_str,
+                    config=config,
+                )
+
+            if step == "model":
+                model_str = resp_str
+                if not model_str:
+                    return CommandErrorOutcome(
+                        command="provider",
+                        error="Model name is required.",
+                    )
+                provider_type = data.get("provider_type", "openai-compatible")
+                name = data.get("name") or provider_type
+                config = ProviderConfig(
+                    name=name,
+                    provider_type=provider_type,
+                    model=model_str,
+                    models=(model_str,),
+                    base_url=data.get("base_url"),
+                    api_key=data.get("api_key"),
+                )
+                if config_store is not None and hasattr(config_store, "save"):
+                    try:
+                        getattr(config_store, "save")(config)
+                    except OSError as err:
+                        return CommandErrorOutcome(command="provider", error=str(err))
+                self._model = model_str
+                return ProviderSuccessOutcome(
+                    provider_name=name,
+                    model_name=model_str,
+                    config=config,
+                )
 
         return CommandErrorOutcome(command="continuation", error=f"Unknown flow type '{flow_type}'")
 
