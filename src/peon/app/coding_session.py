@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import logging
 from threading import Lock
 import time
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 from uuid import uuid4
 
 from peon.agent import (
@@ -215,6 +215,7 @@ class CodingSession:
         trace_provider: str | None = None,
         trace_utc_clock: Callable[[], datetime] | None = None,
         limits: RunLimits | None = None,
+        journal_sink: Any | None = None,
     ) -> None:
         self.provider = provider
         self.session_store = session_store
@@ -234,6 +235,7 @@ class CodingSession:
         self._trace_provider = trace_provider
         self._trace_utc_clock = trace_utc_clock
         self._limits = limits
+        self._journal_sink = journal_sink
         self._active_execution_context: ToolExecutionContext | None = None
         (
             self._persisted_message_count,
@@ -510,6 +512,13 @@ class CodingSession:
             return 0, str(error)
 
     def _emit(self, event: SessionEvent) -> None:
+        if self._journal_sink is not None:
+            try:
+                self._journal_sink.write_event(event)
+            except Exception:
+                if getattr(self._journal_sink, "strict", False):
+                    raise
+                logger.exception("event journal sink failed")
         if self._on_event is not None:
             try:
                 self._on_event(event)

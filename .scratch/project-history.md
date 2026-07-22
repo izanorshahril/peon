@@ -398,6 +398,12 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Support turn-level `on_event` callback parameter in `PromptIntent` and `CodingSession.prompt`.
 - Pass 20 focused embedded/session tests, 305 full suite, mypy clean, git diff check clean.
 
+### Ticket 16: add optional redacted event journal
+
+- Add `EventJournalSink` protocol, `FileEventJournalSink`, `serialize_event()`, `RedactionHook`, and `JournalWriteError` to `observability.py`.
+- Integrate `journal_sink` into `CodingSession` and `SessionController` `_emit()` with strict vs non-strict error modes while preserving canonical message state.
+- Pass 61 focused observability/session tests, 309 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi
