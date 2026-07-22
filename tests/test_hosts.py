@@ -37,3 +37,13 @@ def test_reserved_hosts_fail_before_startup(host_id: str) -> None:
 def test_unknown_hosts_report_their_identifier() -> None:
     with pytest.raises(HostUnavailableError, match="unknown host 'robot'"):
         resolve_host("robot")
+
+
+def test_resolve_textual_host_when_textual_is_missing_raises_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "textual", None)
+    with pytest.raises(HostUnavailableError, match="Interactive TUI requires the 'tui' optional extra"):
+        resolve_host("textual")

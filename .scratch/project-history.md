@@ -404,6 +404,12 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Integrate `journal_sink` into `CodingSession` and `SessionController` `_emit()` with strict vs non-strict error modes while preserving canonical message state.
 - Pass 61 focused observability/session tests, 309 full suite, mypy clean, git diff check clean.
 
+### Ticket 17: split headless, TUI, and serve packaging
+
+- Move `textual` and `textual-serve` out of core dependencies in `pyproject.toml` into `[project.optional-dependencies]` `tui` and `serve`.
+- Catch missing `textual` during host resolution and CLI interactive startup, returning concise actionable guidance (`pip install "peon[tui]"` / `uv add "peon[tui]"`) without traceback.
+- Pass 58 focused host/CLI/embedded tests, 310 full suite, mypy clean, git diff check clean.
+
 ## Primary Upstream Sources
 
 ### Pi
