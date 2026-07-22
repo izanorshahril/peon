@@ -220,12 +220,72 @@ class TerminalErrorEvent:
     provider_call_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ToolStartedEvent:
+    event_type: ClassVar[str] = "tool_started"
+    session_id: str
+    run_id: str
+    operation_id: str
+    tool_name: str
+    arguments: Mapping[str, object]
+    turn_id: str | None = None
+    call_id: str | None = None
+    source: Literal["model", "shell"] = "model"
+    schema_version: int = 2
+    timestamp: datetime = field(default_factory=_utc_now)
+    sequence: int = 0
+    message_id: str | None = None
+    provider_call_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOutputEvent:
+    event_type: ClassVar[str] = "tool_output"
+    session_id: str
+    run_id: str
+    operation_id: str
+    stream: str
+    chunk: str
+    turn_id: str | None = None
+    schema_version: int = 2
+    timestamp: datetime = field(default_factory=_utc_now)
+    sequence: int = 0
+    message_id: str | None = None
+    provider_call_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolFinishedEvent:
+    event_type: ClassVar[str] = "tool_finished"
+    session_id: str
+    run_id: str
+    operation_id: str
+    tool_name: str
+    outcome: Literal["success", "error", "cancelled"]
+    turn_id: str | None = None
+    result: str | None = None
+    error: str | None = None
+    call_id: str | None = None
+    source: Literal["model", "shell"] = "model"
+    schema_version: int = 2
+    timestamp: datetime = field(default_factory=_utc_now)
+    sequence: int = 0
+    message_id: str | None = None
+    provider_call_id: str | None = None
+
+
 SessionEvent: TypeAlias = (
-    TurnStartedEvent | MessageEvent | StreamDeltaEvent | TurnFinishedEvent
+    TurnStartedEvent
+    | MessageEvent
+    | StreamDeltaEvent
+    | TurnFinishedEvent
     | CommandOutcomeEvent
     | SelectionRequestEvent
     | CancellationEvent
     | TerminalErrorEvent
+    | ToolStartedEvent
+    | ToolOutputEvent
+    | ToolFinishedEvent
 )
 EventHandler = Callable[[SessionEvent], None]
 logger = logging.getLogger(__name__)
@@ -376,8 +436,26 @@ class CodingSession:
         on_event: EventHandler | None = None,
     ) -> TurnResult:
         """Run one prompt and return a structured terminal outcome."""
-        execution_context = ToolExecutionContext(on_output=self._on_tool_output)
         turn_id = self._id_factory()
+        active_op_id: str | None = None
+        active_tool_call: ToolCall | None = None
+
+        def _handle_tool_output(stream_name: str, chunk: str) -> None:
+            op_id = active_op_id or turn_id
+            self._emit(
+                ToolOutputEvent(
+                    session_id=self._session_id,
+                    run_id=self._run_id,
+                    turn_id=turn_id,
+                    operation_id=op_id,
+                    stream=stream_name,
+                    chunk=chunk,
+                )
+            )
+            if self._on_tool_output is not None:
+                self._on_tool_output(stream_name, chunk)
+
+        execution_context = ToolExecutionContext(on_output=_handle_tool_output)
         with self._state_lock:
             if self._active_execution_context is not None:
                 return TurnResult(
@@ -389,6 +467,63 @@ class CodingSession:
                 )
             self._active_execution_context = execution_context
             self._active_on_event = on_event
+
+        def _handle_on_message(message: AgentMessage) -> None:
+            nonlocal active_op_id, active_tool_call
+            if message.role == "assistant" and message.tool_call is not None:
+                op_id = self._id_factory()
+                active_op_id = op_id
+                active_tool_call = message.tool_call
+                self._emit(
+                    ToolStartedEvent(
+                        session_id=self._session_id,
+                        run_id=self._run_id,
+                        turn_id=turn_id,
+                        operation_id=op_id,
+                        tool_name=message.tool_call.name,
+                        arguments=message.tool_call.arguments,
+                        call_id=message.tool_call.call_id,
+                        source="model",
+                    )
+                )
+            elif message.role == "tool":
+                op_id = active_op_id or self._id_factory()
+                tool_name = (
+                    active_tool_call.name
+                    if active_tool_call is not None
+                    else "unknown"
+                )
+                call_id = (
+                    active_tool_call.call_id
+                    if active_tool_call is not None
+                    else message.tool_call_id
+                )
+                outcome: Literal["success", "error", "cancelled"]
+                if execution_context.cancelled:
+                    outcome = "cancelled"
+                elif message.content.startswith("tool error:"):
+                    outcome = "error"
+                else:
+                    outcome = "success"
+
+                self._emit(
+                    ToolFinishedEvent(
+                        session_id=self._session_id,
+                        run_id=self._run_id,
+                        turn_id=turn_id,
+                        operation_id=op_id,
+                        tool_name=tool_name,
+                        outcome=outcome,
+                        result=message.content if outcome == "success" else None,
+                        error=message.content if outcome != "success" else None,
+                        call_id=call_id,
+                        source="model",
+                    )
+                )
+                active_op_id = None
+                active_tool_call = None
+
+            self._persist_message(message, turn_id)
 
         started_at = self._clock()
         self._active_message_id = None
@@ -416,10 +551,7 @@ class CodingSession:
                     context=self._context,
                     executor=self._executor,
                     model=self._model,
-                    on_message=lambda message: self._persist_message(
-                        message,
-                        turn_id,
-                    ),
+                    on_message=_handle_on_message,
                     on_usage=usage.add,
                     on_stream_chunk=lambda chunk: self._emit(
                         StreamDeltaEvent(

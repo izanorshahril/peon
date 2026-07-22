@@ -12,6 +12,9 @@ import pytest
 from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
 from peon.app.coding_session import (
     MessageEvent,
+    ToolFinishedEvent,
+    ToolOutputEvent,
+    ToolStartedEvent,
     TurnFinishedEvent,
     TurnStartedEvent,
 )
@@ -279,10 +282,6 @@ def test_embedded_async_iterator_waits_for_delayed_terminal_event() -> None:
     assert isinstance(events[-1], TurnFinishedEvent)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="0.3.1 ticket 04: tool lifecycle is not in session event stream",
-)
 def test_embedded_tool_run_emits_tool_start_and_finish_events() -> None:
     events: list[object] = []
     registry = ExtensionRegistry()
@@ -582,3 +581,140 @@ def test_async_iterator_cancellation_reaches_active_turn() -> None:
         return [e async for e in it]  # type: ignore[attr-defined]
 
     asyncio.run(_run_and_cancel())
+
+
+# ---------------------------------------------------------------------------
+# Ticket 04 focused tests: Tool and shell lifecycle events
+# ---------------------------------------------------------------------------
+
+
+def test_tool_started_and_finished_event_fields() -> None:
+    events: list[object] = []
+    registry = ExtensionRegistry()
+    registry.register_tool(
+        name="lookup",
+        description="Look up a value.",
+        parameters={"type": "object"},
+        handler=lambda arguments: "owner:Peon",
+    )
+    session = EmbeddedSession(
+        provider=ToolProvider(),
+        session_store=MemorySessionStore(),
+        tools=registry,
+        on_event=events.append,
+    )
+
+    result = session.submit("look up the owner")
+    assert result.status == "success"
+
+    started = [e for e in events if isinstance(e, ToolStartedEvent)]
+    finished = [e for e in events if isinstance(e, ToolFinishedEvent)]
+
+    assert len(started) == 1
+    assert len(finished) == 1
+
+    start_ev = started[0]
+    finish_ev = finished[0]
+
+    assert start_ev.tool_name == "lookup"
+    assert start_ev.arguments == {"key": "owner"}
+    assert start_ev.source == "model"
+    assert start_ev.call_id == "call-1"
+    assert start_ev.operation_id is not None
+
+    assert finish_ev.operation_id == start_ev.operation_id
+    assert finish_ev.tool_name == "lookup"
+    assert finish_ev.outcome == "success"
+    assert finish_ev.result == "owner:Peon"
+    assert finish_ev.source == "model"
+
+
+def test_tool_output_events_emitted() -> None:
+    events: list[object] = []
+    registry = ExtensionRegistry()
+
+    def _streaming_tool(arguments: dict[str, object], execution_context: object) -> str:
+        if hasattr(execution_context, "on_output") and callable(getattr(execution_context, "on_output")):
+            getattr(execution_context, "on_output")("stdout", "chunk 1\n")
+            getattr(execution_context, "on_output")("stdout", "chunk 2\n")
+        return "tool finished"
+
+    registry.register_tool(
+        name="lookup",
+        description="Look up a value.",
+        parameters={"type": "object"},
+        handler=_streaming_tool,
+    )
+    session = EmbeddedSession(
+        provider=ToolProvider(),
+        session_store=MemorySessionStore(),
+        tools=registry,
+        on_event=events.append,
+    )
+
+    result = session.submit("look up the owner")
+    assert result.status == "success"
+
+    outputs = [e for e in events if isinstance(e, ToolOutputEvent)]
+    assert len(outputs) == 2
+    assert outputs[0].stream == "stdout"
+    assert outputs[0].chunk == "chunk 1\n"
+    assert outputs[1].chunk == "chunk 2\n"
+
+
+def test_direct_shell_emits_tool_lifecycle_events() -> None:
+    from peon.app.session_controller import ShellIntent
+
+    events: list[object] = []
+    registry = ExtensionRegistry()
+    registry.register_tool(
+        name="bash",
+        description="Run bash command",
+        parameters={"type": "object"},
+        handler=lambda arguments: "hello shell",
+    )
+    session = EmbeddedSession(
+        provider=FakeProvider(),
+        session_store=MemorySessionStore(),
+        tools=registry,
+        on_event=events.append,
+    )
+
+    outcome = session._controller.dispatch(ShellIntent(command="echo hello", hidden=True))
+    assert outcome.output == "hello shell"
+
+    started = [e for e in events if isinstance(e, ToolStartedEvent)]
+    finished = [e for e in events if isinstance(e, ToolFinishedEvent)]
+
+    assert len(started) == 1
+    assert len(finished) == 1
+
+    assert started[0].tool_name == "bash"
+    assert started[0].source == "shell"
+    assert started[0].arguments == {"command": "echo hello"}
+
+    assert finished[0].tool_name == "bash"
+    assert finished[0].source == "shell"
+    assert finished[0].outcome == "success"
+    assert finished[0].result == "hello shell"
+
+
+def test_tool_events_yielded_in_dict_mode_schema_v2() -> None:
+    registry = ExtensionRegistry()
+    registry.register_tool(
+        name="lookup",
+        description="Look up a value.",
+        parameters={"type": "object"},
+        handler=lambda arguments: "owner:Peon",
+    )
+    session = EmbeddedSession(
+        provider=ToolProvider(),
+        session_store=MemorySessionStore(),
+        tools=registry,
+    )
+
+    events = list(session.iter_events("look up the owner", schema_version=2))
+    event_types = [e["event_type"] for e in events if isinstance(e, dict)]
+
+    assert "tool_started" in event_types
+    assert "tool_finished" in event_types

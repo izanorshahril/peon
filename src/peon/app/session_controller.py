@@ -29,6 +29,9 @@ from .coding_session import (
     RunLimits,
     SessionEvent,
     StopReason,
+    ToolFinishedEvent,
+    ToolOutputEvent,
+    ToolStartedEvent,
     TurnFinishedEvent,
     TurnResult,
     TurnStartedEvent,
@@ -1109,19 +1112,89 @@ class SessionController:
         if self._enabled_tools is not None and "bash" not in self._enabled_tools:
             return ShellErrorOutcome(command=command, error="tool 'bash' is disabled")
 
+        op_id = self._id_factory()
+        self._session._emit(
+            ToolStartedEvent(
+                session_id=self.session_id,
+                run_id=self.run_id,
+                turn_id=None,
+                operation_id=op_id,
+                tool_name="bash",
+                arguments={"command": command},
+                call_id=None,
+                source="shell",
+            )
+        )
+
+        orig_on_output = (
+            execution_context.on_output if execution_context is not None else None
+        )
+
+        def _handle_shell_output(stream_name: str, chunk: str) -> None:
+            self._session._emit(
+                ToolOutputEvent(
+                    session_id=self.session_id,
+                    run_id=self.run_id,
+                    turn_id=None,
+                    operation_id=op_id,
+                    stream=stream_name,
+                    chunk=chunk,
+                )
+            )
+            if orig_on_output is not None:
+                orig_on_output(stream_name, chunk)
+
+        active_context = ToolExecutionContext(on_output=_handle_shell_output)
+        if execution_context is not None and execution_context.cancelled:
+            active_context.cancel()
+
         try:
-            if execution_context is not None and hasattr(self._executor, "invoke_with_context"):
+            if hasattr(self._executor, "invoke_with_context"):
                 output = str(
                     getattr(self._executor, "invoke_with_context")(
                         "bash",
                         {"command": command},
-                        execution_context,
+                        active_context,
                     )
                 )
             else:
                 output = str(self._executor.invoke("bash", {"command": command}))
         except Exception as caught:
+            outcome: Literal["success", "error", "cancelled"] = (
+                "cancelled" if active_context.cancelled else "error"
+            )
+            self._session._emit(
+                ToolFinishedEvent(
+                    session_id=self.session_id,
+                    run_id=self.run_id,
+                    turn_id=None,
+                    operation_id=op_id,
+                    tool_name="bash",
+                    outcome=outcome,
+                    error=str(caught),
+                    call_id=None,
+                    source="shell",
+                )
+            )
             return ShellErrorOutcome(command=command, error=str(caught))
+
+        outcome_success: Literal["success", "error", "cancelled"] = (
+            "cancelled" if active_context.cancelled else "success"
+        )
+        self._session._emit(
+            ToolFinishedEvent(
+                session_id=self.session_id,
+                run_id=self.run_id,
+                turn_id=None,
+                operation_id=op_id,
+                tool_name="bash",
+                outcome=outcome_success,
+                result=output if outcome_success == "success" else None,
+                error="command cancelled" if outcome_success != "success" else None,
+                call_id=None,
+                source="shell",
+            )
+        )
 
         if intent.hidden:
             return ShellResultOutcome(

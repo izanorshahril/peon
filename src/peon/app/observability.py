@@ -17,6 +17,9 @@ from .coding_session import (
     SelectionRequestEvent,
     StreamDeltaEvent,
     TerminalErrorEvent,
+    ToolFinishedEvent,
+    ToolOutputEvent,
+    ToolStartedEvent,
     TurnFinishedEvent,
     TurnStartedEvent,
 )
@@ -70,6 +73,9 @@ RuntimeEvent = (
     | SelectionRequestEvent
     | CancellationEvent
     | TerminalErrorEvent
+    | ToolStartedEvent
+    | ToolOutputEvent
+    | ToolFinishedEvent
 )
 
 
@@ -114,6 +120,9 @@ def _serialize_record(
         "tool_call",
         "tool_result",
         "assistant",
+        "tool_started",
+        "tool_output",
+        "tool_finished",
     }
     if legacy_type not in known_types:
         if strict:
@@ -196,6 +205,9 @@ _RUNTIME_EVENT_TYPES = (
     SelectionRequestEvent,
     CancellationEvent,
     TerminalErrorEvent,
+    ToolStartedEvent,
+    ToolOutputEvent,
+    ToolFinishedEvent,
 )
 
 
@@ -223,6 +235,45 @@ def _serialize_runtime_event(
 
 
 def _serialize_schema_one(event: RuntimeEvent) -> dict[str, object]:
+    if isinstance(event, ToolStartedEvent):
+        return {
+            "schema_version": 1,
+            "type": "tool_call",
+            "session_id": event.session_id,
+            "run_id": event.run_id,
+            "turn_id": event.turn_id,
+            "operation_id": event.operation_id,
+            "name": event.tool_name,
+            "arguments": dict(event.arguments),
+            "call_id": event.call_id,
+            "source": event.source,
+        }
+    if isinstance(event, ToolOutputEvent):
+        return {
+            "schema_version": 1,
+            "type": "tool_output",
+            "session_id": event.session_id,
+            "run_id": event.run_id,
+            "turn_id": event.turn_id,
+            "operation_id": event.operation_id,
+            "stream": event.stream,
+            "chunk": event.chunk,
+        }
+    if isinstance(event, ToolFinishedEvent):
+        return {
+            "schema_version": 1,
+            "type": "tool_result",
+            "session_id": event.session_id,
+            "run_id": event.run_id,
+            "turn_id": event.turn_id,
+            "operation_id": event.operation_id,
+            "tool_name": event.tool_name,
+            "status": event.outcome,
+            "content": event.result,
+            "error": event.error,
+            "call_id": event.call_id,
+            "source": event.source,
+        }
     if isinstance(event, TurnStartedEvent):
         return {
             "schema_version": 1,

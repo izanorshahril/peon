@@ -343,6 +343,28 @@ Completed 2026-07-22:
   strict expected failure (ticket 04 tool lifecycle); mypy clean across 28
   files; `git diff --check` clean.
 
+### 0.3.1 Ticket 04: unify tool and shell lifecycle events
+
+Completed 2026-07-22:
+
+- Added `ToolStartedEvent`, `ToolOutputEvent`, and `ToolFinishedEvent` to the
+  session event system in `coding_session.py`.
+- Model-requested tool calls emit `ToolStartedEvent` before execution,
+  `ToolOutputEvent` on live stream chunks, and `ToolFinishedEvent` on completion
+  (reporting success, error, or cancellation with output/error facts).
+- Direct shell commands dispatched via `SessionController.dispatch_shell()` emit
+  identical tool lifecycle events with `source="shell"` without creating fake
+  provider message history.
+- Schema version 1 and 2 serializers support all new tool lifecycle events in
+  `observability.py`.
+- Legacy `on_tool_output` callback is preserved as a compatibility shim over
+  `ToolOutputEvent`.
+- `ToolStartedEvent`, `ToolOutputEvent`, `ToolFinishedEvent` exported in
+  `peon.embedded.__all__`.
+- Evidence: 345 total tests passing in full pytest suite (0 failures, 0 errors,
+  0 xfailed); `uv run mypy src/peon` clean across 28 files; `git diff --check`
+  clean.
+
 ## Remaining Pi Gaps
 
 Use as feature discovery, verify upstream before work:
