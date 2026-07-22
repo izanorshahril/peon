@@ -86,9 +86,16 @@ from .sessions import (
     session_interaction_count,
 )
 from .coding_session import (
+    CancellationEvent,
+    CommandOutcomeEvent,
     MessageEvent,
+    SelectionRequestEvent,
     SessionEvent,
     StreamDeltaEvent,
+    TerminalErrorEvent,
+    ToolFinishedEvent,
+    ToolOutputEvent,
+    ToolStartedEvent,
     TurnFinishedEvent,
     TurnResult,
     TurnStartedEvent,
@@ -96,13 +103,27 @@ from .coding_session import (
 from .session_controller import (
     CommandErrorOutcome,
     CommandIntent,
+    ContinuationResponseIntent,
     HelpOutcome,
+    LogoutIntent,
+    LogoutOptionsOutcome,
+    LogoutSuccessOutcome,
+    ModelOption,
+    ModelOptionsOutcome,
+    ModelSelectIntent,
     PromptIntent,
+    ProviderSetupIntent,
+    ProviderSetupStepOutcome,
+    ProviderSuccessOutcome,
     ReasoningOutcome,
     ResumeOptionsOutcome,
     SessionController,
     SessionInfoOutcome,
     SessionTransitionOutcome,
+    SettingOption,
+    SettingsIntent,
+    SettingsOptionsOutcome,
+    SettingsUpdatedOutcome,
     ShellErrorOutcome,
     ShellIntent,
     ShellResultOutcome,
@@ -306,6 +327,9 @@ SetupStep = Literal[
     "api-key",
     "copilot-token",
     "model",
+    "selection",
+    "settings",
+    "logout",
 ]
 
 
@@ -1041,6 +1065,13 @@ class TextualEventRouter:
             MessageEvent: self._handle_message,
             StreamDeltaEvent: self._handle_stream_delta,
             TurnFinishedEvent: self._handle_turn_finished,
+            CommandOutcomeEvent: self._handle_command_outcome,
+            SelectionRequestEvent: self._handle_selection_request,
+            CancellationEvent: self._handle_cancellation,
+            TerminalErrorEvent: self._handle_terminal_error,
+            ToolStartedEvent: self._handle_tool_started,
+            ToolOutputEvent: self._handle_tool_output,
+            ToolFinishedEvent: self._handle_tool_finished,
         }
 
     def register_handler(
@@ -1058,17 +1089,44 @@ class TextualEventRouter:
         else:
             self._fallback(event)
 
+    def _call_host(self, func: Callable[..., Any], *args: Any) -> None:
+        if self._host.is_app_thread:
+            func(*args)
+        else:
+            self._host.call_from_thread(func, *args)
+
     def _handle_turn_started(self, event: TurnStartedEvent) -> None:
-        self._host.call_from_thread(self._host._on_turn_started_event, event)
+        self._call_host(self._host._on_turn_started_event, event)
 
     def _handle_message(self, event: MessageEvent) -> None:
-        self._host.call_from_thread(self._host._append_runtime_message, event.message)
+        self._call_host(self._host._append_runtime_message, event.message)
 
     def _handle_stream_delta(self, event: StreamDeltaEvent) -> None:
-        self._host.call_from_thread(self._host._on_stream_delta_event, event)
+        self._call_host(self._host._on_stream_delta_event, event)
 
     def _handle_turn_finished(self, event: TurnFinishedEvent) -> None:
-        self._host.call_from_thread(self._host._on_turn_finished_event, event)
+        self._call_host(self._host._on_turn_finished_event, event)
+
+    def _handle_command_outcome(self, event: CommandOutcomeEvent) -> None:
+        self._call_host(self._host._on_command_outcome_event, event)
+
+    def _handle_selection_request(self, event: SelectionRequestEvent) -> None:
+        self._call_host(self._host._on_selection_request_event, event)
+
+    def _handle_cancellation(self, event: CancellationEvent) -> None:
+        self._call_host(self._host._on_cancellation_event, event)
+
+    def _handle_terminal_error(self, event: TerminalErrorEvent) -> None:
+        self._call_host(self._host._on_terminal_error_event, event)
+
+    def _handle_tool_started(self, event: ToolStartedEvent) -> None:
+        self._call_host(self._host._on_tool_started_event, event)
+
+    def _handle_tool_output(self, event: ToolOutputEvent) -> None:
+        self._call_host(self._host._on_tool_output_event, event)
+
+    def _handle_tool_finished(self, event: ToolFinishedEvent) -> None:
+        self._call_host(self._host._on_tool_finished_event, event)
 
     def _fallback(self, event: object) -> None:
         self.unhandled_events.append(event)
@@ -1190,6 +1248,11 @@ class TextualPeonApp(App[int]):
         Binding("escape", "clear_prompt", "", show=False, priority=True),
         ("ctrl+d", "quit", "Quit"),
     ]
+
+    @property
+    def is_app_thread(self) -> bool:
+        import threading
+        return threading.get_ident() == getattr(self, "_thread_id", None)
 
     def __init__(
         self,
@@ -1891,6 +1954,54 @@ class TextualPeonApp(App[int]):
 
     def _on_turn_finished_event(self, event: TurnFinishedEvent) -> None:
         pass
+
+    def _on_command_outcome_event(self, event: CommandOutcomeEvent) -> None:
+        if event.output:
+            self._write(event.output)
+
+    def _on_selection_request_event(self, event: SelectionRequestEvent) -> None:
+        self._show_choices(
+            "selection",
+            event.prompt,
+            [
+                (str(opt.get("id", idx)), str(opt.get("label", opt.get("id", idx))))
+                for idx, opt in enumerate(event.options, 1)
+            ],
+        )
+
+    def _on_cancellation_event(self, event: CancellationEvent) -> None:
+        self._write("Task cancelled.", role="system")
+
+    def _on_terminal_error_event(self, event: TerminalErrorEvent) -> None:
+        self._write(event.error, role="system")
+
+    def _on_tool_started_event(self, event: ToolStartedEvent) -> None:
+        call = ToolCall(
+            name=event.tool_name,
+            arguments=event.arguments,
+            call_id=event.call_id,
+        )
+        transcript = self.query_one("#transcript", ChatMessage)
+        transcript.append_message(
+            _format_tool_call(call),
+            role="tool-call",
+            tool_call_id=event.call_id,
+        )
+        self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
+
+    def _on_tool_output_event(self, event: ToolOutputEvent) -> None:
+        self._append_bash_output(None, event.stream, event.chunk)
+
+    def _on_tool_finished_event(self, event: ToolFinishedEvent) -> None:
+        output_str = event.result if event.result else (event.error or "")
+        if output_str:
+            transcript = self.query_one("#transcript", ChatMessage)
+            transcript.append_message(
+                output_str,
+                role="tool",
+                tool_call_id=event.call_id or "",
+            )
+            self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
 
     def _build_controller(self) -> None:
         assert self.provider is not None
@@ -3269,6 +3380,58 @@ class TextualPeonApp(App[int]):
                 formatted_name = f" ({outcome.name})" if outcome.name else ""
                 self._write(f"✓ Forked session: {outcome.session_id}{formatted_name}", role="success")
                 self._set_status()
+        elif isinstance(outcome, ModelOptionsOutcome):
+            if outcome.updated and outcome.current_model:
+                if self.config is not None:
+                    self.config = replace(self.config, model=outcome.current_model)
+                    self.provider = (self.provider_factory or create_provider)(self.config)
+                self._write(f"Active model set to {outcome.current_model}.", role="success")
+                self._set_status()
+            elif outcome.options:
+                self._show_choices(
+                    "model",
+                    "Select model:",
+                    [
+                        (opt.option_id, opt.label)
+                        for opt in outcome.options
+                    ],
+                )
+        elif isinstance(outcome, ProviderSetupStepOutcome):
+            self._write(f"{outcome.prompt}", role="system")
+        elif isinstance(outcome, ProviderSuccessOutcome):
+            self.config = outcome.config
+            self.provider = (self.provider_factory or create_provider)(outcome.config)
+            self._write(f"✓ Connected to provider {outcome.provider_name} ({outcome.model_name})", role="success")
+            self._set_status()
+        elif isinstance(outcome, SettingsOptionsOutcome):
+            self._show_choices(
+                "settings",
+                "Settings:",
+                [
+                    (opt.key, f"{opt.label}: {opt.current_value}")
+                    for opt in outcome.settings
+                ],
+            )
+        elif isinstance(outcome, SettingsUpdatedOutcome):
+            self._write(f"Setting '{outcome.setting}' set to {outcome.value}.", role="success")
+            self._set_status()
+        elif isinstance(outcome, LogoutOptionsOutcome):
+            self._show_choices(
+                "logout",
+                "Select provider to remove:",
+                [
+                    (opt[0], opt[1])
+                    for opt in outcome.options
+                ],
+            )
+        elif isinstance(outcome, LogoutSuccessOutcome):
+            self._write(f"Removed provider: {outcome.removed_provider_name}", role="success")
+            if outcome.active_provider_name is not None and self.config_store is not None:
+                all_cfgs = self.config_store.load_all()
+                matching = [c for c in all_cfgs if c.name == outcome.active_provider_name]
+                if matching:
+                    self._activate(matching[0])
+            self._set_status()
         elif isinstance(outcome, CommandErrorOutcome):
             self._write(outcome.error)
 

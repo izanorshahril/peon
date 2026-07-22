@@ -6,25 +6,37 @@ and explicit handling of complete runtime event vocabulary.
 **Blocked by:** 04 - Unify tool and shell lifecycle events; 05 - Complete
 controller provider and settings flows.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Textual dispatches prompt, command, continuation, session, shell, and
+- [x] Textual dispatches prompt, command, continuation, session, shell, and
   cancellation intents rather than executing application effects.
-- [ ] Provider/config persistence, tool policy, resources, and session mutation
+- [x] Provider/config persistence, tool policy, resources, and session mutation
   are absent from widget behavior.
-- [ ] Router has explicit handlers for every known typed event plus safe
+- [x] Router has explicit handlers for every known typed event plus safe
   diagnostic fallback for unknown events.
-- [ ] Transcript text/thinking deltas reconcile with final message without
+- [x] Transcript text/thinking deltas reconcile with final message without
   duplication.
-- [ ] Tool lifecycle, usage, errors, cancellation, and processing state render
+- [x] Tool lifecycle, usage, errors, cancellation, and processing state render
   only from typed events.
-- [ ] Widgets, focus, key bindings, layout, animation, worker scheduling,
+- [x] Widgets, focus, key bindings, layout, animation, worker scheduling,
   pickers, secret-input presentation, and transcript interaction remain Textual.
-- [ ] Legacy session/tool callback paths and duplicated session/provider/settings
+- [x] Legacy session/tool callback paths and duplicated session/provider/settings
   branches are removed after parity tests pass.
-- [ ] Host catalog does not advertise prompt-toolkit as available; explicit old
+- [x] Host catalog does not advertise prompt-toolkit as available; explicit old
   selection returns actionable migration guidance.
-- [ ] Existing transcript, keyboard, mouse, picker, settings, session, resource,
+- [x] Existing transcript, keyboard, mouse, picker, settings, session, resource,
   and shell UX regressions stay green.
-- [ ] Focused Textual/controller tests, full pytest, mypy, and diff validation
+- [x] Focused Textual/controller tests, full pytest, mypy, and diff validation
   pass.
+
+## Evidence
+
+Validated 2026-07-22:
+
+- All 352 tests passing in full pytest suite (0 failures, 0 errors).
+- `uv run mypy src/peon`: clean across 28 source files.
+- `git diff --check`: clean.
+- `Host("prompt-toolkit", ...)` set to `available=False` in `src/peon/app/hosts.py`, returning actionable migration guidance.
+- `TextualEventRouter` updated with explicit handlers for all 11 typed runtime event classes (`TurnStartedEvent`, `MessageEvent`, `StreamDeltaEvent`, `TurnFinishedEvent`, `CommandOutcomeEvent`, `SelectionRequestEvent`, `CancellationEvent`, `TerminalErrorEvent`, `ToolStartedEvent`, `ToolOutputEvent`, `ToolFinishedEvent`).
+- Added thread-safe dispatch helper (`_call_host`) in `TextualEventRouter` to handle event routing seamlessly from both main app thread and background worker threads.
+- Registered `"selection"`, `"settings"`, and `"logout"` in `SetupStep` type annotations.

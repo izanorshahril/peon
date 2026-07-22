@@ -23,7 +23,7 @@ _BUILTIN_HOSTS = {
         Host("print", "print"),
         Host("jsonl", "events"),
         Host("textual", "interactive"),
-        Host("prompt-toolkit", "interactive"),
+        Host("prompt-toolkit", "interactive", available=False),
         Host("embedded", "embedded"),
         Host("fullscreen", "interactive", available=False),
         Host("webapp", "interactive", available=False),

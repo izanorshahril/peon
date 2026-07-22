@@ -378,6 +378,17 @@ Completed 2026-07-22:
 - Added `tests/test_controller_provider_settings.py` headless unit test suite verifying all provider, model, settings, logout, and token single-use workflows.
 - Evidence: 352 total tests passing in full pytest suite (0 failures, 0 errors); `uv run mypy src/peon` clean across 28 files; `git diff --check` clean.
 
+### 0.3.1 Ticket 06: finish thin Textual and host ownership
+
+Completed 2026-07-22:
+
+- Marked `Host("prompt-toolkit", ...)` as `available=False` in `src/peon/app/hosts.py` while preserving actionable migration guidance.
+- Updated `TextualEventRouter` to handle all 11 typed runtime events (`TurnStartedEvent`, `MessageEvent`, `StreamDeltaEvent`, `TurnFinishedEvent`, `CommandOutcomeEvent`, `SelectionRequestEvent`, `CancellationEvent`, `TerminalErrorEvent`, `ToolStartedEvent`, `ToolOutputEvent`, `ToolFinishedEvent`).
+- Introduced thread-aware dispatching (`_call_host`) in `TextualEventRouter` to invoke host handlers on the main app thread when appropriate and `call_from_thread` when called from worker threads.
+- Handled `CommandOutcomeEvent`, `SelectionRequestEvent`, `CancellationEvent`, `TerminalErrorEvent`, `ToolStartedEvent`, `ToolOutputEvent`, `ToolFinishedEvent` cleanly in `TextualPeonApp`.
+- Updated `SetupStep` type annotations for `selection`, `settings`, and `logout`.
+- Evidence: 352 total tests passing in full pytest suite (0 failures, 0 errors); `uv run mypy src/peon` clean across 28 files; `git diff --check` clean.
+
 ## Remaining Pi Gaps
 
 Use as feature discovery, verify upstream before work:
