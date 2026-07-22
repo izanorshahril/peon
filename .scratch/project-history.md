@@ -74,10 +74,12 @@ app -> extensions -> agent
   runtime-event contract. Journal recovery and operational CLI policy remain
   ticket 09.
 - `peon.embedded.EmbeddedSession` direct text Python adapter over
-  `SessionController`. Expose submit, typed callbacks, typed sync/async iterator
-  scaffolding, structured turn results, cancellation, and injected deps. No
-  Textual/prompt-toolkit load. Dictionary history/events, terminal iterator
-  result, and safe backpressure remain 0.3.1 work.
+  `SessionController`. Exposes submit, typed callbacks, sync/async iterators
+  with `.result` access to final `TurnFinishedEvent`, typed or dictionary event
+  mode via `schema_version`, validated history loading (`load_history`),
+  cancellation, and injected deps. `validate_history()` and
+  `HistoryValidationError` are public. No Textual/prompt-toolkit load.
+  Typed tool lifecycle events remain ticket 04.
 - `ToolExecutionContext` support cancel + live tool callbacks.
 - Adapters support OpenAI-compatible, GitHub Copilot, custom proxy profiles. Model discovery via `GET /models`.
 - Provider profiles + UI settings persist in user-local JSON.
@@ -305,6 +307,41 @@ Completed 2026-07-22:
 - Evidence: focused 112 passed; full 320 tests with 0 failures, 0 errors, and 2
   strict expected failures; mypy clean across 28 files; build and diff check
   passed.
+
+### 0.3.1 Ticket 03: embedded history and iterator interfaces
+
+Completed 2026-07-22:
+
+- `BoundedEventQueue` now validates `maxsize > 0`, uses a typed `_DONE`
+  sentinel distinct from `None`, and correctly separates empty-poll timeout
+  (returns `None`) from completion (returns sentinel). Delta events may be
+  dropped silently under backpressure; all other canonical events block until
+  space is available and are never lost.
+- `validate_history()` public function validates a sequence of typed
+  `AgentMessage` objects or raw dicts before any provider request or context
+  mutation. Rejects unknown roles, missing/invalid content, malformed tool
+  calls/results, and non-mapping inputs with actionable `HistoryValidationError`
+  messages.
+- `EmbeddedSession.load_history()` accepts typed or dict messages, validates via
+  `validate_history()`, and injects them into the conversation context atomically
+  (no mutation on failure). No terminal imports are loaded.
+- `iter_events()` and `aiter_events()` both accept a `schema_version` parameter
+  (1 or 2); when set, they yield serialized dicts via the shared serializer
+  instead of typed events, from the same single execution.
+- `SyncEventIterator` and `AsyncEventIterator` wrapper objects expose a `.result`
+  property returning the final `TurnFinishedEvent` after iteration completes,
+  without requiring a second run.
+- Async iteration uses blocking `queue.get()` in a thread-pool executor instead
+  of a 50 ms poll timeout. Completion is only signalled by the `_DONE` sentinel,
+  so a slow provider can no longer terminate iteration prematurely.
+- `CancelledError` from the async caller propagates `cancel()` to the active
+  sub-session and joins the worker thread within 2 seconds.
+- `validate_history` and `HistoryValidationError` added to `embedded.py`
+  `__all__`; no Textual or prompt-toolkit import occurs.
+- Evidence: 28 focused tests passed (7 queue/validation/history/dict-mode/
+  result/cancellation groups); full 340 tests with 0 failures, 0 errors, 1
+  strict expected failure (ticket 04 tool lifecycle); mypy clean across 28
+  files; `git diff --check` clean.
 
 ## Remaining Pi Gaps
 
