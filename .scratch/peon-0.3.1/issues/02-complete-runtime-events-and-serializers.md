@@ -31,7 +31,7 @@ one serializer interface for schema versions 1 and 2.
 Validated 2026-07-22:
 
 - Focused runtime, serializer, CLI, and controller tests: 110 passed.
-- Canonical full suite: 320 tests, 0 failures, 0 errors, 2 strict expected
+- Canonical full suite: 320 tests, 0 failures, 0 errors, 2 strict expected_1 
   failures, exit 0.
 - `uv run mypy src/peon`: success across 28 source files.
 - `uv build`: `0.3.0a0` sdist and wheel built successfully.

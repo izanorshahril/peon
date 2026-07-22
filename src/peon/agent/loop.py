@@ -64,6 +64,7 @@ def run_task(
     acc_input_tokens = 0
     acc_output_tokens = 0
     acc_total_tokens = 0
+    acc_cost = 0.0
     active_trace_clock = (
         trace_clock
         if trace_sink is not None and trace_clock is not None
@@ -157,6 +158,8 @@ def run_task(
                     tools=available_tools,
                     model=model,
                 )
+        except LimitExceededError:
+            raise
         except Exception as error:
             if active_trace_clock is not None:
                 emit_trace(
@@ -189,21 +192,74 @@ def run_task(
         if on_usage is not None:
             on_usage(response.usage)
 
-        if limits is not None and response.usage is not None:
+        if limits is not None:
             u = response.usage
-            if limits.max_input_tokens is not None and u.input_tokens is not None:
-                acc_input_tokens += u.input_tokens
-                if acc_input_tokens > limits.max_input_tokens:
-                    raise LimitExceededError("max_input_tokens_exceeded", "input token limit exceeded")
-            if limits.max_output_tokens is not None and u.output_tokens is not None:
-                acc_output_tokens += u.output_tokens
-                if acc_output_tokens > limits.max_output_tokens:
-                    raise LimitExceededError("max_output_tokens_exceeded", "output token limit exceeded")
-            if limits.max_total_tokens is not None:
-                tot = (u.input_tokens or 0) + (u.output_tokens or 0)
-                acc_total_tokens += tot
-                if acc_total_tokens > limits.max_total_tokens:
-                    raise LimitExceededError("max_total_tokens_exceeded", "total token limit exceeded")
+            if u is None:
+                if (
+                    limits.max_input_tokens is not None
+                    or limits.max_output_tokens is not None
+                    or limits.max_total_tokens is not None
+                ):
+                    raise LimitExceededError(
+                        "token_limit_accounting_unavailable",
+                        "token usage accounting unavailable for limit verification",
+                    )
+                if limits.max_cost is not None:
+                    raise LimitExceededError(
+                        "cost_limit_accounting_unavailable",
+                        "cost accounting unavailable for limit verification",
+                    )
+            else:
+                if limits.max_input_tokens is not None:
+                    if u.input_tokens is None:
+                        raise LimitExceededError(
+                            "token_limit_accounting_unavailable",
+                            "input token accounting unavailable for limit verification",
+                        )
+                    acc_input_tokens += u.input_tokens
+                    if acc_input_tokens > limits.max_input_tokens:
+                        raise LimitExceededError(
+                            "max_input_tokens_exceeded", "input token limit exceeded"
+                        )
+                if limits.max_output_tokens is not None:
+                    if u.output_tokens is None:
+                        raise LimitExceededError(
+                            "token_limit_accounting_unavailable",
+                            "output token accounting unavailable for limit verification",
+                        )
+                    acc_output_tokens += u.output_tokens
+                    if acc_output_tokens > limits.max_output_tokens:
+                        raise LimitExceededError(
+                            "max_output_tokens_exceeded", "output token limit exceeded"
+                        )
+                if limits.max_total_tokens is not None:
+                    if u.input_tokens is None or u.output_tokens is None:
+                        raise LimitExceededError(
+                            "token_limit_accounting_unavailable",
+                            "total token accounting unavailable for limit verification",
+                        )
+                    tot = u.input_tokens + u.output_tokens
+                    acc_total_tokens += tot
+                    if acc_total_tokens > limits.max_total_tokens:
+                        raise LimitExceededError(
+                            "max_total_tokens_exceeded", "total token limit exceeded"
+                        )
+                if limits.max_cost is not None:
+                    if u.cost is None:
+                        raise LimitExceededError(
+                            "cost_limit_accounting_unavailable",
+                            "cost accounting unavailable for limit verification",
+                        )
+                    if limits.currency is not None and u.currency != limits.currency:
+                        raise LimitExceededError(
+                            "currency_mismatch",
+                            f"currency mismatch: expected {limits.currency}, got {u.currency}",
+                        )
+                    acc_cost += u.cost
+                    if acc_cost > limits.max_cost:
+                        raise LimitExceededError(
+                            "max_cost_exceeded", "cost limit exceeded"
+                        )
 
         if response.tool_call is not None:
             if executor is None:

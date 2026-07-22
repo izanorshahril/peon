@@ -34,8 +34,14 @@ from peon.extensions import (
 
 from .coding_session import (
     MessageEvent,
+    RunLimits,
     SessionEvent,
     TurnFinishedEvent,
+)
+from .config import (
+    UiConfig,
+    filter_tool_executor,
+    set_capability_profile,
 )
 from .session_controller import PromptIntent, SessionController
 from .hosts import HostUnavailableError, resolve_host
@@ -400,7 +406,76 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Visual left padding for user and assistant messages in the TUI",
     )
+    parser.add_argument(
+        "--profile",
+        choices=("none", "read-only", "coding", "custom"),
+        help="Tool capability profile name",
+    )
+    parser.add_argument(
+        "--max-provider-calls",
+        type=int,
+        help="Maximum allowed provider requests for a run",
+    )
+    parser.add_argument(
+        "--max-tool-calls",
+        type=int,
+        help="Maximum allowed tool invocations for a run",
+    )
+    parser.add_argument(
+        "--max-elapsed-seconds",
+        type=float,
+        help="Maximum elapsed execution time in seconds",
+    )
+    parser.add_argument(
+        "--max-input-tokens",
+        type=int,
+        help="Maximum input token budget for a run",
+    )
+    parser.add_argument(
+        "--max-output-tokens",
+        type=int,
+        help="Maximum output token budget for a run",
+    )
+    parser.add_argument(
+        "--max-total-tokens",
+        type=int,
+        help="Maximum total token budget for a run",
+    )
+    parser.add_argument(
+        "--max-cost",
+        type=float,
+        help="Maximum cost budget for a run",
+    )
+    parser.add_argument(
+        "--currency",
+        help="Currency identifier for cost limit validation",
+    )
     return parser
+
+
+def _build_run_limits(args: argparse.Namespace) -> RunLimits | None:
+    has_limit = (
+        getattr(args, "max_provider_calls", None) is not None
+        or getattr(args, "max_tool_calls", None) is not None
+        or getattr(args, "max_elapsed_seconds", None) is not None
+        or getattr(args, "max_input_tokens", None) is not None
+        or getattr(args, "max_output_tokens", None) is not None
+        or getattr(args, "max_total_tokens", None) is not None
+        or getattr(args, "max_cost", None) is not None
+        or getattr(args, "currency", None) is not None
+    )
+    if not has_limit:
+        return None
+    return RunLimits(
+        max_provider_calls=getattr(args, "max_provider_calls", None),
+        max_tool_calls=getattr(args, "max_tool_calls", None),
+        max_elapsed_seconds=getattr(args, "max_elapsed_seconds", None),
+        max_input_tokens=getattr(args, "max_input_tokens", None),
+        max_output_tokens=getattr(args, "max_output_tokens", None),
+        max_total_tokens=getattr(args, "max_total_tokens", None),
+        max_cost=getattr(args, "max_cost", None),
+        currency=getattr(args, "currency", None),
+    )
 
 
 def main(
@@ -569,6 +644,7 @@ def main(
             session_id=session_record.session_id,
             model=config.model,
             resources=_load_resources(args),
+            limits=_build_run_limits(args),
         )
         result = controller.dispatch(PromptIntent(task))
         if result.status != "success":
@@ -678,8 +754,10 @@ def _run_print_mode(
         trace_clock=clock or time.monotonic,
     )
     if registry is None:
-        register_sample_tools(active_registry)
         register_filesystem_tools(active_registry)
+    if getattr(args, "profile", None):
+        ui_config = set_capability_profile(UiConfig(), args.profile)
+        active_registry = filter_tool_executor(ui_config, active_registry)
 
     def on_event(event: SessionEvent) -> None:
         if events is None:
