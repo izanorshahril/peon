@@ -6,6 +6,7 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, TextIO
 from uuid import uuid4
@@ -38,7 +39,7 @@ from .coding_session import (
 )
 from .session_controller import PromptIntent, SessionController
 from .hosts import HostUnavailableError, resolve_host
-from .observability import JsonlTraceSink
+from .observability import JsonlTraceSink, serialize_event
 from .sessions import MemorySessionStore, SessionStore
 from .resources import ResourceInventory, ResourceLoader
 
@@ -458,6 +459,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit one normalized JSON event per line in print mode",
     )
     parser.add_argument(
+        "--schema-version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="JSON event schema version; defaults to 1",
+    )
+    parser.add_argument(
         "--trace",
         type=Path,
         help="Append metadata-only performance traces as JSONL",
@@ -543,6 +551,8 @@ def main(
             raise CommandError("--session and --session-name cannot be combined")
         if args.continue_session and args.session_name:
             raise CommandError("--continue and --session-name cannot be combined")
+        if args.schema_version != 1 and not args.event_mode:
+            raise CommandError("--schema-version requires --events")
         task = " ".join(args.task).strip()
         if args.print_mode:
             if args.tui or args.mode is not None:
@@ -569,6 +579,7 @@ def main(
                     registry=registry,
                     session_store=session_store,
                     event_mode=True,
+                    schema_version=args.schema_version,
                     run_id_factory=run_id_factory,
                     turn_id_factory=turn_id_factory,
                     clock=clock,
@@ -582,6 +593,7 @@ def main(
                 registry=registry,
                 session_store=session_store,
                 event_mode=False,
+                schema_version=args.schema_version,
                 run_id_factory=run_id_factory,
                 turn_id_factory=turn_id_factory,
                 clock=clock,
@@ -708,6 +720,7 @@ def _run_print_mode(
     registry: ExtensionRegistry | None,
     session_store: SessionStore | None,
     event_mode: bool,
+    schema_version: int,
     run_id_factory: Callable[[], str] | None,
     turn_id_factory: Callable[[], str] | None,
     clock: Callable[[], float] | None,
@@ -720,7 +733,7 @@ def _run_print_mode(
         select_session,
     )
 
-    events = _EventWriter(output) if event_mode else None
+    events = _EventWriter(output, schema_version=schema_version) if event_mode else None
     run_id = (run_id_factory or (lambda: uuid4().hex))()
     trace_sink = JsonlTraceSink(args.trace) if args.trace is not None else None
     explicit_durable_session = bool(
@@ -786,6 +799,9 @@ def _run_print_mode(
 
     def on_event(event: SessionEvent) -> None:
         if events is None:
+            return
+        if events.schema_version == 2:
+            events.write_event(event)
             return
         if isinstance(event, TurnFinishedEvent):
             if event.result.status == "success":
@@ -887,6 +903,8 @@ def _run_print_mode(
             on_event=on_event,
             trace_sink=trace_sink,
             trace_provider=args.provider_name or args.provider,
+            event_utc_clock=events.utc_clock if events is not None else None,
+            event_sequence_start=(events.next_sequence if events is not None else 0),
         )
         result = controller.dispatch(
             PromptIntent(task, preserve_whitespace=True),
@@ -964,7 +982,7 @@ def _print_mode_failure(
     return 1
 
 
-def _event_correlation(event: SessionEvent) -> dict[str, str]:
+def _event_correlation(event: SessionEvent) -> dict[str, object]:
     return {
         "session_id": event.session_id,
         "run_id": event.run_id,
@@ -1008,11 +1026,51 @@ def _load_resources(
 
 
 class _EventWriter:
-    def __init__(self, output: TextIO) -> None:
+    def __init__(
+        self,
+        output: TextIO,
+        *,
+        schema_version: int = 1,
+        utc_clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._output = output
+        self._schema_version = schema_version
+        self._sequence = 0
+        self._utc_clock = utc_clock or (lambda: datetime.now(timezone.utc))
+
+    @property
+    def schema_version(self) -> int:
+        return self._schema_version
+
+    @property
+    def utc_clock(self) -> Callable[[], datetime]:
+        return self._utc_clock
+
+    @property
+    def next_sequence(self) -> int:
+        return self._sequence
+
+    def write_event(self, event: SessionEvent) -> None:
+        payload = serialize_event(event, schema_version=self._schema_version, strict=True)
+        if self._schema_version == 2:
+            event_sequence = payload.get("sequence")
+            if isinstance(event_sequence, int):
+                self._sequence = max(self._sequence, event_sequence + 1)
+        print(json.dumps(payload, separators=(",", ":"), default=str), file=self._output)
 
     def write(self, event_type: str, **fields: object) -> None:
-        payload = {"type": event_type, "schema_version": 1, **fields}
+        if self._schema_version == 2:
+            fields = {
+                **fields,
+                "timestamp": self._utc_clock().isoformat(),
+                "sequence": self._sequence,
+            }
+            self._sequence += 1
+        payload = serialize_event(
+            {"type": event_type, **fields},
+            schema_version=self._schema_version,
+            strict=self._schema_version == 2,
+        )
         print(json.dumps(payload, separators=(",", ":"), default=str), file=self._output)
 
 

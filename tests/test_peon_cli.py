@@ -458,6 +458,44 @@ def test_print_event_mode_emits_ordered_json_lines() -> None:
     assert error.getvalue() == ""
 
 
+def test_print_event_mode_supports_schema_version_two() -> None:
+    output = StringIO()
+
+    result = main(
+        [
+            "-p",
+            "Do work.",
+            "--events",
+            "--schema-version",
+            "2",
+            "--provider",
+            "fake",
+        ],
+        provider_factory=lambda _config: FakeProvider(response="Done."),
+        output=output,
+        error=StringIO(),
+    )
+
+    assert result == 0
+    events = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert all(event["schema_version"] == 2 for event in events)
+    assert [event["event_type"] for event in events] == [
+        "session_started",
+        "turn_started",
+        "message",
+        "message",
+        "turn_finished",
+        "session_finished",
+    ]
+    assert events[2]["message"]["role"] == "user"
+    assert events[3]["message"]["role"] == "assistant"
+    assert events[4]["stop_reason"] == "completed"
+    assert [event["sequence"] for event in events] == list(range(len(events)))
+    assert events[1]["message_id"] is None
+    assert "persistent" not in events[0]
+    assert "success" not in events[-1]
+
+
 def test_print_event_mode_serializes_normalized_usage() -> None:
     provider = FakeProvider(
         response=ModelResponse(
@@ -734,6 +772,15 @@ def test_events_require_print_mode() -> None:
 
     assert result == 1
     assert "--events requires --print" in error.getvalue()
+
+
+def test_schema_version_requires_event_mode() -> None:
+    error = StringIO()
+
+    result = main(["-p", "Do work.", "--schema-version", "2"], error=error)
+
+    assert result == 1
+    assert "--schema-version requires --events" in error.getvalue()
 
 
 def test_print_mode_rejects_interactive_flags() -> None:

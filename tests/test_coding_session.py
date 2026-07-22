@@ -7,6 +7,7 @@ from threading import Event, Thread
 from peon.agent import (
     AgentMessage,
     ModelResponse,
+    ModelStreamChunk,
     ToolCall,
     ToolDefinition,
     ToolExecutionContext,
@@ -16,6 +17,7 @@ from peon.app.coding_session import (
     CodingSession,
     MessageEvent,
     RunLimits,
+    StreamDeltaEvent,
     TurnFinishedEvent,
     TurnStartedEvent,
     TurnResult,
@@ -301,9 +303,53 @@ def test_coding_session_returns_provider_failure_as_structured_error() -> None:
     assert "provider request failed: provider unavailable" in result.error
     assert isinstance(events[-1], TurnFinishedEvent)
     assert events[-1].result == result
+    assert events[-2].error == result.error
+    assert events[-2].stop_reason == "provider_error"
     assert store.load(record.session_id).messages == (
         AgentMessage(role="user", content="Try the request."),
     )
+
+
+def test_coding_session_reconciles_stream_delta_and_final_message_identity() -> None:
+    class StreamingProvider:
+        def stream(
+            self,
+            *,
+            messages: Sequence[AgentMessage],
+            tools: Sequence[ToolDefinition] = (),
+            model: str | None = None,
+        ) -> list[ModelStreamChunk]:
+            return [
+                ModelStreamChunk(delta="Done"),
+                ModelStreamChunk(delta="."),
+            ]
+
+    store = MemorySessionStore()
+    record = store.create()
+    events: list[object] = []
+    session = CodingSession(
+        provider=StreamingProvider(),
+        session_store=store,
+        session_id=record.session_id,
+        on_event=events.append,
+    )
+
+    result = session.prompt("stream this")
+
+    assert result.content == "Done."
+    delta_ids = {
+        event.message_id
+        for event in events
+        if isinstance(event, StreamDeltaEvent)
+    }
+    message_ids = {
+        event.message_id
+        for event in events
+        if isinstance(event, MessageEvent)
+        and event.message.role == "assistant"
+    }
+    assert len(delta_ids) == 1
+    assert delta_ids == message_ids
 
 
 def test_coding_session_cancels_an_active_tool_turn() -> None:

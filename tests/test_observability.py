@@ -16,8 +16,8 @@ from peon.agent import (
     TraceContext,
     run_task,
 )
-from peon.app.coding_session import CodingSession
-from peon.app.observability import JsonlTraceSink
+from peon.app.coding_session import CodingSession, MessageEvent, TurnStartedEvent
+from peon.app.observability import JsonlTraceSink, serialize_event
 from peon.app.resources import ResourceLoader
 from peon.app.sessions import MemorySessionStore
 from peon.extensions import ExtensionRegistry
@@ -295,6 +295,78 @@ def test_file_event_journal_sink_writes_schema_v2_events() -> None:
     assert records[0]["session_id"] == "session-1"
 
 
+def test_shared_serializer_supports_schema_versions_and_event_metadata() -> None:
+    event = TurnStartedEvent(
+        session_id="session-1",
+        run_id="run-1",
+        turn_id="turn-1",
+        started_at=100.0,
+        timestamp=datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc),
+        sequence=3,
+    )
+
+    schema_one = serialize_event(event, schema_version=1)
+    assert schema_one == {
+        "schema_version": 1,
+        "type": "turn_start",
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "turn_id": "turn-1",
+        "started_at": 100.0,
+    }
+
+    schema_two = serialize_event(event, schema_version=2)
+    assert schema_two["schema_version"] == 2
+    assert schema_two["event_type"] == "turn_started"
+    assert schema_two["timestamp"] == "2026-07-22T12:00:00+00:00"
+    assert schema_two["sequence"] == 3
+
+
+def test_shared_serializer_rejects_unknown_events_in_strict_mode() -> None:
+    with pytest.raises(TypeError, match="unsupported runtime event"):
+        serialize_event(object(), strict=True)
+
+
+def test_shared_serializer_handles_unknown_records_by_policy() -> None:
+    record = {"type": "future_event", "value": "ignored"}
+
+    diagnostic = serialize_event(record, schema_version=2)
+    assert diagnostic == {
+        "schema_version": 2,
+        "event_type": "diagnostic",
+        "message": "unsupported runtime event: future_event",
+    }
+    with pytest.raises(TypeError, match="future_event"):
+        serialize_event(record, schema_version=1, strict=True)
+
+
+def test_session_events_receive_ordered_metadata_from_emitter() -> None:
+    store = MemorySessionStore()
+    record = store.create()
+    events: list[object] = []
+    session = CodingSession(
+        provider=FakeProvider(),
+        session_store=store,
+        session_id=record.session_id,
+        run_id="run-1",
+        on_event=events.append,
+        event_utc_clock=lambda: datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc),
+        id_factory=lambda: "turn-1",
+    )
+
+    session.prompt("hello")
+
+    assert [getattr(event, "sequence") for event in events] == list(
+        range(len(events))
+    )
+    assert all(
+        getattr(event, "timestamp")
+        == datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
+        for event in events
+    )
+    assert isinstance(events[1], MessageEvent)
+
+
 def test_file_event_journal_sink_applies_redaction_hook() -> None:
     from peon.app.observability import FileEventJournalSink
     from peon.app.coding_session import MessageEvent
@@ -345,6 +417,15 @@ def test_file_event_journal_sink_handles_strict_and_non_strict_failures() -> Non
     strict_sink = FileEventJournalSink(FailingIO(), strict=True)
     with pytest.raises(JournalWriteError, match="disk full"):
         strict_sink.write_event(event)
+
+
+def test_file_event_journal_sink_strictly_rejects_unknown_records() -> None:
+    from peon.app.observability import FileEventJournalSink, JournalWriteError
+
+    with pytest.raises(JournalWriteError, match="future_event"):
+        FileEventJournalSink(StringIO(), strict=True).write_event(
+            {"type": "future_event"}
+        )
 
 
 def test_coding_session_integrates_event_journal_separate_from_canonical_history() -> None:

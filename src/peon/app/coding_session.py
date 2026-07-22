@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import logging
 from threading import Lock
 import time
-from typing import Any, Literal, TypeAlias
+from typing import Any, ClassVar, Literal, TypeAlias
 from uuid import uuid4
 
 from peon.agent import (
@@ -68,6 +68,10 @@ class RunLimits:
 TurnStatus = Literal["success", "error", "cancelled"]
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 @dataclass(frozen=True, slots=True)
 class TurnResult:
     status: TurnStatus
@@ -93,39 +97,135 @@ class TurnResult:
 
 @dataclass(frozen=True, slots=True)
 class TurnStartedEvent:
+    event_type: ClassVar[str] = "turn_started"
     session_id: str
     run_id: str
     turn_id: str
     started_at: float
+    schema_version: int = 2
+    timestamp: datetime = field(default_factory=_utc_now)
+    sequence: int = 0
+    message_id: str | None = None
+    operation_id: str | None = None
+    provider_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class MessageEvent:
+    event_type: ClassVar[str] = "message"
     session_id: str
     run_id: str
     turn_id: str
     message: AgentMessage
+    schema_version: int = 2
+    timestamp: datetime = field(default_factory=_utc_now)
+    sequence: int = 0
+    message_id: str | None = None
+    operation_id: str | None = None
+    provider_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class StreamDeltaEvent:
+    event_type: ClassVar[str] = "stream_delta"
     session_id: str
     run_id: str
     turn_id: str
     chunk: ModelStreamChunk
+    schema_version: int = 2
+    timestamp: datetime = field(default_factory=_utc_now)
+    sequence: int = 0
+    message_id: str | None = None
+    operation_id: str | None = None
+    provider_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class TurnFinishedEvent:
+    event_type: ClassVar[str] = "turn_finished"
     session_id: str
     run_id: str
     turn_id: str
     result: TurnResult
     duration: float
+    schema_version: int = 2
+    timestamp: datetime = field(default_factory=_utc_now)
+    sequence: int = 0
+    message_id: str | None = None
+    operation_id: str | None = None
+    provider_call_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CommandOutcomeEvent:
+    event_type: ClassVar[str] = "command_outcome"
+    session_id: str
+    run_id: str
+    command: str
+    status: str
+    output: str | None = None
+    turn_id: str | None = None
+    schema_version: int = 2
+    timestamp: datetime = field(default_factory=_utc_now)
+    sequence: int = 0
+    message_id: str | None = None
+    operation_id: str | None = None
+    provider_call_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionRequestEvent:
+    event_type: ClassVar[str] = "selection_request"
+    session_id: str
+    run_id: str
+    prompt: str
+    options: tuple[Mapping[str, object], ...]
+    turn_id: str | None = None
+    schema_version: int = 2
+    timestamp: datetime = field(default_factory=_utc_now)
+    sequence: int = 0
+    message_id: str | None = None
+    operation_id: str | None = None
+    provider_call_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationEvent:
+    event_type: ClassVar[str] = "cancellation"
+    session_id: str
+    run_id: str
+    reason: str
+    turn_id: str | None = None
+    schema_version: int = 2
+    timestamp: datetime = field(default_factory=_utc_now)
+    sequence: int = 0
+    message_id: str | None = None
+    operation_id: str | None = None
+    provider_call_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalErrorEvent:
+    event_type: ClassVar[str] = "terminal_error"
+    session_id: str
+    run_id: str
+    error: str
+    stop_reason: StopReason | str
+    turn_id: str | None = None
+    schema_version: int = 2
+    timestamp: datetime = field(default_factory=_utc_now)
+    sequence: int = 0
+    message_id: str | None = None
+    operation_id: str | None = None
+    provider_call_id: str | None = None
 
 
 SessionEvent: TypeAlias = (
     TurnStartedEvent | MessageEvent | StreamDeltaEvent | TurnFinishedEvent
+    | CommandOutcomeEvent
+    | SelectionRequestEvent
+    | CancellationEvent
+    | TerminalErrorEvent
 )
 EventHandler = Callable[[SessionEvent], None]
 logger = logging.getLogger(__name__)
@@ -214,6 +314,8 @@ class CodingSession:
         trace_sink: TraceSink | None = None,
         trace_provider: str | None = None,
         trace_utc_clock: Callable[[], datetime] | None = None,
+        event_utc_clock: Callable[[], datetime] = _utc_now,
+        event_sequence_start: int = 0,
         limits: RunLimits | None = None,
         journal_sink: Any | None = None,
     ) -> None:
@@ -234,6 +336,7 @@ class CodingSession:
         self._trace_sink = trace_sink
         self._trace_provider = trace_provider
         self._trace_utc_clock = trace_utc_clock
+        self._event_utc_clock = event_utc_clock
         self._limits = limits
         self._journal_sink = journal_sink
         self._active_execution_context: ToolExecutionContext | None = None
@@ -244,6 +347,10 @@ class CodingSession:
         self._persistence_error: str | None = None
         self._state_lock = Lock()
         self._active_on_event: EventHandler | None = None
+        if event_sequence_start < 0:
+            raise ValueError("event_sequence_start must be non-negative")
+        self._event_sequence = event_sequence_start
+        self._active_message_id: str | None = None
 
     @property
     def session_id(self) -> str:
@@ -284,6 +391,7 @@ class CodingSession:
             self._active_on_event = on_event
 
         started_at = self._clock()
+        self._active_message_id = None
         usage = _UsageAccumulator()
         self._persistence_error = self._load_error
         self._flush_pending_messages(turn_id)
@@ -345,6 +453,15 @@ class CodingSession:
                     usage=usage.result(),
                     stop_reason=error.stop_reason,
                 )
+                self._emit(
+                    TerminalErrorEvent(
+                        session_id=self._session_id,
+                        run_id=self._run_id,
+                        turn_id=turn_id,
+                        error=result.error or "task failed",
+                        stop_reason=result.stop_reason or "internal_error",
+                    )
+                )
             except Exception as error:
                 result = TurnResult(
                     status=(
@@ -358,6 +475,25 @@ class CodingSession:
                     error=str(error),
                     usage=usage.result(),
                 )
+                if execution_context.cancelled:
+                    self._emit(
+                        CancellationEvent(
+                            session_id=self._session_id,
+                            run_id=self._run_id,
+                            turn_id=turn_id,
+                            reason=result.error or "task cancelled",
+                        )
+                    )
+                else:
+                    self._emit(
+                        TerminalErrorEvent(
+                            session_id=self._session_id,
+                            run_id=self._run_id,
+                            turn_id=turn_id,
+                            error=result.error or "task failed",
+                            stop_reason=result.stop_reason or "provider_error",
+                        )
+                    )
             else:
                 if execution_context.cancelled:
                     result = TurnResult(
@@ -367,6 +503,14 @@ class CodingSession:
                         turn_id=turn_id,
                         error="task cancelled",
                         usage=usage.result(),
+                    )
+                    self._emit(
+                        CancellationEvent(
+                            session_id=self._session_id,
+                            run_id=self._run_id,
+                            turn_id=turn_id,
+                            reason="task cancelled",
+                        )
                     )
                 elif isinstance(response, ToolCall):
                     result = TurnResult(
@@ -402,6 +546,15 @@ class CodingSession:
                     error=persistence_error,
                     usage=result.usage,
                 )
+                self._emit(
+                    TerminalErrorEvent(
+                        session_id=self._session_id,
+                        run_id=self._run_id,
+                        turn_id=turn_id,
+                        error=persistence_error,
+                        stop_reason="persistence_error",
+                    )
+                )
             ended_at = self._clock()
             emit_trace(
                 self._trace_sink,
@@ -426,6 +579,7 @@ class CodingSession:
             with self._state_lock:
                 self._active_execution_context = None
                 self._active_on_event = None
+            self._active_message_id = None
 
 
     def cancel(self) -> bool:
@@ -512,6 +666,26 @@ class CodingSession:
             return 0, str(error)
 
     def _emit(self, event: SessionEvent) -> None:
+        message_id = event.message_id
+        if isinstance(event, StreamDeltaEvent):
+            if self._active_message_id is None:
+                self._active_message_id = uuid4().hex
+            message_id = self._active_message_id
+        elif isinstance(event, MessageEvent):
+            if event.message.role == "assistant" and event.message.tool_call is None:
+                if self._active_message_id is None:
+                    self._active_message_id = uuid4().hex
+                message_id = self._active_message_id
+            elif message_id is None:
+                message_id = uuid4().hex
+        event = replace(
+            event,
+            schema_version=2,
+            timestamp=self._event_utc_clock(),
+            sequence=self._event_sequence,
+            message_id=message_id,
+        )
+        self._event_sequence += 1
         if self._journal_sink is not None:
             try:
                 self._journal_sink.write_event(event)
@@ -529,7 +703,3 @@ class CodingSession:
                 self._active_on_event(event)
             except Exception:
                 logger.exception("turn event handler failed")
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)

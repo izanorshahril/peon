@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import time
 from typing import Any, Literal, TypeAlias, cast, overload
@@ -24,6 +24,8 @@ from .coding_session import (
     CodingSession,
     EventHandler,
     MessageEvent,
+    CommandOutcomeEvent,
+    SelectionRequestEvent,
     RunLimits,
     SessionEvent,
     StopReason,
@@ -389,6 +391,8 @@ class SessionController:
         trace_sink: TraceSink | None = None,
         trace_provider: str | None = None,
         trace_utc_clock: Callable[[], datetime] | None = None,
+        event_utc_clock: Callable[[], datetime] | None = None,
+        event_sequence_start: int = 0,
         limits: RunLimits | None = None,
         journal_sink: Any | None = None,
     ) -> None:
@@ -402,6 +406,12 @@ class SessionController:
         self._reasoning_effort = reasoning_effort
         self._reasoning_choices = tuple(reasoning_choices)
         self._id_factory = id_factory
+        self._trace_sink = trace_sink
+        self._trace_provider = trace_provider
+        self._trace_utc_clock = trace_utc_clock
+        self._event_utc_clock = event_utc_clock or (
+            lambda: datetime.now(timezone.utc)
+        )
         self._limits = limits
         self._journal_sink = journal_sink
         self._resume_tokens: dict[str, dict[str, str]] = {}
@@ -422,6 +432,8 @@ class SessionController:
             trace_sink=trace_sink,
             trace_provider=trace_provider,
             trace_utc_clock=trace_utc_clock,
+            event_utc_clock=self._event_utc_clock,
+            event_sequence_start=event_sequence_start,
             limits=limits,
             journal_sink=journal_sink,
         )
@@ -532,6 +544,11 @@ class SessionController:
         raise TypeError(f"Unknown intent type: {type(intent)}")
 
     def dispatch_command(self, intent: CommandIntent) -> CommandOutcome:
+        outcome = self._dispatch_command(intent)
+        self._emit_command_events(intent.command, outcome)
+        return outcome
+
+    def _dispatch_command(self, intent: CommandIntent) -> CommandOutcome:
         """Dispatch one informational or transition command intent."""
         raw_cmd = intent.command.strip()
         name = raw_cmd.split(maxsplit=1)[0]
@@ -618,6 +635,61 @@ class SessionController:
 
         return CommandErrorOutcome(command=raw_cmd, error=f"Command '{cmd_id}' is not an informational or transition command.")
 
+    def _emit_command_events(self, command: str, outcome: CommandOutcome) -> None:
+        options: tuple[Mapping[str, object], ...] = ()
+        prompt: str | None = None
+        if isinstance(outcome, ResumeOptionsOutcome):
+            prompt = "Select a session to resume"
+            options = tuple(
+                {
+                    "option_id": option.option_id,
+                    "label": option.summary,
+                    "session_id": option.session_id,
+                }
+                for option in outcome.options
+            )
+        elif isinstance(outcome, ModelOptionsOutcome) and outcome.continuation_token:
+            prompt = "Select a model"
+            options = tuple(
+                {
+                    "option_id": option.option_id,
+                    "label": option.label,
+                    "model": option.model_name,
+                }
+                for option in outcome.options
+            )
+        elif isinstance(outcome, LogoutOptionsOutcome):
+            prompt = "Select a provider to remove"
+            options = tuple(
+                {"option_id": option_id, "label": provider_name}
+                for option_id, provider_name in outcome.options
+            )
+        elif isinstance(outcome, ProviderSetupStepOutcome):
+            prompt = outcome.prompt
+
+        if prompt is not None:
+            self._session._emit(
+                SelectionRequestEvent(
+                    session_id=self.session_id,
+                    run_id=self.run_id,
+                    turn_id=None,
+                    prompt=prompt,
+                    options=options,
+                )
+            )
+        self._session._emit(
+            CommandOutcomeEvent(
+                session_id=self.session_id,
+                run_id=self.run_id,
+                turn_id=None,
+                command=command,
+                status=(
+                    "error" if isinstance(outcome, CommandErrorOutcome) else "success"
+                ),
+                output=type(outcome).__name__,
+            )
+        )
+
     def dispatch_new_session(
         self,
         intent: NewSessionIntent | None = None,
@@ -650,6 +722,13 @@ class SessionController:
             on_tool_output=self._session._on_tool_output,
             clock=self._session._clock,
             id_factory=self._session._id_factory,
+            trace_sink=self._trace_sink,
+            trace_provider=self._trace_provider,
+            trace_utc_clock=self._trace_utc_clock,
+            limits=self._limits,
+            journal_sink=self._journal_sink,
+            event_utc_clock=self._event_utc_clock,
+            event_sequence_start=self._session._event_sequence,
         )
         return SessionTransitionOutcome(
             action="new",
@@ -781,6 +860,13 @@ class SessionController:
             on_tool_output=self._session._on_tool_output,
             clock=self._session._clock,
             id_factory=self._session._id_factory,
+            trace_sink=self._trace_sink,
+            trace_provider=self._trace_provider,
+            trace_utc_clock=self._trace_utc_clock,
+            limits=self._limits,
+            journal_sink=self._journal_sink,
+            event_utc_clock=self._event_utc_clock,
+            event_sequence_start=self._session._event_sequence,
         )
 
         return SessionTransitionOutcome(
@@ -1083,6 +1169,13 @@ class SessionController:
             on_tool_output=self._session._on_tool_output,
             clock=self._session._clock,
             id_factory=self._session._id_factory,
+            trace_sink=self._trace_sink,
+            trace_provider=self._trace_provider,
+            trace_utc_clock=self._trace_utc_clock,
+            limits=self._limits,
+            journal_sink=self._journal_sink,
+            event_utc_clock=self._event_utc_clock,
+            event_sequence_start=self._session._event_sequence,
         )
 
         return SessionTransitionOutcome(

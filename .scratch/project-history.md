@@ -66,13 +66,13 @@ app -> extensions -> agent
 
 - `AgentContext`, `AgentMessage`, `ToolCall`, `ModelResponse` portable.
 - `run_task` execute provider turns, bounded tool dispatch, result append, continuation to final assistant output. Expose optional provider usage.
-- `CodingSession` own host-neutral prompt lifecycle around `run_task`. Current
-  typed vocabulary is turn start, canonical message, stream delta, and turn
-  finish. Tool live output still uses separate callback pending 0.3.1.
+- `CodingSession` owns host-neutral prompt lifecycle around `run_task`. Runtime
+  events carry immutable schema, timestamp, sequence, and correlation metadata;
+  schema-v1/v2 serialization is shared. Typed tool lifecycle remains ticket 04.
 - Metadata tracing disabled by default, enable via `--trace PATH`. Record provider, tool, resource, persist, hook, turn duration as JSONL (no chat content). Trace errors isolated from turn state.
-- Optional event-journal sink and schema version 2 serializer exist as partial
-  application interfaces. CLI opt-in, full event vocabulary, recovery policy,
-  and strict terminal semantics remain 0.3.1 work.
+- Optional event-journal sink and schema version 2 serializer use the shared
+  runtime-event contract. Journal recovery and operational CLI policy remain
+  ticket 09.
 - `peon.embedded.EmbeddedSession` direct text Python adapter over
   `SessionController`. Expose submit, typed callbacks, typed sync/async iterator
   scaffolding, structured turn results, cancellation, and injected deps. No
@@ -88,10 +88,11 @@ app -> extensions -> agent
 - Task arg: one non-interactive turn.
 - No task or `--tui`: Textual minimal interactive mode.
 - `-p`/`--print`: decoration-free final output; piped stdin support.
-- `--events`/`--jsonl`/`--json`: JSONL events (session start, user, thinking, tool call/result, assistant, turn end, error, session end).
-- Print mode compose controller/session behavior. Undecorated output, session
-  lifecycle, resources, persistence, and schema version 1 JSON events remain
-  compatible. CLI schema version 2 selection is not implemented yet.
+- `--events`/`--jsonl`/`--json`: schema-v1 JSONL by default; explicit
+  `--schema-version 2` emits normalized typed runtime events.
+- Print mode composes controller/session behavior. Undecorated output, session
+  lifecycle, resources, persistence, and schema-v1 JSON events remain
+  compatible. Schema-v2 selection uses shared serialization.
 - Default non-interactive task path uses ephemeral controller/session behavior.
   CLI entry matches print, embedded, and Textual semantics where applicable.
 - Built-in hosts resolve via stable `print`, `jsonl`, `textual`, and `embedded`.
@@ -286,6 +287,24 @@ Completed 2026-07-22:
   `0.3.0a0` sdist and wheel; `git diff --check` passes.
 - No runtime behavior changed; only pytest discovery and characterization tests
   changed.
+
+### 0.3.1 Ticket 02: runtime events and serializers
+
+Completed 2026-07-22:
+
+- Added immutable runtime event metadata: schema identity, stable event type,
+  injected UTC timestamp, run sequence, and correlation IDs.
+- Added typed command, selection, cancellation, and terminal-error event
+  families; provider failure, cancellation, and persistence failure emit typed
+  terminal facts before exactly one turn finish.
+- Added shared schema-v1/v2 serializer with tolerant diagnostics and strict
+  unknown-event rejection. Schema-v1 remains default CLI output; `--schema-version
+  2` emits normalized typed events with terminal stop reasons.
+- Streaming deltas and final assistant messages share message identity. Session
+  transitions preserve event clock and sequence state.
+- Evidence: focused 112 passed; full 320 tests with 0 failures, 0 errors, and 2
+  strict expected failures; mypy clean across 28 files; build and diff check
+  passed.
 
 ## Remaining Pi Gaps
 
