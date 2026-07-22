@@ -1,9 +1,13 @@
 from collections.abc import Sequence
+import asyncio
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import cast
+
+import pytest
 
 from peon.agent import AgentMessage, ModelResponse, ToolCall, ToolDefinition
 from peon.app.coding_session import (
@@ -42,6 +46,18 @@ class BlockingProvider:
     ) -> ModelResponse:
         self.started.set()
         self.release.wait(timeout=2)
+        return ModelResponse(content="finished")
+
+
+class DelayedProvider:
+    def complete(
+        self,
+        *,
+        messages: Sequence[AgentMessage],
+        tools: Sequence[ToolDefinition] = (),
+        model: str | None = None,
+    ) -> ModelResponse:
+        time.sleep(0.1)
         return ModelResponse(content="finished")
 
 
@@ -222,8 +238,6 @@ assert "peon.app.textual_tui" not in sys.modules
 
 
 def test_embedded_session_sync_and_async_event_iterators() -> None:
-    import asyncio
-
     session = EmbeddedSession(
         provider=FakeProvider(),
         session_store=MemorySessionStore(),
@@ -243,3 +257,49 @@ def test_embedded_session_sync_and_async_event_iterators() -> None:
         assert isinstance(async_events[-1], TurnFinishedEvent)
 
     asyncio.run(_exercise_async())
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="0.3.1 ticket 03: empty async polling ends iteration early",
+)
+def test_embedded_async_iterator_waits_for_delayed_terminal_event() -> None:
+    session = EmbeddedSession(
+        provider=DelayedProvider(),
+        session_store=MemorySessionStore(),
+    )
+
+    async def _collect_events() -> list[object]:
+        return [event async for event in session.aiter_events("wait")]
+
+    events = asyncio.run(_collect_events())
+
+    assert isinstance(events[-1], TurnFinishedEvent)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="0.3.1 ticket 04: tool lifecycle is not in session event stream",
+)
+def test_embedded_tool_run_emits_tool_start_and_finish_events() -> None:
+    events: list[object] = []
+    registry = ExtensionRegistry()
+    registry.register_tool(
+        name="lookup",
+        description="Look up a value.",
+        parameters={"type": "object"},
+        handler=lambda arguments: "owner:Peon",
+    )
+    session = EmbeddedSession(
+        provider=ToolProvider(),
+        session_store=MemorySessionStore(),
+        tools=registry,
+        on_event=events.append,
+    )
+
+    result = session.submit("look up the owner")
+    event_names = [type(event).__name__ for event in events]
+
+    assert result.status == "success"
+    assert "ToolStartedEvent" in event_names
+    assert "ToolFinishedEvent" in event_names

@@ -1,12 +1,23 @@
 # Peon Project History and Source of Truth
 
-Updated: 2026-07-21
+Updated: 2026-07-22
 
 ## Purpose
 
-Peon canonical product, architecture, implementation-history, handoff doc. Replace old files in `.scratch`.
+Peon canonical product, architecture, current implementation, and handoff doc.
 
-Update file when package ownership, provider/tool contracts, user commands, capabilities, or Pi parity plan change. Keep truth separate from history. Verify claims against source + tests before status change. Do not create new scratch specs, tickets, command logs, research notes; add short findings here. Consolidated host-neutral session tickets here 2026-07-21.
+Release-specific records:
+
+- `peon-0.3.0-history.md`: sole archive for 0.3.0 spec, tickets, commits,
+  validation claims, verified outcome, and carry-forward decisions.
+- `peon-0.3.1-spec.md`: active completion specification.
+- `peon-0.3.1/issues/`: active dependency-ordered implementation tickets.
+
+Update this file when package ownership, provider/tool contracts, user commands,
+capabilities, or Pi parity plan change. Keep current truth separate from release
+history. Verify claims against source and tests before status change. Do not
+create extra scratch specs, tickets, command logs, or research notes outside the
+release records listed above.
 
 ## Product Direction
 
@@ -55,9 +66,18 @@ app -> extensions -> agent
 
 - `AgentContext`, `AgentMessage`, `ToolCall`, `ModelResponse` portable.
 - `run_task` execute provider turns, bounded tool dispatch, result append, continuation to final assistant output. Expose optional provider usage.
-- `CodingSession` own host-neutral prompt lifecycle around `run_task`. Include resource apply, message persist, typed start/message/finish events, structured outcomes, tool cancel, normalized usage aggregation.
+- `CodingSession` own host-neutral prompt lifecycle around `run_task`. Current
+  typed vocabulary is turn start, canonical message, stream delta, and turn
+  finish. Tool live output still uses separate callback pending 0.3.1.
 - Metadata tracing disabled by default, enable via `--trace PATH`. Record provider, tool, resource, persist, hook, turn duration as JSONL (no chat content). Trace errors isolated from turn state.
-- `peon.embedded.EmbeddedSession` direct text Python adapter over `CodingSession`. Expose typed events, structured turn results, cancel, injected deps. No Textual/prompt-toolkit load. App exports lazy.
+- Optional event-journal sink and schema version 2 serializer exist as partial
+  application interfaces. CLI opt-in, full event vocabulary, recovery policy,
+  and strict terminal semantics remain 0.3.1 work.
+- `peon.embedded.EmbeddedSession` direct text Python adapter over
+  `SessionController`. Expose submit, typed callbacks, typed sync/async iterator
+  scaffolding, structured turn results, cancellation, and injected deps. No
+  Textual/prompt-toolkit load. Dictionary history/events, terminal iterator
+  result, and safe backpressure remain 0.3.1 work.
 - `ToolExecutionContext` support cancel + live tool callbacks.
 - Adapters support OpenAI-compatible, GitHub Copilot, custom proxy profiles. Model discovery via `GET /models`.
 - Provider profiles + UI settings persist in user-local JSON.
@@ -69,9 +89,15 @@ app -> extensions -> agent
 - No task or `--tui`: Textual minimal interactive mode.
 - `-p`/`--print`: decoration-free final output; piped stdin support.
 - `--events`/`--jsonl`/`--json`: JSONL events (session start, user, thinking, tool call/result, assistant, turn end, error, session end).
-- Print mode compose `CodingSession`. Undecorated output, session lifecycle, resource behavior, persist, JSON event translation compatible. JSON records use schema v1, carry session/run/turn correlation. Terminal turn records from typed session finish event include normalized usage.
-- Default non-interactive task path use ephemeral `CodingSession`. CLI entry match print, embedded, Textual, prompt-toolkit semantics.
-- Built-in hosts resolve via stable `print`, `jsonl`, `textual`, `prompt-toolkit`, `embedded`. Reserved `fullscreen`, `webapp` fail before startup. CLI mode names compatible with host IDs.
+- Print mode compose controller/session behavior. Undecorated output, session
+  lifecycle, resources, persistence, and schema version 1 JSON events remain
+  compatible. CLI schema version 2 selection is not implemented yet.
+- Default non-interactive task path uses ephemeral controller/session behavior.
+  CLI entry matches print, embedded, and Textual semantics where applicable.
+- Built-in hosts resolve via stable `print`, `jsonl`, `textual`, and `embedded`.
+  Prompt-toolkit implementation/dependency are removed; legacy explicit host
+  selection retains unavailable guidance. Reserved `fullscreen`, `webapp` fail
+  before startup.
 - `fullscreen` + `webapp` modes reserved, reject honestly.
 
 ### Sessions
@@ -87,10 +113,12 @@ app -> extensions -> agent
 ### Tools and extensions
 
 - In-process `ExtensionRegistry` own tool definitions/handlers, skill installers, named lifecycle hooks.
-- Registered cwd-bound tools: `read`, `write`, `edit`, `bash`, `ls`, `find`, `grep`. Only `read`, `write`, `edit`, `bash` enabled default. Enabled tools persist in UI config.
+- Registered cwd-bound tools: `read`, `write`, `edit`, `bash`, `ls`, `find`, `grep`. Capability-profile helpers exist, but consistent task/print/JSONL/Textual composition and sample-tool exclusion remain 0.3.1 work.
 - Filesystem tools enforce cwd contain, sensitive/excluded targets, symlink mutate deny, bounded read/search, output truncate.
 - `edit` require exact unique match; `write` + `edit` reject unsafe mutate.
-- `bash` have timeout, cancel, bounded output, live callbacks, Windows process-tree terminate.
+- `bash` has timeout, cancel, bounded output, live callbacks, and Windows
+  process-tree termination. Unified typed tool/shell lifecycle remains 0.3.1
+  work.
 - `word_count` domain-neutral sample integration.
 
 ### Resources and effective system prompt
@@ -111,8 +139,12 @@ app -> extensions -> agent
 - Slash palette support ranked search, aliases, keyboard select, Tab complete, picker search, nested settings, Escape backtrack.
 - `Ctrl+C` confirm exit, `Ctrl+D` exit, `Ctrl+T` toggle thinking, `Shift+Tab` cycle reasoning, `Ctrl+O` toggle tool output.
 - Settings persist UI spacing/colors/style, system text style, provider maps, reasoning, thinking visibility, tool render/availability, shortcuts.
+- `TextualEventRouter` handles current turn/message/delta/finish events. Prompt,
+  informational command, session-transition, and shell paths use controller.
+  Provider/model/settings/logout effects and legacy tool-output rendering remain
+  host-local pending thin-host completion.
 - Footer show cwd, provider/model, context count, reasoning. Token usage via host-neutral turn result + JSON event contract. Interactive footer show `n/a` until presentation ticket implement.
-- Prompt-toolkit shell small fallback/test path; Textual own full interaction parity.
+- Textual is sole maintained interactive TUI.
 
 ### Commands
 
@@ -212,6 +244,48 @@ a9571bc  print and event modes
 49fd17e  local resources/effective system prompt
 d4806a0  thinking-toggle and inactive-logout regressions
 ```
+
+## Active 0.3.1 Completion
+
+0.3.0 remained unreleased at `0.3.0a0`. Post-implementation review found only
+the baseline, prompt dispatch, informational commands, and session transitions
+fully matched their 0.3.0 tickets. Active completion work is defined only in
+`peon-0.3.1-spec.md` and its 11 tickets:
+
+- trustworthy root validation;
+- complete ordered runtime events and shared schema serializers;
+- validated embedded history and safe typed/dictionary iterators;
+- unified tool and shell lifecycle events;
+- complete provider/model/settings/logout controller flows;
+- thin Textual ownership;
+- consistent capability profiles, run limits, and stop reasons;
+- streaming timeout, cancellation, retry, and backpressure;
+- journal operational surface;
+- package extras, textual-serve smoke, compatibility, and release gates.
+
+Do not start unrelated Pi parity work until 0.3.1 ticket 11 closes.
+
+### 0.3.1 Ticket 01: trustworthy validation baseline
+
+Completed 2026-07-22:
+
+- Pytest discovery is rooted at `tests/`; canonical `uv run pytest` no longer
+  collects vendored mini-swe-agent tests.
+- Collection baseline is 312 maintained tests. Full suite: 312 tests, 0
+  failures, 0 errors, 2 strict expected failures, 25.366 seconds, exit 0. Expected
+  failures characterize async iterator premature completion and missing typed
+  tool lifecycle events.
+- Existing schema version 1 CLI and version 1 legacy-session tests remain public
+  compatibility checks.
+- Package baseline is `0.3.0a0`, empty core dependencies, `tui` and `serve`
+  extras each containing Textual only. `serve` still lacks textual-serve.
+- Importing `peon.embedded` loads Peon agent contracts/runtime, application
+  controller/session/resources, embedded adapter, and extension registry/tool
+  modules. It loads no Textual or prompt-toolkit module.
+- `uv run mypy src/peon` passes across 28 files; `uv build` creates the
+  `0.3.0a0` sdist and wheel; `git diff --check` passes.
+- No runtime behavior changed; only pytest discovery and characterization tests
+  changed.
 
 ## Remaining Pi Gaps
 
@@ -330,85 +404,12 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Minor flicker + highlight trace deferred.
 - Pass 5 focused Textual tests, 53 UI tests, 302 full tests. Mypy clean. Git diff clean.
 
-### Ticket 05: dispatch prompts through SessionController
+### 0.3.0 host-neutral migration
 
-- Add `SessionController` host-neutral seam wrapping `CodingSession` with typed `PromptIntent`.
-- Wire CLI one-shot, print, JSONL, Textual, prompt-toolkit, embedded prompt dispatch via controller.
-- Pass 14 focused tests, 316 full suite, mypy clean, git diff check clean.
-
-### Ticket 06: move informational commands behind controller
-
-- Add `CommandIntent` + typed outcomes (`HelpOutcome`, `ToolsOutcome`, `SkillsOutcome`, `SessionInfoOutcome`, `ReasoningOutcome`, `CommandErrorOutcome`) to `SessionController`.
-- Dispatch `/help`, `/tools`, `/skills`, `/session`, `/reasoning` through `controller.dispatch_command(...)` in Textual + prompt-toolkit hosts.
-- Pass 22 focused tests, 324 full suite, mypy clean, git diff check clean.
-
-### Ticket 07: move session transitions behind controller
-
-- Add `NewSessionIntent`, `ResumeSessionIntent`, `ResumeSelectIntent`, `ForkSessionIntent` + `ResumeOption`, `ResumeOptionsOutcome`, `SessionTransitionOutcome` to `SessionController`.
-- Add single-use continuation token validation for `/resume` selection.
-- Route `/new`, `/resume`, `/fork` through controller in Textual + prompt-toolkit hosts.
-- Pass 27 focused tests, 329 full suite, mypy clean, git diff check clean.
-
-### Ticket 08: move provider and settings flows behind controller
-
-- Add `ModelSelectIntent`, `ProviderSetupIntent`, `SettingsIntent`, `LogoutIntent`, `ContinuationResponseIntent` + `ModelOption`, `ModelOptionsOutcome`, `ProviderSetupStepOutcome`, `ProviderSuccessOutcome`, `LogoutOptionsOutcome`, `LogoutSuccessOutcome` to `SessionController`.
-- Add single-use continuation token handling for multi-step provider setup, model selection, and provider logout.
-- Pass 33 focused tests, 335 full suite, mypy clean, git diff check clean.
-
-### Ticket 09: move bang-shell behavior behind controller
-
-- Add `ShellIntent`, `ShellResultOutcome`, `ShellErrorOutcome` to `SessionController`.
-- Implement `dispatch_shell(...)` for direct visible (`!`) and hidden (`!!`) shell command execution.
-- Route `!` and `!!` in Textual and prompt-toolkit hosts through `SessionController.dispatch_shell(...)`.
-- Pass 36 focused tests, 338 full suite, mypy clean, git diff check clean.
-
-### Ticket 10: apply explicit capability profiles across hosts
-
-- Add `CAPABILITY_PROFILES` (`none`, `read-only`, `coding`, `custom`), `active_capability_profile`, `set_capability_profile` to `config.py`.
-- Consistently filter model-facing tools and execution across CLI, TUI, and embedded hosts.
-- Pass 55 focused tests, 340 full suite, mypy clean, git diff check clean.
-
-### Ticket 11: enforce run limits and stop reasons
-
-- Add `RunLimits`, `LimitExceededError`, and `StopReason` to runtime loop, `CodingSession`, `SessionController`, and `EmbeddedSession`.
-- Enforce provider-call, tool-call, elapsed-time, token, and cost bounds with precise machine-readable `stop_reason` values on `TurnResult`.
-- Pass 51 focused tests, 342 full suite, mypy clean, git diff check clean.
-
-### Ticket 12: complete thin Textual migration
-
-- Add `TextualEventRouter` to `textual_tui.py` with explicit handlers for `TurnStartedEvent`, `MessageEvent`, `TurnFinishedEvent`, and diagnostic fallbacks for unhandled events.
-- Ensure all host interactions dispatch via `SessionController` intents.
-- Pass 50 focused Textual tests, 343 full suite, mypy clean, git diff check clean.
-
-### Ticket 13: retire prompt-toolkit host
-
-- Remove `src/peon/app/tui.py` and `tests/test_tui.py`, making Textual the sole maintained interactive TUI.
-- Remove `prompt-toolkit` from `pyproject.toml` dependencies and update `hosts.py` to return an actionable error if `prompt-toolkit` is requested.
-- Pass 98 focused host/CLI/Textual tests, 302 full suite, mypy clean, git diff check clean.
-
-### Ticket 14: stream OpenAI-compatible responses end to end
-
-- Add `StreamingModelProvider` protocol, `ModelStreamChunk`, `ToolCallDelta`, and SSE transport parsing to `provider_adapters.py`.
-- Support incremental stream consumption and tool call argument assembly in `run_task` / `CodingSession`, emitting `StreamDeltaEvent` through `TextualEventRouter`.
-- Pass 45 focused AI/agent tests, 304 full suite, mypy clean, git diff check clean.
-
-### Ticket 15: bound streaming iterator delivery
-
-- Add `BoundedEventQueue`, `iter_events()`, and `aiter_events()` to `embedded.py` with finite buffer bounds and worker thread cleanup.
-- Support turn-level `on_event` callback parameter in `PromptIntent` and `CodingSession.prompt`.
-- Pass 20 focused embedded/session tests, 305 full suite, mypy clean, git diff check clean.
-
-### Ticket 16: add optional redacted event journal
-
-- Add `EventJournalSink` protocol, `FileEventJournalSink`, `serialize_event()`, `RedactionHook`, and `JournalWriteError` to `observability.py`.
-- Integrate `journal_sink` into `CodingSession` and `SessionController` `_emit()` with strict vs non-strict error modes while preserving canonical message state.
-- Pass 61 focused observability/session tests, 309 full suite, mypy clean, git diff check clean.
-
-### Ticket 17: split headless, TUI, and serve packaging
-
-- Move `textual` and `textual-serve` out of core dependencies in `pyproject.toml` into `[project.optional-dependencies]` `tui` and `serve`.
-- Catch missing `textual` during host resolution and CLI interactive startup, returning concise actionable guidance (`pip install "peon[tui]"` / `uv add "peon[tui]"`) without traceback.
-- Pass 58 focused host/CLI/embedded tests, 310 full suite, mypy clean, git diff check clean.
+All 0.3.0 ticket intent, implementation evidence, validation claims, review
+findings, and carry-forward rules now live only in
+`peon-0.3.0-history.md`. Do not reconstruct status from old commit messages or
+completed checkboxes.
 
 ## Primary Upstream Sources
 
