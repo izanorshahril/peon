@@ -32,4 +32,3 @@ class ToolExecutor(Protocol):
     def invoke(self, name: str, arguments: Mapping[str, object]) -> str:
         """Execute a named tool and return its text result."""
         ...
-

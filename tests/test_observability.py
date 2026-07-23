@@ -484,3 +484,55 @@ def test_serialize_schema_one_message_event_characterization() -> None:
     assert res3["type"] == "assistant"
     assert res3["content"] == "Direct answer."
 
+
+def test_file_event_journal_sink_redaction_hook_and_recovery(tmp_path: Path) -> None:
+    from peon.app.coding_session import MessageEvent
+    from peon.agent import AgentMessage
+    from peon.app.observability import FileEventJournalSink, read_journal_records, JournalWriteError
+
+    def sanitize_hook(event: object) -> object:
+        if isinstance(event, MessageEvent) and "SECRET" in event.message.content:
+            sanitized_msg = AgentMessage(
+                role=event.message.role,
+                content=event.message.content.replace("SECRET", "[REDACTED]"),
+            )
+            return MessageEvent(
+                session_id=event.session_id,
+                run_id=event.run_id,
+                turn_id=event.turn_id,
+                message=sanitized_msg,
+            )
+        return event
+
+    journal_file = tmp_path / "journal.jsonl"
+    sink = FileEventJournalSink(journal_file, redaction_hook=sanitize_hook)
+
+    event = MessageEvent(
+        session_id="s1",
+        run_id="r1",
+        turn_id="t1",
+        message=AgentMessage(role="user", content="My key is SECRET123"),
+    )
+    sink.write_event(event)
+
+    # In-process event object must not be mutated
+    assert event.message.content == "My key is SECRET123"
+
+    # Journal file contains redacted content
+    records = read_journal_records(journal_file)
+    assert len(records) == 1
+    assert records[0]["event_type"] == "message"
+    assert records[0]["message"]["content"] == "My key is [REDACTED]123"
+
+    # Simulate trailing partial line in journal file
+    with journal_file.open("a", encoding="utf-8") as f:
+        f.write('{"event_type":"turn_started", "session_id": "s1"')  # incomplete line
+
+    # Non-strict recovery recovers valid preceding records and skips trailing line
+    recovered = read_journal_records(journal_file, strict=False)
+    assert len(recovered) == 1
+    assert recovered[0]["event_type"] == "message"
+
+    # Strict read raises JournalWriteError on partial trailing line
+    with pytest.raises(JournalWriteError, match="Journal read failed"):
+        read_journal_records(journal_file, strict=True)

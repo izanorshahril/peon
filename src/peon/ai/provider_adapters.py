@@ -57,6 +57,9 @@ class JsonTransport(Protocol):
 class UrllibJsonTransport:
     """Standard-library JSON POST transport for provider adapters."""
 
+    def __init__(self, timeout: float = 60.0) -> None:
+        self.timeout = timeout
+
     def post(
         self,
         url: str,
@@ -70,7 +73,7 @@ class UrllibJsonTransport:
                 headers=dict(headers),
                 method="POST",
             )
-            with urlopen(request, timeout=60) as response:
+            with urlopen(request, timeout=self.timeout) as response:
                 result = json.loads(response.read().decode("utf-8"))
         except (HTTPError, URLError, OSError, ValueError) as error:
             raise ProviderError(f"provider request failed: {url}") from error
@@ -85,7 +88,7 @@ class UrllibJsonTransport:
     ) -> JsonObject:
         try:
             request = Request(url, headers=dict(headers), method="GET")
-            with urlopen(request, timeout=60) as response:
+            with urlopen(request, timeout=self.timeout) as response:
                 result = json.loads(response.read().decode("utf-8"))
         except (HTTPError, URLError, OSError, ValueError) as error:
             raise ProviderError(f"provider request failed: {url}") from error
@@ -108,7 +111,7 @@ class UrllibJsonTransport:
                 headers=req_headers,
                 method="POST",
             )
-            with urlopen(request, timeout=60) as response:
+            with urlopen(request, timeout=self.timeout) as response:
                 for raw_line in response:
                     yield raw_line.decode("utf-8")
         except (HTTPError, URLError, OSError, ValueError) as error:

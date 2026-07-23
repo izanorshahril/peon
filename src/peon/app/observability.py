@@ -440,6 +440,47 @@ class FileEventJournalSink:
             logger.warning("Event journal write failed: %s", error)
 
 
+def read_journal_records(
+    source: Path | TextIO,
+    *,
+    strict: bool = False,
+) -> tuple[dict[str, Any], ...]:
+    """Read schema version 2 JSONL journal records with trailing partial record recovery."""
+    records: list[dict[str, Any]] = []
+    if isinstance(source, Path):
+        if not source.exists():
+            return ()
+        lines = source.read_text(encoding="utf-8").splitlines()
+    else:
+        lines = [line.rstrip("\r\n") for line in source.readlines()]
+
+    for idx, line in enumerate(lines):
+        line_str = line.strip()
+        if not line_str:
+            continue
+        try:
+            parsed = json.loads(line_str)
+            if not isinstance(parsed, dict):
+                raise ValueError("journal line must be a JSON object")
+            records.append(parsed)
+        except ValueError as error:
+            is_trailing = idx == len(lines) - 1
+            if strict:
+                raise JournalWriteError(
+                    f"Journal read failed on line {idx + 1}: {error}"
+                ) from error
+            if is_trailing:
+                logger.warning(
+                    "Trailing partial journal record recovered/skipped on line %d: %s",
+                    idx + 1,
+                    error,
+                )
+            else:
+                logger.warning("Malformed journal line %d skipped: %s", idx + 1, error)
+
+    return tuple(records)
+
+
 __all__ = [
     "EventJournalSink",
     "FileEventJournalSink",
@@ -447,5 +488,6 @@ __all__ = [
     "JsonlTraceSink",
     "RedactionHook",
     "null_trace_sink",
+    "read_journal_records",
     "serialize_event",
 ]

@@ -163,3 +163,39 @@ def test_run_limits_missing_usage_raises_accounting_unavailable() -> None:
     res = session.prompt("test prompt")
     assert res.status == "error"
     assert res.stop_reason == "token_limit_accounting_unavailable"
+
+
+def test_default_cli_registry_absent_sample_tools() -> None:
+    from peon.app.cli import ExtensionRegistry, register_filesystem_tools
+    reg = ExtensionRegistry()
+    register_filesystem_tools(reg)
+    tool_names = [t.name for t in reg.tools]
+    assert "read" in tool_names
+    assert "write" in tool_names
+    assert "edit" in tool_names
+    assert "bash" in tool_names
+    assert "word_count" not in tool_names
+
+
+def test_run_limits_max_provider_calls_exceeded() -> None:
+    store = MemorySessionStore()
+    session_id = store.create().session_id
+    provider = FakeModelProvider([
+        ModelResponse(
+            tool_call=ToolCall(name="read", arguments={}, call_id="call-1")
+        ),
+        ModelResponse(content="done"),
+    ])
+    all_tools = (ToolDefinition("read", "Read", {}),)
+    executor = FakeToolExecutor(all_tools)
+    session = CodingSession(
+        provider=provider,
+        session_store=store,
+        session_id=session_id,
+        run_id="r1",
+        executor=executor,
+        limits=RunLimits(max_provider_calls=1),
+    )
+    res = session.prompt("test prompt")
+    assert res.status == "error"
+    assert res.stop_reason == "max_provider_calls_exceeded"

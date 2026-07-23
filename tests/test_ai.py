@@ -793,3 +793,53 @@ def test_custom_provider_does_not_advertise_streaming() -> None:
         model="model",
     )
     assert not hasattr(provider, "stream") or not callable(getattr(provider, "stream", None))
+
+
+def test_openai_compatible_provider_streams_fragmented_tool_call() -> None:
+    lines = [
+        'data: {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-100", "function": {"name": "read", "arguments": "{\\"path\\": "}}]}}]}',
+        'data: {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\\"file.txt\\"}"}}]}}]}',
+        'data: [DONE]',
+    ]
+    transport = StubTransport({}, stream_lines=lines)
+    provider = OpenAICompatibleProvider(
+        base_url="https://example.test",
+        api_key="key",
+        model="model",
+        transport=transport,
+    )
+    chunks = list(provider.stream(messages=[]))
+    assert len(chunks) == 2
+    assert chunks[0].tool_call_delta.name == "read"
+    assert chunks[0].tool_call_delta.id == "call-100"
+    assert chunks[0].tool_call_delta.arguments_delta == '{"path": '
+    assert chunks[1].tool_call_delta.arguments_delta == '"file.txt"}'
+
+
+def test_run_task_stream_cancellation_stops_consumption() -> None:
+    lines = [
+        'data: {"choices": [{"delta": {"content": "Part 1"}}]}',
+        'data: {"choices": [{"delta": {"content": "Part 2"}}]}',
+        'data: {"choices": [{"delta": {"content": "Part 3"}}]}',
+        'data: [DONE]',
+    ]
+    transport = StubTransport({}, stream_lines=lines)
+    provider = OpenAICompatibleProvider(
+        base_url="https://example.test",
+        api_key="key",
+        model="model",
+        transport=transport,
+    )
+    from peon.agent import ToolExecutionContext
+    from peon.agent.runtime_errors import AgentError
+    exec_ctx = ToolExecutionContext()
+    exec_ctx.cancel()
+
+    with pytest.raises(AgentError, match="cancelled"):
+        run_task("prompt", provider, execution_context=exec_ctx)
+
+
+def test_urllib_json_transport_custom_timeout() -> None:
+    from peon.ai.provider_adapters import UrllibJsonTransport
+    t = UrllibJsonTransport(timeout=12.5)
+    assert t.timeout == 12.5

@@ -29,7 +29,6 @@ from peon.ai import (
 from peon.extensions import (
     ExtensionRegistry,
     register_filesystem_tools,
-    register_sample_tools,
 )
 
 from .coding_session import (
@@ -46,7 +45,7 @@ from .config import (
 )
 from .session_controller import PromptIntent, SessionController
 from .hosts import HostUnavailableError, resolve_host
-from .observability import JsonlTraceSink, serialize_event
+from .observability import FileEventJournalSink, JsonlTraceSink, serialize_event
 from .sessions import MemorySessionStore, SessionStore
 from .resources import ResourceInventory, ResourceLoader
 
@@ -451,6 +450,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--currency",
         help="Currency identifier for cost limit validation",
     )
+    parser.add_argument(
+        "--journal",
+        type=Path,
+        help=(
+            "Write schema version 2 JSONL event journal to PATH. "
+            "WARNING: Prompts, assistant responses, tool arguments/output, "
+            "paths, and secrets may be written."
+        ),
+    )
+    parser.add_argument(
+        "--journal-strict",
+        action="store_true",
+        help="Treat event journal write failures as terminal errors",
+    )
     return parser
 
 
@@ -757,7 +770,6 @@ def _run_print_mode(
     active_executor: ExtensionRegistry | FilteredToolExecutor = active_registry
     if registry is None:
         register_filesystem_tools(active_registry)
-        register_sample_tools(active_registry)
     if getattr(args, "profile", None):
         ui_config = set_capability_profile(UiConfig(), args.profile)
         active_executor = filter_tool_executor(ui_config, active_registry)
@@ -854,6 +866,12 @@ def _run_print_mode(
         if not args.provider:
             raise CommandError("provider is not configured")
         provider = (provider_factory or create_provider)(config)
+        journal_sink: FileEventJournalSink | None = None
+        if getattr(args, "journal", None):
+            journal_sink = FileEventJournalSink(
+                args.journal,
+                strict=getattr(args, "journal_strict", False),
+            )
         controller = SessionController(
             provider=provider,
             session_store=active_store,
@@ -870,6 +888,7 @@ def _run_print_mode(
             trace_provider=args.provider_name or args.provider,
             event_utc_clock=events.utc_clock if events is not None else None,
             event_sequence_start=(events.next_sequence if events is not None else 0),
+            journal_sink=journal_sink,
         )
         result = controller.dispatch(
             PromptIntent(task, preserve_whitespace=True),

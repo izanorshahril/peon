@@ -19,7 +19,7 @@ from peon.app import cli as cli_module
 from peon.app.coding_session import TurnResult
 from peon.app.sessions import MemorySessionStore, SessionStoreError
 from peon.ai import ProviderError
-from peon.extensions import ExtensionRegistry
+from peon.extensions import ExtensionRegistry, register_sample_tools
 
 
 @dataclass
@@ -563,11 +563,14 @@ def test_print_event_mode_emits_tool_lifecycle_events() -> None:
             ModelResponse(content="There are two words."),
         ]
     )
+    registry = ExtensionRegistry()
+    register_sample_tools(registry)
     output = StringIO()
 
     result = main(
         ["-p", "Count this.", "--events", "--provider", "fake"],
         provider_factory=lambda _config: provider,
+        registry=registry,
         output=output,
         error=StringIO(),
     )
@@ -1020,3 +1023,25 @@ def test_command_reports_provider_configuration_failure_without_traceback() -> N
 
     assert result == 1
     assert "requires --base-url" in error.getvalue()
+
+
+def test_cli_journal_flag_writes_schema_version_2_events(tmp_path: Path) -> None:
+    from peon.app.observability import read_journal_records
+    journal_path = tmp_path / "journal.jsonl"
+    provider = FakeProvider(response="Journal answer")
+    output = StringIO()
+
+    result = main(
+        [
+            "-p", "Journal prompt.",
+            "--provider", "fake",
+            "--journal", str(journal_path),
+        ],
+        provider_factory=lambda _config: provider,
+        output=output,
+    )
+
+    assert result == 0
+    records = read_journal_records(journal_path)
+    assert len(records) >= 2
+    assert all(r["schema_version"] == 2 for r in records)

@@ -110,27 +110,38 @@ def run_task(
                     tools=available_tools,
                     model=model,
                 )
-                for chunk in chunks:
-                    if chunk.delta:
-                        content_parts.append(chunk.delta)
-                    if chunk.thinking_delta:
-                        thinking_parts.append(chunk.thinking_delta)
-                    if chunk.tool_call_delta:
-                        tcd = chunk.tool_call_delta
-                        idx = tcd.index if tcd.index is not None else 0
-                        if idx not in tool_calls_map:
-                            tool_calls_map[idx] = {"id": "", "name": "", "args": ""}
-                        if tcd.id:
-                            tool_calls_map[idx]["id"] = tcd.id
-                        if tcd.name:
-                            tool_calls_map[idx]["name"] = tcd.name
-                        if tcd.arguments_delta:
-                            tool_calls_map[idx]["args"] += tcd.arguments_delta
-                    if chunk.usage:
-                        final_usage = chunk.usage
+                try:
+                    for chunk in chunks:
+                        if execution_context is not None and execution_context.cancelled:
+                            if hasattr(chunks, "close") and callable(getattr(chunks, "close")):
+                                chunks.close()
+                            break
+                        if chunk.delta:
+                            content_parts.append(chunk.delta)
+                        if chunk.thinking_delta:
+                            thinking_parts.append(chunk.thinking_delta)
+                        if chunk.tool_call_delta:
+                            tcd = chunk.tool_call_delta
+                            idx = tcd.index if tcd.index is not None else 0
+                            if idx not in tool_calls_map:
+                                tool_calls_map[idx] = {"id": "", "name": "", "args": ""}
+                            if tcd.id:
+                                tool_calls_map[idx]["id"] = tcd.id
+                            if tcd.name:
+                                tool_calls_map[idx]["name"] = tcd.name
+                            if tcd.arguments_delta:
+                                tool_calls_map[idx]["args"] += tcd.arguments_delta
+                        if chunk.usage:
+                            final_usage = chunk.usage
 
-                    if on_stream_chunk is not None:
-                        on_stream_chunk(chunk)
+                        if on_stream_chunk is not None:
+                            on_stream_chunk(chunk)
+                finally:
+                    if hasattr(chunks, "close") and callable(getattr(chunks, "close")):
+                        try:
+                            chunks.close()
+                        except Exception:
+                            pass
 
                 assembled_tool_call: ToolCall | None = None
                 if tool_calls_map:
@@ -285,6 +296,9 @@ def run_task(
             if execution_context is not None and execution_context.cancelled:
                 raise AgentError("tool execution cancelled")
             continue
+
+        if execution_context is not None and execution_context.cancelled:
+            raise AgentError("task execution cancelled")
 
         response_text = response.content.strip()
         if not response_text:

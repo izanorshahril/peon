@@ -1,6 +1,6 @@
 [project]
 name = "peon"
-version = "0.3.0a0"
+version = "0.3.1"
 description = "Minimal modular Python agent core"
 requires-python = ">=3.13"
 dependencies = []
@@ -11,6 +11,7 @@ tui = [
 ]
 serve = [
     "textual>=0.70,<1.0.0",
+    "textual-serve>=1.0.0",
 ]
 
 [project.scripts]

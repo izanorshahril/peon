@@ -30,6 +30,7 @@ from textual.containers import VerticalScroll
 
 from peon.agent import (
     AgentContext,
+    AgentMessage,
     ModelProvider,
     ToolCall,
     ToolExecutionContext,

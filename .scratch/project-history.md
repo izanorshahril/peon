@@ -504,15 +504,15 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Move version, commands, context, skills from pinned widget to selectable transcript. Preserve colors/spacing. System text normal default.
 - Right-click copy return focus to composer. Transcript selection high-contrast black-on-white (include blank rows).
 - Minor flicker + highlight trace deferred.
-### Ticket 06.5 review fixes & host-ownership boundary cleanup
+### Ticket 11 compatibility validation and release 0.3.1 (2026-07-23)
 
-- Fixed mypy error in `cli.py` line 760 with union type `ExtensionRegistry | FilteredToolExecutor`.
-- Fixed `app/__init__.py` stale export mapping for `ProviderConfig` (`.config` instead of `.cli`).
-- Fixed missing trailing newline in `embedded.py`.
-- Re-routed `_remove_provider` and `LogoutSuccessOutcome` in Textual to eliminate direct presentation-layer `config_store` persistence calls and redundant store re-queries.
-- Replaced duck-typed `config_store: object` in `SessionController` dispatch methods with `ProviderConfigStore` protocol type and removed `hasattr`/`getattr` guards.
-- Added characterization test for schema v1 `MessageEvent` serialization with both thinking and content.
-- All 358 tests pass, mypy clean.
+- Executed full release gates:
+  - `uv run pytest`: 368 passed in 35.07s.
+  - `uv run mypy src/peon`: 0 issues found across 28 source files.
+  - `cmd /c "git diff --check"`: 0 whitespace or formatting errors.
+  - `uv build`: Successfully built `dist/peon-0.3.1.tar.gz` and `dist/peon-0.3.1-py3-none-any.whl`.
+- Updated package version to final `0.3.1`.
+- Verified 0.2 session compatibility, schema version 1 CLI default preservation, schema version 2 event journaling, and optional extras isolation (`tui`, `serve`).
 
 ### 0.3.0 host-neutral migration
 
