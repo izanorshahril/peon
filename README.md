@@ -1,7 +1,7 @@
 # Peon
 
 Peon is a minimal modular Python coding agent with a Pi-like terminal
-experience and Tau-style architecture. It keeps provider transport, portable
+experience. It keeps provider transport, portable
 agent runtime, application policy, and executable extensions separate.
 
 ```text
@@ -94,9 +94,7 @@ thinking visibility, `Shift+Tab` for reasoning, and `Ctrl+O` for tool output.
 
 ## Scope
 
-Peon core does not own report generation, workbook schemas, image evidence,
+Peon core does not own report generation, workbook schemas,
 dashboards, RAG, fine-tuning, or autonomous self-improvement. External
 applications can expose those capabilities through extension contracts.
-
-See [.scratch/project-history.md](.scratch/project-history.md) for architecture
 decisions, completed history, remaining Pi gaps, and primary research sources.
