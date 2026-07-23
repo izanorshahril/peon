@@ -615,10 +615,13 @@ def main(
                     "Install with: pip install \"peon[tui]\" or uv add \"peon[tui]\""
                 ) from caught
 
+            active_registry = registry or ExtensionRegistry()
+            if registry is None:
+                register_filesystem_tools(active_registry)
             return (tui_runner or run_textual_tui)(
                 provider_factory=provider_factory,
                 config_store=JsonProviderConfigStore(),
-                registry=registry or ExtensionRegistry(),
+                registry=active_registry,
                 output=output,
                 error=error,
                 user_top_blank_lines=args.user_top_blank_lines,

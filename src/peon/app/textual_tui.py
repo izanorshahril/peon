@@ -37,7 +37,11 @@ from peon.agent import (
     Usage,
 )
 from peon.ai import ProviderError
-from peon.extensions import ExtensionRegistry, discover_skill_names
+from peon.extensions import (
+    ExtensionRegistry,
+    discover_skill_names,
+    register_filesystem_tools,
+)
 
 from .cli import (
     CommandError,
@@ -1282,6 +1286,8 @@ class TextualPeonApp(App[int]):
         self.config: ProviderConfig | None = None
         self.context = AgentContext()
         self.registry = registry
+        if not self.registry.tools:
+            register_filesystem_tools(self.registry)
         self.session_store = session_store or MemorySessionStore()
         if no_session:
             self.session_store = MemorySessionStore()
@@ -1981,12 +1987,14 @@ class TextualPeonApp(App[int]):
         self._write(event.error, role="system")
 
     def _on_tool_started_event(self, event: ToolStartedEvent) -> None:
+        transcript = self.query_one("#transcript", ChatMessage)
+        if event.call_id and any(b.tool_call_id == event.call_id for b in transcript._blocks):
+            return
         call = ToolCall(
             name=event.tool_name,
             arguments=event.arguments,
             call_id=event.call_id,
         )
-        transcript = self.query_one("#transcript", ChatMessage)
         transcript.append_message(
             _format_tool_call(call),
             role="tool-call",
@@ -2143,10 +2151,6 @@ class TextualPeonApp(App[int]):
             result = event.worker.result
             if isinstance(result, TurnResult):
                 self.session_usage = merge_usage(self.session_usage, result.usage)
-                if result.status == "cancelled":
-                    self._write("Task cancelled.", role="system")
-                elif result.status == "error":
-                    self._write(result.error or "task failed", role="system")
             elif isinstance(result, ToolCall):
                 self._write(
                     f"provider requested unhandled tool '{result.name}'",
@@ -3014,7 +3018,6 @@ class TextualPeonApp(App[int]):
                 self._handle_command(value)
             return
         event.input.value = ""
-        self._write(value, role="user")
         self._start_task(value)
 
     def _handle_setup_input(self, value: str) -> None:

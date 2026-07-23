@@ -7,7 +7,7 @@ __pycache__/
 .agents/
 .scratch/
 !.scratch/
-#.scratch/*
+.scratch/*
 !.scratch/project-history.md
 peon_output/
 tau_output/

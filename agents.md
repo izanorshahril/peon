@@ -1,14 +1,5 @@
 # Peon Agent Instructions
 
-## Direction
-
-- Build a focused Pi-like terminal coding agent; use Tau as Python architecture
-  reference.
-- Keep conversation primary, chrome compact, and interactions keyboard-first.
-- Read `.scratch/project-history.md` for current capabilities, completed work,
-  remaining Pi gaps, decisions, and upstream sources. Update it instead of
-  creating new scratch specs or repeating completed research.
-
 ## Boundaries
 
 - `agent`: provider-neutral messages, loop, events, execution contracts; never
