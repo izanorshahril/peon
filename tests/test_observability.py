@@ -456,3 +456,31 @@ def test_coding_session_integrates_event_journal_separate_from_canonical_history
     assert len(messages) == 2
     assert messages[0].role == "user"
     assert messages[1].role == "assistant"
+
+
+def test_serialize_schema_one_message_event_characterization() -> None:
+    from peon.agent import AgentMessage
+    from peon.app.coding_session import MessageEvent
+    from peon.app.observability import serialize_event
+
+    # 1. Message with thinking only
+    msg_thinking_only = AgentMessage(role="assistant", content="", thinking="I am thinking...")
+    event1 = MessageEvent(session_id="s1", run_id="r1", turn_id="t1", message=msg_thinking_only)
+    res1 = serialize_event(event1, schema_version=1)
+    assert res1["type"] == "thinking"
+    assert res1["content"] == "I am thinking..."
+
+    # 2. Message with both thinking and content
+    msg_both = AgentMessage(role="assistant", content="Here is the answer.", thinking="Let me reflect.")
+    event2 = MessageEvent(session_id="s1", run_id="r1", turn_id="t1", message=msg_both)
+    res2 = serialize_event(event2, schema_version=1)
+    assert res2["type"] == "thinking"
+    assert res2["content"] == "Let me reflect."
+
+    # 3. Message with content only
+    msg_content_only = AgentMessage(role="assistant", content="Direct answer.")
+    event3 = MessageEvent(session_id="s1", run_id="r1", turn_id="t1", message=msg_content_only)
+    res3 = serialize_event(event3, schema_version=1)
+    assert res3["type"] == "assistant"
+    assert res3["content"] == "Direct answer."
+

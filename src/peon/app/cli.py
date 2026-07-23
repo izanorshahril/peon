@@ -39,6 +39,7 @@ from .coding_session import (
     TurnFinishedEvent,
 )
 from .config import (
+    FilteredToolExecutor,
     UiConfig,
     filter_tool_executor,
     set_capability_profile,
@@ -753,11 +754,13 @@ def _run_print_mode(
         ),
         trace_clock=clock or time.monotonic,
     )
+    active_executor: ExtensionRegistry | FilteredToolExecutor = active_registry
     if registry is None:
         register_filesystem_tools(active_registry)
+        register_sample_tools(active_registry)
     if getattr(args, "profile", None):
         ui_config = set_capability_profile(UiConfig(), args.profile)
-        active_registry = filter_tool_executor(ui_config, active_registry)
+        active_executor = filter_tool_executor(ui_config, active_registry)
 
     def on_event(event: SessionEvent) -> None:
         if events is None:
@@ -856,7 +859,7 @@ def _run_print_mode(
             session_store=active_store,
             session_id=session_id,
             context=context,
-            executor=active_registry,
+            executor=active_executor,
             model=config.model,
             resources=resources,
             run_id=run_id,

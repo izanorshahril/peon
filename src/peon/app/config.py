@@ -100,6 +100,13 @@ CONFIG_SETTING_SPECS = (
         ("none", "low", "medium", "high"),
     ),
     ProviderSettingSpec("supports-tools", "Supports tools", "supports_tools", "toggle"),
+    ProviderSettingSpec("supports-stream", "Supports stream", "supports_stream", "toggle"),
+    ProviderSettingSpec(
+        "supports-chat-completions",
+        "Supports chat completions",
+        "supports_chat_completions",
+        "toggle",
+    ),
     ProviderSettingSpec(
         "tool-prompt-role",
         "Tool prompt role",
@@ -107,6 +114,7 @@ CONFIG_SETTING_SPECS = (
         "choice",
         ("developer", "system"),
     ),
+    ProviderSettingSpec("temperature", "Temperature", "temperature", "temperature"),
 )
 
 

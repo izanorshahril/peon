@@ -363,7 +363,7 @@ def test_coding_session_cancels_an_active_tool_turn() -> None:
         session_id=record.session_id,
         run_id="run-1",
         executor=BlockingExecutor(started),
-        id_factory=iter(("turn-1",)).__next__,
+        id_factory=iter(("turn-1", "op-1")).__next__,
         on_event=events.append,
     )
     results: list[TurnResult] = []
@@ -448,7 +448,7 @@ def test_coding_session_rejects_concurrent_prompt_with_a_correlated_error() -> N
         session_id=record.session_id,
         run_id="run-1",
         executor=BlockingExecutor(started),
-        id_factory=iter(("turn-1", "turn-2")).__next__,
+        id_factory=iter(("turn-1", "op-1", "turn-2")).__next__,
     )
     worker = Thread(target=lambda: session.prompt("Wait for the tool."))
 

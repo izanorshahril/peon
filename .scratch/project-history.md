@@ -504,7 +504,15 @@ Old scratch docs deleted (duplicate/contradict code). Permanent corrections unle
 - Move version, commands, context, skills from pinned widget to selectable transcript. Preserve colors/spacing. System text normal default.
 - Right-click copy return focus to composer. Transcript selection high-contrast black-on-white (include blank rows).
 - Minor flicker + highlight trace deferred.
-- Pass 5 focused Textual tests, 53 UI tests, 302 full tests. Mypy clean. Git diff clean.
+### Ticket 06.5 review fixes & host-ownership boundary cleanup
+
+- Fixed mypy error in `cli.py` line 760 with union type `ExtensionRegistry | FilteredToolExecutor`.
+- Fixed `app/__init__.py` stale export mapping for `ProviderConfig` (`.config` instead of `.cli`).
+- Fixed missing trailing newline in `embedded.py`.
+- Re-routed `_remove_provider` and `LogoutSuccessOutcome` in Textual to eliminate direct presentation-layer `config_store` persistence calls and redundant store re-queries.
+- Replaced duck-typed `config_store: object` in `SessionController` dispatch methods with `ProviderConfigStore` protocol type and removed `hasattr`/`getattr` guards.
+- Added characterization test for schema v1 `MessageEvent` serialization with both thinking and content.
+- All 358 tests pass, mypy clean.
 
 ### 0.3.0 host-neutral migration
 

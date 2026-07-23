@@ -55,6 +55,8 @@ from .cli import (
     update_provider_setting,
 )
 from .config import (
+    CONFIG_SETTING_SPECS,
+    PROFILE_SETTING_SPECS,
     UI_SETTING_SPECS,
     GENERAL_SETTING_SPECS,
     SHORTCUT_SETTING_SPECS,
@@ -606,33 +608,34 @@ class ChatMessage(TextArea):
         plain_text = text.plain if isinstance(text, Text) else text
         rich_text = text.copy() if isinstance(text, Text) else None
         if role == "tool" and self._blocks:
-            previous = self._blocks[-1]
-            if previous.role == "tool-call" and (
-                previous.tool_call_id is None
-                or tool_call_id is None
-                or previous.tool_call_id == tool_call_id
-            ):
-                self._blocks[-1] = _TranscriptBlock(
-                    role="tool-message",
-                    text=plain_text,
-                    call_text=previous.call_text or Text(previous.text, end=""),
-                    tool_call_id=tool_call_id or previous.tool_call_id,
-                )
-                self._refresh_blocks()
-                return
-            if previous.role == "tool-message" and (
-                previous.tool_call_id is None
-                or tool_call_id is None
-                or previous.tool_call_id == tool_call_id
-            ):
-                self._blocks[-1] = _TranscriptBlock(
-                    role="tool-message",
-                    text=plain_text,
-                    call_text=previous.call_text,
-                    tool_call_id=tool_call_id or previous.tool_call_id,
-                )
-                self._refresh_blocks()
-                return
+            for idx in range(len(self._blocks) - 1, -1, -1):
+                previous = self._blocks[idx]
+                if previous.role == "tool-call" and (
+                    previous.tool_call_id is None
+                    or tool_call_id is None
+                    or previous.tool_call_id == tool_call_id
+                ):
+                    self._blocks[idx] = _TranscriptBlock(
+                        role="tool-message",
+                        text=plain_text,
+                        call_text=previous.call_text or Text(previous.text, end=""),
+                        tool_call_id=tool_call_id or previous.tool_call_id,
+                    )
+                    self._refresh_blocks()
+                    return
+                if previous.role == "tool-message" and (
+                    previous.tool_call_id is None
+                    or tool_call_id is None
+                    or previous.tool_call_id == tool_call_id
+                ):
+                    self._blocks[idx] = _TranscriptBlock(
+                        role="tool-message",
+                        text=plain_text,
+                        call_text=previous.call_text,
+                        tool_call_id=tool_call_id or previous.tool_call_id,
+                    )
+                    self._refresh_blocks()
+                    return
         self._blocks.append(
             _TranscriptBlock(
                 role=role,
@@ -1899,13 +1902,14 @@ class TextualPeonApp(App[int]):
             self.tools_expanded
         )
 
-    def _append_runtime_message(self, message: object) -> None:
-        if hasattr(message, "role"):
-            self.persisted_message_count = len(self.context.messages)
-        if getattr(message, "role", None) == "user":
-            return
-        self._append_context_message(message)
-        self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
+    def _append_runtime_message(self, message: AgentMessage) -> None:
+        if message.role == "user":
+            self._write(message.content, role="user")
+        elif message.role == "assistant":
+            if message.thinking:
+                self._write(message.thinking, role="thinking")
+            if message.content and message.tool_call is None:
+                self._write(message.content, role="assistant")
 
     def action_confirm_quit(self) -> None:
         if isinstance(self.focused, ChatMessage) and self.focused.selected_text:
@@ -3426,11 +3430,12 @@ class TextualPeonApp(App[int]):
             )
         elif isinstance(outcome, LogoutSuccessOutcome):
             self._write(f"Removed provider: {outcome.removed_provider_name}", role="success")
-            if outcome.active_provider_name is not None and self.config_store is not None:
-                all_cfgs = self.config_store.load_all()
-                matching = [c for c in all_cfgs if c.name == outcome.active_provider_name]
-                if matching:
-                    self._activate(matching[0])
+            if outcome.active_config is not None:
+                self._activate(outcome.active_config)
+            elif outcome.active_provider_name is None:
+                self.provider = None
+                self.config = None
+                self._begin_provider_setup()
             self._set_status()
         elif isinstance(outcome, CommandErrorOutcome):
             self._write(outcome.error)
@@ -3442,15 +3447,17 @@ class TextualPeonApp(App[int]):
         if setting == "reasoning" and not reasoning_effort_choices(self.config):
             self._write("Reasoning effort is not supported by this provider.")
             return
-        spec = (
-            ProviderSettingSpec("name", "Name", "name", "text")
-            if setting == "name"
-            else next(
-                spec
-                for spec in provider_config_setting_specs(self.config)
-                if spec.key == setting
-            )
+        all_specs = (
+            *PROFILE_SETTING_SPECS,
+            *CONFIG_SETTING_SPECS,
+            *REQUEST_FIELD_SETTING_SPECS,
+            *RESPONSE_FIELD_SETTING_SPECS,
         )
+        found_spec = next((s for s in all_specs if s.key == setting), None)
+        if found_spec is None:
+            self._write(f"Unknown setting: {setting}")
+            return
+        spec = found_spec
         self.pending_config = self.config
         current = getattr(self.config, spec.field_name)
         if not value and spec.value_kind == "toggle":
@@ -3511,22 +3518,13 @@ class TextualPeonApp(App[int]):
         )
 
     def _remove_provider(self, config: ProviderConfig) -> None:
-        try:
-            self.config_store.delete(config)
-        except OSError as caught:
-            self._write(f"Could not remove provider: {caught}")
-            return
-        self._write(f"Removed provider: {config.name}")
-        if self.config is not None and provider_id(self.config) == provider_id(config):
-            remaining = self.config_store.load_all()
-            self.provider = None
-            self.config = None
-            if remaining:
-                self._activate(remaining[0])
-            else:
-                self._begin_provider_setup()
-        else:
-            self._set_status()
+        self._build_controller()
+        assert self.controller is not None
+        outcome = self.controller.dispatch_logout(
+            LogoutIntent(target=provider_id(config)),
+            config_store=self.config_store,
+        )
+        self._render_command_outcome(outcome)
 
 
 def _select_model(selection: str, models: tuple[str, ...]) -> str:

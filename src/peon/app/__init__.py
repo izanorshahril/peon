@@ -56,7 +56,7 @@ _EXPORTS = {
 	"StopReason": (".coding_session", "StopReason"),
 	"ToolsOutcome": (".session_controller", "ToolsOutcome"),
 	"TextualEventRouter": (".textual_tui", "TextualEventRouter"),
-	"ProviderConfig": (".cli", "ProviderConfig"),
+	"ProviderConfig": (".config", "ProviderConfig"),
 	"ProviderConfigStore": (".config", "ProviderConfigStore"),
 	"SessionRecord": (".sessions", "SessionRecord"),
 	"SessionStore": (".sessions", "SessionStore"),

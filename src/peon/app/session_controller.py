@@ -42,7 +42,9 @@ from .commands import (
 )
 from .config import (
     ProviderConfig,
+    ProviderConfigStore,
     SavedModel,
+    provider_id,
     saved_model_choices,
     select_saved_model,
 )
@@ -299,6 +301,7 @@ class LogoutSuccessOutcome:
 
     removed_provider_name: str
     active_provider_name: str | None
+    active_config: ProviderConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -920,14 +923,14 @@ class SessionController:
     def dispatch_model_select(
         self,
         intent: ModelSelectIntent | None = None,
-        config_store: object = None,
+        config_store: ProviderConfigStore | None = None,
     ) -> ModelOptionsOutcome | CommandErrorOutcome:
         """Select a saved model or return available model choices."""
         target = intent.target if intent is not None else None
         store_configs: tuple[ProviderConfig, ...] = ()
-        if config_store is not None and hasattr(config_store, "load_all"):
+        if config_store is not None:
             try:
-                store_configs = getattr(config_store, "load_all")()
+                store_configs = config_store.load_all()
             except OSError:
                 store_configs = ()
 
@@ -995,7 +998,7 @@ class SessionController:
     def dispatch_provider_setup(
         self,
         intent: ProviderSetupIntent | None = None,
-        config_store: object = None,
+        config_store: ProviderConfigStore | None = None,
     ) -> ProviderSetupStepOutcome:
         """Start multi-step provider connection setup."""
         del intent
@@ -1016,7 +1019,7 @@ class SessionController:
     def dispatch_settings(
         self,
         intent: SettingsIntent | None = None,
-        config_store: object = None,
+        config_store: ProviderConfigStore | None = None,
     ) -> SettingsOptionsOutcome | SettingsUpdatedOutcome | CommandErrorOutcome:
         """Inspect or change settings."""
         setting = intent.setting if intent is not None else None
@@ -1053,14 +1056,14 @@ class SessionController:
     def dispatch_logout(
         self,
         intent: LogoutIntent | None = None,
-        config_store: object = None,
+        config_store: ProviderConfigStore | None = None,
     ) -> LogoutOptionsOutcome | LogoutSuccessOutcome | CommandErrorOutcome:
         """List providers to remove or remove specified provider."""
         target = intent.target if intent is not None else None
         store_configs: tuple[ProviderConfig, ...] = ()
-        if config_store is not None and hasattr(config_store, "load_all"):
+        if config_store is not None:
             try:
-                store_configs = getattr(config_store, "load_all")()
+                store_configs = config_store.load_all()
             except OSError:
                 store_configs = ()
 
@@ -1068,21 +1071,29 @@ class SessionController:
             return CommandErrorOutcome(command="logout", error="No saved providers to remove.")
 
         if target is not None:
-            matching = [c for c in store_configs if c.name == target or target in c.models]
+            matching = [
+                c for c in store_configs
+                if provider_id(c) == target
+                or c.name == target
+                or c.model == target
+                or target in c.models
+            ]
             if not matching:
                 return CommandErrorOutcome(command="logout", error=f"Unknown provider '{target}'")
             target_config = matching[0]
-            if hasattr(config_store, "delete"):
+            if config_store is not None:
                 try:
-                    getattr(config_store, "delete")(target_config)
+                    config_store.delete(target_config)
                 except OSError as error:
                     return CommandErrorOutcome(command="logout", error=str(error))
 
-            remaining = [c for c in store_configs if c.name != target_config.name]
+            remaining = [c for c in store_configs if provider_id(c) != provider_id(target_config)]
             next_active = remaining[0].name if remaining else None
+            next_config = remaining[0] if remaining else None
             return LogoutSuccessOutcome(
                 removed_provider_name=target_config.name,
                 active_provider_name=next_active,
+                active_config=next_config,
             )
 
         token = self._id_factory()
@@ -1147,24 +1158,26 @@ class SessionController:
             if config_choice is None:
                 return CommandErrorOutcome(command="logout", error=f"Invalid provider choice '{resp_str}'")
 
-            config_store = token_data.get("config_store")
-            if config_store is not None and hasattr(config_store, "delete"):
+            config_store = cast("ProviderConfigStore | None", token_data.get("config_store"))
+            if config_store is not None:
                 try:
-                    getattr(config_store, "delete")(config_choice)
+                    config_store.delete(config_choice)
                 except OSError as error:
                     return CommandErrorOutcome(command="logout", error=str(error))
 
             remaining = [c for c in token_map.values() if c.name != config_choice.name]
             next_active = remaining[0].name if remaining else None
+            next_config = remaining[0] if remaining else None
             return LogoutSuccessOutcome(
                 removed_provider_name=config_choice.name,
                 active_provider_name=next_active,
+                active_config=next_config,
             )
 
         if flow_type == "provider_step":
             step = token_data.get("step")
             data = cast(dict[str, Any], token_data.get("data", {}))
-            config_store = token_data.get("config_store")
+            config_store = cast("ProviderConfigStore | None", token_data.get("config_store"))
             resp_str = str(intent.response).strip()
 
             if step == "provider_type":
@@ -1264,9 +1277,9 @@ class SessionController:
                     models=(model_str, "gpt-4o-mini"),
                     copilot_token=resp_str,
                 )
-                if config_store is not None and hasattr(config_store, "save"):
+                if config_store is not None:
                     try:
-                        getattr(config_store, "save")(config)
+                        config_store.save(config)
                     except OSError as err:
                         return CommandErrorOutcome(command="provider", error=str(err))
                 self._model = model_str
@@ -1293,9 +1306,9 @@ class SessionController:
                     base_url=data.get("base_url"),
                     api_key=data.get("api_key"),
                 )
-                if config_store is not None and hasattr(config_store, "save"):
+                if config_store is not None:
                     try:
-                        getattr(config_store, "save")(config)
+                        config_store.save(config)
                     except OSError as err:
                         return CommandErrorOutcome(command="provider", error=str(err))
                 self._model = model_str
